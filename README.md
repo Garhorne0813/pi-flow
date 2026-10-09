@@ -33,11 +33,12 @@ DEV_TOKEN=local-demo-token-2026 docker compose -f compose.demo.yml up --build
 - PostgreSQL 事务持久化、同 Session 单写 Run、幂等冲突检测、独立 Worker、心跳和租约；故障中的不确定操作以 FAILED 结束，禁止自动重放。
 - 持久事件日志、SSE 回放和心跳；断连不取消 Run；取消、问答、审批和 Todo。
 - 真正调用 Pi SDK，受控 ResourceLoader，无本地资源自动发现；只暴露 `remote_*` 和构建期工具，关闭默认工具/动态 Extensions/Codemode。
-- CubeSandbox 独立工作区 Volume、`/skills` RO、`/workspace` RW；按需启动、连接、重建、暂停、销毁；工作区工具执行互斥。
+- CubeSandbox 独立工作区 Volume、按 Agent 授权挂载的只读技能 Volume、`/workspace` RW；按需启动、连接、重建、暂停、销毁；工作区工具执行互斥。
 - Remote read/write/edit/bash/ls/grep/find：非 root、路径与符号链接限制、原子替换、SHA-256 编辑冲突检测、扫描与输出限制、远程命令超时。
 - 真实 Streamable HTTP MCP Client：部署配置中的 HTTPS Endpoint、工具白名单、调用前撤销检查、服务凭证与审批。
 - 独立 Session 子 Agent；能力交集、相同 Skill Bundle、深度/数量/共享步骤与 Token 预算、级联取消。
 - 请求 ID、Run/Session/Tool 事件关联、元数据审计和租户运行统计。
+- Sandbox 用户/全局活跃配额、跨 Worker 原子预留、空闲暂停/释放、手动恢复与保留 Volume 的释放；Workspace 绑定的实例快照创建/列表/删除/恢复/克隆。
 
 ## 接入真实服务
 
@@ -56,7 +57,11 @@ API 和 Worker 必须使用同一数据库、模型批准列表、Skills Bundle 
 
 LLM Gateway 当前采用 OpenAI Chat Completions 兼容协议，部署配置中的 `LLM_PROVIDER` / `LLM_MODEL_ID` 构成模型白名单；模型单次输出上限 4096。Token 预算按返回 usage 累计，是响应后检查的预算；单次响应可能超额，不是精确的预付费额度。
 
-Cube Template 必须预装 Python 3 / Bash，存在无 sudo 的执行用户，对其授予 Workspace 写权限；持久 Volume 后端、非特权配置、磁盘/CPU/内存和网络出口限制由 Cube 集群配置。Harness 不向 Sandbox 注入 UCS、模型或 MCP 凭证。Skills 发布者负责不可变 Volume；登记的 SKILL.md 在显式读取时校验 SHA-256。
+Cube Template 必须预装 Python 3 / Bash，存在无 sudo 的执行用户，对其授予 Workspace 写权限；模板不得预置共享技能或额外技能挂载，`/skills` 应为空。持久 Volume 后端、非特权配置、磁盘/CPU/内存和网络出口限制由 Cube 集群配置。Harness 不向 Sandbox 注入 UCS、模型或 MCP 凭证。Skills 发布者负责不可变 Volume；登记的 SKILL.md 在显式读取时校验 SHA-256。
+
+每个技能版本使用独立 Volume，其根目录只包含该技能的 `SKILL.md`、脚本和资源。部署 `SKILL_VOLUMES_JSON` 将 skill ID 绑定到 Bundle、完整 SKILL.md 路径和 Volume；例如 `{"review@v1":{"bundle":"default","path":"/skills/review/v1/SKILL.md","volume":"skill-review-v1"}}`。Agent 配置 `skills:["review@v1"]` 后，Sandbox 仅在 `/skills/review/v1` 只读挂载该 Volume，不挂载整个 Bundle。`skills:[]` 不挂载任何技能；缺少或不匹配的映射会拒绝创建，禁止回退到共享 Bundle Volume。`SKILL_BUNDLES_JSON` 保留为租户权限分组，其值不再作为挂载源。旧部署需要把 Bundle 文件拆成每技能 Volume 并配置新映射。
+
+共享 Workspace 切换到不同技能集合时，下一次远程工具访问会先 Kill 旧 Sandbox，再按当前 Agent 权限重建，保留 `/workspace` Volume。子 Agent 使用父子权限交集，返回父 Agent 后下一次工具调用恢复父 Agent 挂载。旧实例没有技能范围标记时也强制重建；Kill 未确认成功则停止访问。文件 API 只访问 Workspace，并使用无技能挂载。MCP 只发现 Agent `mcpServers` 指定的 Server，子 Agent 同样取权限交集；未授权的 Server/工具在审批前拒绝，已发现的 Server 被撤销或更换 Endpoint 后也拒绝调用。租户管理员的技能/MCP 登记列表属于管理面，不暴露给模型。
 
 Cube Node SDK 的 npm 包在开发时返回 404，已从官方固定 commit 构建并随工程打包。来源、构建方法和许可证见 [vendor/README.md](vendor/README.md)。不存在运行时安装 SDK 的逻辑。Pi 仍为 0.99.2；官方包仅重打包更新 shrinkwrap 中的 brace-expansion 依赖，SDK 源码未修改。Fastify / MCP SDK 锁定修复后的 5.12.5 / 1.32.1；详细来源与复现步骤同见 vendor/README.md。
 
@@ -86,9 +91,23 @@ JWT/MCP 测试使用本地 HTTPS 测试服务，需要 `openssl`；远程工具�
 - 文件 API 当前支持 UTF-8 小文件（最多 256 KiB）；不支持二进制、归档导入和对象存储 Artifact 下载。创建 Session 后才能使用文件 API。
 - 本地 Workspace/Agent/MCP/Skill 撤销在后续操作中检查；UCS JWT 的中心化即时撤销/用户组映射需接 introspection 或企业事件。Run 会检查令牌过期。
 - MCP 目前使用部署配置的服务凭证；用户委托 OAuth、Vault/KMS 与短期凭证尚未实现。
-- 不含生产备份恢复、自动闲置回收、完整孤儿 Sandbox 对账、分布式追踪、费用结算和租户容量配额。Session 分支/显式迁移 API 尚未提供。
+- 不含生产备份恢复、完整孤儿 Sandbox 对账、分布式追踪、费用结算和租户总容量配额。已实现按用户与全局限制活跃 Sandbox 和自动空闲回收；这些配额不等于真实集群容量验收。Session 分支/显式迁移 API 尚未提供。
 
 API 协议和配置示例见 [docs/api.md](docs/api.md)。
+
+## Sandbox 容量与生命周期
+
+默认每个租户内的用户（Workspace owner）最多 3 个活跃 Sandbox，整个 Harness 部署最多 100 个；协作者操作同一 Workspace 仍计入 owner 配额。创建/恢复/克隆先在共享数据库中原子预留容量，运行中、预留中和结果不确定的操作均计数，暂停实例不计数。配额覆盖同一数据库管理的实例，不包含 Cube 集群上其他应用创建的实例。`WORKER_CONCURRENCY` 仍只限制 Run 并发，不是 Sandbox 数量。API 与所有 Worker 必须使用相同配额和生命周期配置。
+
+默认空闲 900 秒暂停，累计空闲 86400 秒释放实例并保留 Workspace Volume、Session 和快照记录；每 60 秒由运行中的 Worker 扫描，实际执行时间可能延后一轮或远程调用耗时。空闲从最后一次成功激活/工具调用结束计算；有 QUEUED/RUNNING Run 或工具租约的工作区会跳过，WAITING_INPUT 不阻止空闲回收。下一次工具访问自动恢复或重建，并重新检查配额。仅部署 API 而不运行 Worker 时不会自动扫描。没有历史访问时间的旧实例从首次扫描开始计时。
+
+配置项：`SANDBOX_MAX_ACTIVE_PER_USER`、`SANDBOX_MAX_ACTIVE_TOTAL`、`SANDBOX_IDLE_PAUSE_SECONDS`、`SANDBOX_IDLE_RELEASE_SECONDS`、`SANDBOX_SWEEP_INTERVAL_SECONDS`、`SANDBOX_MAX_SNAPSHOTS_PER_WORKSPACE`（默认 20）。均为正整数；释放阈值不能小于暂停阈值。变更已有部署前，执行 `npm run migrate` 创建新的 `harness_sandbox_capacity` 表，并停掉旧版 Worker 后统一升级。启动时登记旧实例，已存在的超额实例不强制销毁，但停止新增/恢复，直到有容量。
+
+REST 提供容量/状态查询、暂停/恢复/释放，以及快照创建/列表/删除/恢复/克隆。快照管理要求 Workspace editor/owner，并拒绝有未结束 Run 的工作区；viewer 可查看自身可访问工作区的状态和快照目录。恢复按快照创建时的技能范围检查当前注册状态与部署映射，在销毁旧实例后通过快照模板创建新实例，显式覆盖技能/Workspace 挂载和网络限制。技能撤销或映射变更时拒绝恢复；禁止任意传入外部 Snapshot ID。克隆创建当前用户拥有的新 Workspace，使用独立的新 Volume，也受配额限制。
+
+实例快照的实际内存/文件系统语义取决于 Cube 后端，Harness 不把它当作持久 Volume 的备份：恢复保留当前 `/workspace` 文件，不回滚这些文件、数据库或对话历史；克隆得到独立的空 Workspace Volume，不复制原 Workspace 文件。生产数据备份需另行配置 Volume 存储后端的备份方案。Demo 快照模拟元数据与生命周期，不能替代真实 Cube 快照验收。
+
+远程创建/销毁结果不确定时保留容量预留，不按计时盲目释放，也不自动重试创建。管理员可在容量查询中看到本租户的 reserved/unknown 条目；已有明确 Sandbox ID 时可通过释放接口确认 Kill 后回收配额。创建请求丢失且没有 ID、或进程在记录 ID 前崩溃时，需要按 Cube metadata 与数据库做运维对账；完整自动孤儿对账仍未实现。已释放记录保留不计数的标记，避免并发启动时把已清理的旧实例再次登记。
 
 ## 真实 DeepSeek 测试
 
@@ -101,3 +120,13 @@ NODE_USE_ENV_PROXY=1 npm run test:deepseek
 ```
 
 该测试调用真实 DeepSeek 模型，验证 REST/SSE、幂等键、模型调用受控 read 工具、重建 Worker/Pi Session 后的历史恢复。文件工具使用内存测试夹具，不能据此声称真实 CubeSandbox 验收通过。脚本不会将密钥写入文件；仅保存无密钥结果到 `work/deepseek-live-result.json`。网络预检被拦截时不发送密钥、不冒充测试通过。单 Run 最长 120 秒，最多 12 步，单次模型输出上限 4096 tokens。
+
+扩展能力测试（同样使用 Pi 内置 provider 和真实 DeepSeek）：
+
+```bash
+npm run build
+NODE_USE_ENV_PROXY=1 npm run test:deepseek:capabilities
+# 也支持 -- --key-stdin；密钥从标准输入读取，不写入文件。
+```
+
+覆盖 Todo 创建/状态更新和 Session API 持久状态、ask_user_question 等待输入/Worker 重建/回答恢复与响应幂等、Skill 注册/显式远程读取/SHA-256 校验/摘要错误与撤销、子 Agent 独立 Session/权限交集/子任务 Todo/结果回传，以及本地真实 HTTPS Streamable HTTP MCP Server 的发现/审批/执行一次/拒绝无副作用/白名单/撤销。用户回答和审批决定由测试驱动器模拟；文件和只读 `/skills` 使用内存夹具，Store 也是内存实现，不代表真实 CubeSandbox 或数据库持久化验收。结果写入 `work/deepseek-capabilities-result.json`。每个 Run 最长 120 秒、最多 30 步、30,000 tokens；单次模型输出上限 4096 tokens。需要 `openssl`。测试失败后可加 `-- --only=skills`（或 `todo`、`askUser`、`subagent`、`mcp`）复测一项并合并先前结果，报告明确记录复测。

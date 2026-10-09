@@ -17,6 +17,10 @@
 
 Pi 工具使用显式名字 `remote_read` 等，避免与内置工具重名。ResourceLoader 返回空 Extensions/Skills 本地发现结果，远程 Skill 元数据进入受控 Prompt；内容经 remote_read 读取。Worker 不调用 Pi 的本地 read/bash 工厂。
 
+技能按 Agent `skills` 精确挂载：`SKILL_VOLUMES_JSON` 绑定每个技能版本的独立只读 Volume、Bundle 和 SKILL.md 路径，辅助资源与 SKILL.md 放在同一 Volume 根目录。Cube SDK 没有子目录挂载，因此不再挂载整包 Volume。Sandbox 持久记录技能集合摘要；工具访问切换集合时先确认旧实例 Kill 成功，再重建实例并保留 Workspace Volume。空列表不挂载技能，旧实例缺少摘要时强制重建。重复/重叠挂载目录、共享技能 Volume、Workspace 与技能 Volume 指向同一实际卷均拒绝。发布者必须保证 Volume 只包含该技能且不可变，模板 `/skills` 为空，无其他技能挂载。
+
+MCP 发现只遍历当前 Agent 的 Server 列表；调用与审批前再次检查工具映射、Server 授权、实时撤销和 Endpoint 一致性。子 Agent 的 skills、MCP 和工具权限取父子交集。管理面目录不属于模型的可见工具集合。
+
 会话采用 Pi 的完整 `FileEntry[]`（Header + 规范 Session Entries），包括工具结果和 compaction entry。每条完成消息、turn 结束与 Run finally 都写入数据库。无法保存的中间响应不伪装为完整恢复；Worker 租约失效时 RUNNING → FAILED，错误码 `WORKER_LOST_UNKNOWN_TOOL_OUTCOME`。
 
 ## 运行与交互状态
@@ -40,6 +44,7 @@ Pi 工具使用显式名字 `remote_read` 等，避免与内置工具重名。Re
 - Worker 故障不重放、Run 取消、SSE 终态事件与游标回放。
 - 真实 Pi 0.99.2 对接本地模拟网关：只有 remote_read，规范 Session Entries 恢复后含原工具结果。
 - 真实 MCP SDK 对接本地 HTTPS Streamable HTTP Server：筛选工具、认证头与实时撤销。
+- Agent 技能挂载计划（Cube SDK 调用替身）、不同 Session/父子 Agent 切换技能范围、工作区保留、旧实例替换、Kill 失败拒绝访问；未授权 MCP Server 不被访问、不被发现、不可调用或申请审批。
 - 真实 UCS JWT/JWKS HTTPS 验证：签名、issuer/audience/expiry/tenant。
 - 真实 PostgreSQL 17：多个客户端并发序列化、事务回滚、关闭连接后持久数据读取。
 - 可信远程 Python 适配代码：路径/符号链接拒绝、只读 Skills 写入路径拒绝、编辑哈希冲突、超时。
@@ -56,6 +61,10 @@ Pi 工具使用显式名字 `remote_read` 等，避免与内置工具重名。Re
 6. 预期容量、限流、压测、故障演练、审计/历史/事件保留策略、数据库与 Volume 的独立备份恢复。
 
 ## 数据与运维
+
+Sandbox 容量保存在单独的 `harness_sandbox_capacity` JSONB 行，PostgreSQL 行锁将各租户、各 API/Worker 的容量预留串行化。用户配额计入 Workspace owner（Tenant + subject），global 配额包含所有共享此数据库的已管理实例。reserved/unknown 持续占用，只有确认暂停或释放后退还；released 标记阻止旧实例启动登记与删除之间的竞态。远程未知结果不自动重放或按时间释放，完整孤儿对账仍需运维接入。
+
+Worker 定期扫描空闲工作区，并通过同一 Workspace 工具租约再次检查最后访问时间与 QUEUED/RUNNING Run。暂停保留实例；释放只 Kill 实例，不删除 Volume/Session/登记快照。快照创建/列表/删除/恢复/克隆加入 Workspace ACL 和审计。恢复/克隆用 SDK 快照模板显式重建网络与挂载，检查快照的技能范围与当前注册/部署映射；克隆不复用原 Workspace Volume。快照不是外置 Volume 或 PostgreSQL 的备份。真实 Cube 暂停/恢复、快照语义与跨节点行为仍需集群验收。
 
 `migrations/001_initial.sql` 可重复执行。首版有一张 `harness_tenants` 表，整个租户状态作为事务聚合。所有 API/Worker 操作从可信身份选择 Tenant，使用参数化 SQL；租户行锁保证多实例一致性。这是明确的容量折中，不宣称等价于附件中的完整关系表设计。
 

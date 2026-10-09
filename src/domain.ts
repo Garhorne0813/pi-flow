@@ -64,6 +64,11 @@ export type Workspace = {
   members: Record<string, "owner" | "editor" | "viewer">;
   volumeId?: string;
   sandboxId?: string;
+  sandboxSkillScope?: string;
+  sandboxState?: "active" | "paused" | "unknown";
+  sandboxLastUsedAt?: number;
+  sandboxSnapshots?: Record<string, SandboxSnapshot>;
+  sandboxSkills?: string[];
   bundle?: string;
   lock?: { owner: string; expires: number };
   deleting?: boolean;
@@ -74,6 +79,15 @@ export type Session = {
   agentVersionId: string;
   entries: unknown[];
   createdAt: string;
+};
+export type SandboxSnapshot = {
+  id: string;
+  name?: string;
+  createdAt: string;
+  sandboxId: string;
+  skillScope: string;
+  bundle: string;
+  skills: string[];
 };
 export type RunState =
   | "QUEUED"

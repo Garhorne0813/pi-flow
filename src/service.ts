@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { skillScope } from "./adapters/skill-mounts.js";
 import {
   Fault,
   id,
@@ -123,6 +124,10 @@ export class HarnessService {
         if (!sk?.enabled || sk.bundle !== config.skillBundle)
           throw new Fault(400, "INVALID_SKILL");
       }
+      skillScope(
+        config.skillBundle,
+        config.skills.map((key) => s.skills[key]!),
+      );
       for (const key of config.mcpServers)
         if (
           !s.mcp[key]?.enabled ||

@@ -147,6 +147,10 @@ Skills 登记（不会上传或执行文件）：
 }
 ```
 
+Skill 登记只保存元数据。生产部署必须在 `SKILL_VOLUMES_JSON` 为该 ID 配置一致的 Bundle 和路径；每个技能版本独占一个预发布 Volume，根目录存放 `SKILL.md` 和辅助文件。只有 Agent 的 `skills` 列表对应的 Volume 会被只读挂载到各自 SKILL.md 的父目录。Bundle 是租户授权分组，不是整包挂载源。重复或相互包含的挂载路径会在发布 Agent 时拒绝。空列表不挂载技能。
+
+MCP 只发现该 Agent 的 `mcpServers` 列表；其他 Server 不出现在模型工具列表中，猜测工具名也不能调用或申请审批。子 Agent 使用父子 Server/技能列表的交集。管理 API 的注册目录仅供管理员管理，不作为 Agent 的工具发现目录。
+
 MCP 登记：
 
 ```json
@@ -158,6 +162,29 @@ MCP 登记：
 ```
 
 `endpointRef` 必须存在于部署的 `MCP_ENDPOINTS_JSON`；不允许传入 transport、stdio command、OAuth Token 或 URL。
+
+## Sandbox 生命周期与快照
+
+下列路径均带 `/api/v1` 前缀；操作仍检查 Tenant 和 Workspace ACL，viewer 只能查询。实例创建仍按工具访问触发。
+
+| 方法   | 路径                                                      | 行为                                                                  |
+| ------ | --------------------------------------------------------- | --------------------------------------------------------------------- |
+| GET    | `/sandbox-capacity`                                       | 用户/全局活跃使用量与部署策略；管理员额外看到本租户的不确定条目       |
+| GET    | `/workspaces/{id}/sandbox`                                | 已记录的实例状态、最后使用时间与快照数量，不连接或唤醒实例            |
+| POST   | `/workspaces/{id}/sandbox/pause`                          | 暂停，确认后释放活跃配额                                              |
+| POST   | `/workspaces/{id}/sandbox/resume`                         | 检查配额后恢复/重建；不接受模型指定的技能/Volume                      |
+| DELETE | `/workspaces/{id}/sandbox`                                | 释放实例，保留 Workspace Volume、Session 和快照                       |
+| GET    | `/workspaces/{id}/sandbox/snapshots`                      | 只列出登记在当前 Workspace 的快照                                     |
+| POST   | `/workspaces/{id}/sandbox/snapshots`                      | 创建，body 为 `{ "name": "checkpoint" }`，name 可省略                 |
+| DELETE | `/workspaces/{id}/sandbox/snapshots/{snapshotId}`         | 删除当前 Workspace 的快照                                             |
+| POST   | `/workspaces/{id}/sandbox/snapshots/{snapshotId}/restore` | 按当前技能授权检查快照，通过快照模板重建实例                          |
+| POST   | `/workspaces/{id}/sandbox/snapshots/{snapshotId}/clone`   | body 为 `{ "name": "new workspace" }`；返回新 Workspace ID 与实例状态 |
+
+快照管理/恢复/克隆不允许有未结束 Run；手动暂停/释放与空闲回收不允许 QUEUED/RUNNING Run 或正在使用的工具租约，WAITING_INPUT 可以暂停。恢复保留当前持久 Volume，不回滚工作区文件或 Session 历史。克隆分配独立的空 Workspace Volume。原 Workspace 删除时清理其实例、登记快照与 Volume。
+
+活跃配额默认 owner 每租户 3 个、部署全局 100 个，包含预留/未知结果，暂停不计。默认空闲 15 分钟暂停、24 小时释放，Worker 每分钟扫描一次；参数见 `.env.example`。容量统计不暴露其他租户的 Workspace 或用户 ID。
+
+配额超限返回 `USER_SANDBOX_LIMIT` / `GLOBAL_SANDBOX_LIMIT` (429)；快照数超限为 `SNAPSHOT_LIMIT` (429)。另有 `ACTIVE_RUNS` / `SANDBOX_OUTCOME_UNKNOWN` / `SANDBOX_NOT_CREATED` / `SNAPSHOT_SKILL_SCOPE_MISMATCH` (409)、`SNAPSHOT_NOT_FOUND` (404)、`SKILL_DENIED` / `BUNDLE_NOT_GRANTED` (403)。结果不确定的实例必须确认远端释放后才能退还容量；没有 ID 时需要运维对账。
 
 ## 常用错误码
 

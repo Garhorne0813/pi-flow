@@ -49,13 +49,18 @@ export class MCPManager {
     config: AgentConfig,
   ): Promise<{
     specs: ToolSpec[];
+    authorize: (name: string) => Promise<void>;
     call: (
       name: string,
       args: Record<string, unknown>,
       signal: AbortSignal,
     ) => Promise<unknown>;
   }> {
-    const mapping = new Map<string, { server: string; tool: string }>();
+    const allowedServers = new Set(config.mcpServers);
+    const mapping = new Map<
+      string,
+      { server: string; tool: string; endpointRef: string }
+    >();
     const specs: ToolSpec[] = [];
     for (const server of config.mcpServers) {
       const reg = await this.store.tx(a.tenantId, (s) => s.mcp[server]);
@@ -85,7 +90,11 @@ export class MCPManager {
               mapping.has(name)
             )
               throw new Fault(400, "MCP_TOOL_NAME_INVALID");
-            mapping.set(name, { server, tool: t.name });
+            mapping.set(name, {
+              server,
+              tool: t.name,
+              endpointRef: reg.endpointRef,
+            });
             specs.push({
               name,
               description: t.description ?? t.name,
@@ -99,20 +108,32 @@ export class MCPManager {
         await c.close();
       }
     }
+    const authorized = async (name: string) => {
+      const m = mapping.get(name);
+      if (!m || !allowedServers.has(m.server))
+        throw new Fault(403, "MCP_TOOL_DENIED");
+      const reg = await this.store.tx(a.tenantId, (s) => s.mcp[m.server]);
+      if (
+        !reg?.enabled ||
+        reg.endpointRef !== m.endpointRef ||
+        !reg.allowedTools.includes(m.tool)
+      )
+        throw new Fault(403, "MCP_REVOKED");
+      if (
+        this.grants &&
+        (!Object.hasOwn(this.grants, a.tenantId) ||
+          !this.grants[a.tenantId]?.endpoints.includes(reg.endpointRef))
+      )
+        throw new Fault(403, "MCP_ENDPOINT_NOT_GRANTED");
+      return { m, reg };
+    };
     return {
       specs,
+      authorize: async (name) => {
+        await authorized(name);
+      },
       call: async (name, args, signal) => {
-        const m = mapping.get(name);
-        if (!m) throw new Fault(403, "MCP_TOOL_DENIED");
-        const reg = await this.store.tx(a.tenantId, (s) => s.mcp[m.server]);
-        if (!reg?.enabled || !reg.allowedTools.includes(m.tool))
-          throw new Fault(403, "MCP_REVOKED");
-        if (
-          this.grants &&
-          (!Object.hasOwn(this.grants, a.tenantId) ||
-            !this.grants[a.tenantId]?.endpoints.includes(reg.endpointRef))
-        )
-          throw new Fault(403, "MCP_ENDPOINT_NOT_GRANTED");
+        const { m, reg } = await authorized(name);
         const c = await this.client(reg);
         try {
           return await c.callTool(

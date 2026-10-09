@@ -41,9 +41,16 @@ test("real Streamable HTTP MCP uses trusted HTTPS endpoint, filters tools and ch
   setDefaultCACertificates([...oldRoots, cert]);
   const sessions: Server[] = [];
   let invocations = 0;
+  let hiddenRequests = 0;
   const server = createServer(
     { key: await readFile("work/mcp-tls/key.pem"), cert },
     async (req, res) => {
+      if (req.url === "/hidden") {
+        hiddenRequests++;
+        res.writeHead(500);
+        res.end();
+        return;
+      }
       assert.equal(req.headers.authorization, "Bearer local-test-only");
       const s = new Server(
         { name: "test-mcp", version: "1" },
@@ -102,11 +109,21 @@ test("real Streamable HTTP MCP uses trusted HTTPS endpoint, filters tools and ch
       allowedTools: ["search"],
       enabled: true,
     };
+    s.mcp.hidden = {
+      id: "hidden",
+      endpointRef: "private",
+      allowedTools: ["search"],
+      enabled: true,
+    };
   });
   try {
     const mgr = new MCPManager(store, {
       trusted: {
         url: `https://localhost:${port}/mcp`,
+        tokenEnv: "MCP_TEST_TOKEN",
+      },
+      private: {
+        url: `https://localhost:${port}/hidden`,
         tokenEnv: "MCP_TEST_TOKEN",
       },
     });
@@ -119,6 +136,7 @@ test("real Streamable HTTP MCP uses trusted HTTPS endpoint, filters tools and ch
       skillBundle: "default",
     });
     const load = await mgr.discover(a, config);
+    assert.equal(hiddenRequests, 0);
     assert.deepEqual(
       load.specs.map((x) => x.name),
       ["mcp_kb_search"],
@@ -132,6 +150,34 @@ test("real Streamable HTTP MCP uses trusted HTTPS endpoint, filters tools and ch
       { type: "text", text: "found hello" },
     ]);
     assert.equal(invocations, 1);
+    await assert.rejects(load.authorize("mcp_hidden_search"), {
+      code: "MCP_TOOL_DENIED",
+    });
+    await assert.rejects(
+      load.call("mcp_hidden_search", {}, new AbortController().signal),
+      { code: "MCP_TOOL_DENIED" },
+    );
+    const empty = await mgr.discover(
+      a,
+      AgentConfig.parse({ ...config, mcpServers: [] }),
+    );
+    assert.deepEqual(empty.specs, []);
+    await assert.rejects(
+      empty.call("mcp_kb_search", {}, new AbortController().signal),
+      { code: "MCP_TOOL_DENIED" },
+    );
+    assert.equal(hiddenRequests, 0);
+    await store.tx("one", (s) => {
+      s.mcp.kb!.endpointRef = "private";
+    });
+    await assert.rejects(
+      load.call("mcp_kb_search", {}, new AbortController().signal),
+      { code: "MCP_REVOKED" },
+    );
+    assert.equal(hiddenRequests, 0);
+    await store.tx("one", (s) => {
+      s.mcp.kb!.endpointRef = "trusted";
+    });
     await assert.rejects(
       load.call("mcp_kb_delete", {}, new AbortController().signal),
       { code: "MCP_TOOL_DENIED" },

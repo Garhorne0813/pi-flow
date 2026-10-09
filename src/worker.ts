@@ -18,6 +18,7 @@ export class Worker {
   private stopping = false;
   private active = new Set<Promise<void>>();
   private controllers = new Set<AbortController>();
+  private maintenance?: Promise<unknown>;
   constructor(
     private service: HarnessService,
     private runtime: Runtime,
@@ -26,6 +27,13 @@ export class Worker {
     private concurrency = 4,
   ) {}
   async tick() {
+    if (!this.maintenance) {
+      const task = this.sandbox.sweepIfDue().catch(() => {});
+      this.maintenance = task;
+      void task.finally(() => {
+        if (this.maintenance === task) this.maintenance = undefined;
+      });
+    }
     for (const tenant of await this.service.store.tenants()) {
       if (this.active.size >= this.concurrency) break;
       const r = await this.service.store.tx(tenant, (s) => {
@@ -68,11 +76,13 @@ export class Worker {
       await new Promise((r) => setTimeout(r, 250));
     }
     await Promise.all(this.active);
+    await this.maintenance;
   }
   async stop() {
     this.stopping = true;
     for (const c of this.controllers) c.abort();
     await Promise.all(this.active);
+    await this.maintenance;
   }
   private owned(s: State, rid: string) {
     const r = s.runs[rid];
@@ -149,6 +159,7 @@ export class Worker {
         args: Record<string, unknown>,
         signal: AbortSignal,
       ) => Promise<unknown>,
+      mcpAuthorize: (name: string) => Promise<void>,
       approved = false,
     ): Promise<unknown> => {
       controller.signal.throwIfAborted();
@@ -160,6 +171,7 @@ export class Worker {
       )
         throw new Fault(403, "TOOL_DENIED");
       if (!mcpTool) args = argumentsSchemas[bare]!.parse(args);
+      else await mcpAuthorize(name);
       if (!approved && (mcpTool || ["write", "edit", "bash"].includes(bare)))
         return defer("approval", { name, args });
       const callId = id();
@@ -221,6 +233,7 @@ export class Worker {
             bare,
             args,
             controller.signal,
+            config.skills,
           );
           if (bare === "read") {
             const fresh = await get();
@@ -262,6 +275,7 @@ export class Worker {
             ctx.config,
             ctx.ses.workspaceId,
             mcp.call,
+            mcp.authorize,
             true,
           );
           prompt += `\nApproved operation completed: ${JSON.stringify(result)}`;
@@ -283,6 +297,7 @@ export class Worker {
             fresh.config,
             fresh.ses.workspaceId,
             mcp.call,
+            mcp.authorize,
           );
         },
         emit,

@@ -221,6 +221,19 @@ test("unknown tool and model supplied sandbox identifiers are rejected", async (
   assert.equal((await drain(f, r.id)).state, "FAILED");
   assert.equal(f.provider.boxes.size, 0);
 });
+test("forged unowned MCP tool is rejected before creating approval or executing a server", async () => {
+  const f = await fixture({
+    execute: async (c) => {
+      await c.call("mcp_hidden_search", { query: "secret" });
+    },
+  });
+  const r = await f.service.submit(alice, f.ses.id, "forge");
+  assert.equal((await drain(f, r.id)).error, "MCP_TOOL_DENIED");
+  assert.deepEqual(
+    await f.store.tx("one", (s) => Object.values(s.interactions)),
+    [],
+  );
+});
 test("Cube lifecycle adapter preserves a workspace volume across sandbox destruction", async () => {
   const f = await fixture();
   await f.sandbox.execute(alice, f.w.id, "a", "default", "write", {

@@ -16,7 +16,8 @@
     "migrate": "tsx src/migrate.ts",
     "smoke": "node scripts/smoke-demo.mjs",
     "format": "prettier --write src test scripts",
-    "test:deepseek": "node scripts/smoke-deepseek.mjs"
+    "test:deepseek": "node scripts/smoke-deepseek.mjs",
+    "test:deepseek:capabilities": "node scripts/smoke-deepseek-capabilities.mjs"
   },
   "dependencies": {
     "@cubesandbox/sdk": "file:vendor/cubesandbox-sdk-0.3.0.tgz",
