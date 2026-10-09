@@ -63,7 +63,7 @@ export class MCPManager {
     >();
     const specs: ToolSpec[] = [];
     for (const server of config.mcpServers) {
-      const reg = await this.store.tx(a.tenantId, (s) => s.mcp[server]);
+      const reg = await this.store.read(a.tenantId, (s) => s.mcp[server]);
       if (!reg?.enabled) throw new Fault(403, "MCP_DISABLED");
       if (
         this.grants &&
@@ -112,7 +112,7 @@ export class MCPManager {
       const m = mapping.get(name);
       if (!m || !allowedServers.has(m.server))
         throw new Fault(403, "MCP_TOOL_DENIED");
-      const reg = await this.store.tx(a.tenantId, (s) => s.mcp[m.server]);
+      const reg = await this.store.read(a.tenantId, (s) => s.mcp[m.server]);
       if (
         !reg?.enabled ||
         reg.endpointRef !== m.endpointRef ||

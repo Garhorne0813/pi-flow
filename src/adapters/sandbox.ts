@@ -1,3 +1,4 @@
+import { posix } from "node:path";
 import {
   Sandbox,
   Volume,
@@ -157,7 +158,14 @@ export class CubeProvider implements SandboxProvider {
       cwd: "/workspace",
       timeoutMs: 130000,
     });
-    if (result.exitCode !== 0) throw new Fault(502, "REMOTE_TOOL_FAILED");
+    if (result.exitCode !== 0) {
+      for (const code of [
+        "SKILL_DIGEST_MISMATCH",
+        "SKILL_IDENTITY_UNCONFIRMED",
+      ])
+        if (result.stderr.includes(code)) throw new Fault(409, code);
+      throw new Fault(502, "REMOTE_TOOL_FAILED");
+    }
     try {
       return JSON.parse(result.stdout);
     } catch {
@@ -244,7 +252,14 @@ export class DemoSandbox implements SandboxProvider {
     }
     if (op === "read") {
       if (!files.has(p)) throw new Fault(404, "FILE_NOT_FOUND");
-      return { text: files.get(p) };
+      const text = files.get(p)!;
+      return Array.isArray(a._skillManifests) && a._skillManifests.length
+        ? {
+            path: p,
+            text,
+            sha256: createHash("sha256").update(text).digest("hex"),
+          }
+        : { text };
     }
     if (op === "ls" || op === "find") return { entries: [...files.keys()] };
     throw new Fault(501, "DEMO_TOOL_UNSUPPORTED");
@@ -310,7 +325,7 @@ export class SandboxManager {
         return sk;
       });
       const scope = this.provider.scope(bundle, skills);
-      w.lock = { owner, expires: Date.now() + 180000 };
+      w.lock = { owner, expires: Date.now() + 180000, kind: "agent" };
       w.bundle = bundle;
       return { skills, scope };
     });
@@ -331,7 +346,7 @@ export class SandboxManager {
         });
     }, 10000);
     try {
-      const w = await this.store.tx(a.tenantId, (s) => workspace(s, a, wid));
+      const w = await this.store.read(a.tenantId, (s) => workspace(s, a, wid));
       let vid = w.volumeId;
       if (!vid) {
         vid = await this.provider.createVolume(`ws-${wid}`);
@@ -442,7 +457,18 @@ export class SandboxManager {
         };
         signal?.addEventListener("abort", stop, { once: true });
         try {
-          const r = await this.provider.execute(sid, op, args);
+          const skills = await this.store.read(a.tenantId, (s) =>
+            skillIds.map((id) => {
+              const skill = s.skills[id];
+              if (!skill?.enabled || skill.bundle !== bundle)
+                throw new Fault(403, "SKILL_DENIED");
+              return { path: skill.path, digest: skill.digest };
+            }),
+          );
+          const r = await this.provider.execute(sid, op, {
+            ...args,
+            _skillManifests: skills,
+          });
           signal?.throwIfAborted();
           return r;
         } finally {
@@ -473,6 +499,135 @@ export class SandboxManager {
       skillIds,
     );
   }
+  // File APIs use a temporary instance with only the workspace volume. Its
+  // capacity entry survives failed cleanup, while the Agent instance is untouched.
+  async executeFile(
+    a: Actor,
+    wid: string,
+    owner: string,
+    op: "read" | "ls" | "write",
+    args: Record<string, unknown>,
+  ) {
+    owner = `${owner}:${crypto.randomUUID()}`;
+    if (!["read", "ls", "write"].includes(op))
+      throw new Fault(403, "TOOL_DENIED");
+    const raw = args.path ?? "/workspace";
+    if (typeof raw !== "string" || raw.includes("\0"))
+      throw new Fault(403, "PATH_DENIED");
+    const path = posix.resolve("/workspace", raw);
+    if (path !== "/workspace" && !path.startsWith("/workspace/"))
+      throw new Fault(403, "PATH_DENIED");
+    const writing = op === "write";
+    const w = await this.store.tx(a.tenantId, (s) => {
+      const w = workspace(s, a, wid, writing);
+      if (!w.bundle) throw new Fault(409, "CREATE_SESSION_FIRST");
+      if (!this.canUseBundle(w.bundle, a.tenantId))
+        throw new Fault(403, "BUNDLE_NOT_GRANTED");
+      if (w.fileLock && w.fileLock.expires > Date.now())
+        throw new Fault(409, "WORKSPACE_BUSY");
+      // Readers can run beside Agent tools; volume creation and writes serialize.
+      if (
+        w.lock &&
+        w.lock.expires > Date.now() &&
+        (writing || !w.volumeId || w.lock.kind !== "agent")
+      )
+        throw new Fault(409, "WORKSPACE_BUSY");
+      w.fileLock = { owner, expires: Date.now() + 180000 };
+      if (writing || !w.volumeId)
+        w.lock = { owner, expires: Date.now() + 180000, kind: "files" };
+      return w;
+    });
+    const capacityId = wid + ":files";
+    let sid: string | undefined,
+      reserved = false,
+      lost = false;
+    const heartbeat = setInterval(() => {
+      void this.store
+        .tx(a.tenantId, (s) => {
+          const current = workspace(s, a, wid, writing);
+          if (current.fileLock?.owner !== owner)
+            throw new Fault(409, "LEASE_LOST");
+          current.fileLock.expires = Date.now() + 180000;
+          if (current.lock?.owner === owner)
+            current.lock.expires = Date.now() + 180000;
+        })
+        .catch(() => {
+          lost = true;
+        });
+    }, 10000);
+    try {
+      const old = await this.capacity.get(a.tenantId, capacityId);
+      if (old) {
+        if (!old.sandboxId) throw new Fault(409, "SANDBOX_OUTCOME_UNKNOWN");
+        await this.provider.kill(old.sandboxId);
+        await this.capacity.released(a.tenantId, capacityId);
+      }
+      let volume = w.volumeId;
+      if (!volume) {
+        volume = await this.provider.createVolume(`ws-${wid}`);
+        await this.store.tx(a.tenantId, (s) => {
+          const current = workspace(s, a, wid, writing);
+          if (
+            current.fileLock?.owner !== owner ||
+            current.lock?.owner !== owner
+          )
+            throw new Fault(409, "LEASE_LOST");
+          current.volumeId = volume;
+          if (!writing) delete current.lock;
+        });
+      }
+      await this.capacity.reserve(
+        a.tenantId,
+        {
+          id: capacityId,
+          ownerId: w.ownerId,
+          name: w.name,
+          members: w.members,
+        },
+        owner,
+      );
+      reserved = true;
+      sid = await this.provider.create(volume, w.bundle!, []);
+      await this.capacity.pending(a.tenantId, capacityId, owner, sid);
+      await this.capacity.active(a.tenantId, capacityId, owner, sid);
+      if (lost) throw new Fault(409, "LEASE_LOST");
+      await this.store.read(a.tenantId, (s) => workspace(s, a, wid, writing));
+      const result = await this.provider.execute(sid, op, {
+        ...args,
+        path,
+        _workspaceOnly: true,
+        _skillManifests: [],
+      });
+      if (lost) throw new Fault(409, "LEASE_LOST");
+      return result;
+    } finally {
+      clearInterval(heartbeat);
+      try {
+        if (reserved) {
+          if (sid) {
+            try {
+              await this.provider.kill(sid);
+              await this.capacity.released(a.tenantId, capacityId);
+            } catch {
+              await this.capacity.unknown(
+                a.tenantId,
+                capacityId,
+                undefined,
+                sid,
+              );
+              throw new Fault(502, "FILE_SANDBOX_CLEANUP_UNCONFIRMED");
+            }
+          } else await this.capacity.unknown(a.tenantId, capacityId, owner);
+        }
+      } finally {
+        await this.store.tx(a.tenantId, (s) => {
+          const current = s.workspaces[wid];
+          if (current?.fileLock?.owner === owner) delete current.fileLock;
+          if (current?.lock?.owner === owner) delete current.lock;
+        });
+      }
+    }
+  }
   private async managed<T>(
     a: Actor,
     wid: string,
@@ -484,7 +639,10 @@ export class SandboxManager {
     const owner = crypto.randomUUID();
     const w = await this.store.tx(a.tenantId, (s) => {
       const w = workspace(s, a, wid, true);
-      if (w.lock && w.lock.expires > Date.now())
+      if (
+        (w.lock && w.lock.expires > Date.now()) ||
+        (w.fileLock && w.fileLock.expires > Date.now())
+      )
         throw new Fault(409, "WORKSPACE_BUSY");
       if (
         options.cutoff !== undefined &&
@@ -501,7 +659,7 @@ export class SandboxManager {
         )
       )
         throw new Fault(409, "ACTIVE_RUNS");
-      w.lock = { owner, expires: Date.now() + 180000 };
+      w.lock = { owner, expires: Date.now() + 180000, kind: "lifecycle" };
       return w;
     });
     let lost = false;
@@ -613,7 +771,7 @@ export class SandboxManager {
     );
   }
   async resume(a: Actor, wid: string) {
-    const w = await this.store.tx(a.tenantId, (s) =>
+    const w = await this.store.read(a.tenantId, (s) =>
       workspace(s, a, wid, true),
     );
     if (!w.bundle) throw new Fault(409, "CREATE_SESSION_FIRST");
@@ -629,7 +787,7 @@ export class SandboxManager {
     return this.status(a, wid);
   }
   async status(a: Actor, wid: string) {
-    return this.store.tx(a.tenantId, (s) => {
+    return this.store.read(a.tenantId, (s) => {
       const w = workspace(s, a, wid);
       return {
         state: w.sandboxId
@@ -650,7 +808,7 @@ export class SandboxManager {
     const result = { paused: 0, released: 0, failed: 0 };
     await this.capacity.adoptLegacy();
     for (const tenantId of await this.store.tenants()) {
-      const candidates = await this.store.tx(tenantId, (s) =>
+      const candidates = await this.store.read(tenantId, (s) =>
         Object.values(s.workspaces).filter((w) => w.sandboxId && !w.deleting),
       );
       for (const w of candidates) {
@@ -708,14 +866,14 @@ export class SandboxManager {
     return result;
   }
   async listSnapshots(a: Actor, wid: string) {
-    return this.store.tx(a.tenantId, (s) => ({
+    return this.store.read(a.tenantId, (s) => ({
       items: Object.values(workspace(s, a, wid).sandboxSnapshots ?? {}),
     }));
   }
   private async snapshotSelection(a: Actor, snapshot: SandboxSnapshot) {
     if (!this.canUseBundle(snapshot.bundle, a.tenantId))
       throw new Fault(403, "BUNDLE_NOT_GRANTED");
-    const skills = await this.store.tx(a.tenantId, (s) =>
+    const skills = await this.store.read(a.tenantId, (s) =>
       snapshot.skills.map((id) => {
         const skill = s.skills[id];
         if (!skill?.enabled || skill.bundle !== snapshot.bundle)
@@ -907,7 +1065,10 @@ export class SandboxManager {
     await this.capacity.adoptLegacy();
     const w = await this.store.tx(a.tenantId, (s) => {
       const w = workspace(s, a, wid, true);
-      if (w.lock && w.lock.expires > Date.now())
+      if (
+        (w.lock && w.lock.expires > Date.now()) ||
+        (w.fileLock && w.fileLock.expires > Date.now())
+      )
         throw new Fault(409, "WORKSPACE_BUSY");
       if (
         Object.values(s.runs).some(
@@ -918,7 +1079,11 @@ export class SandboxManager {
       )
         throw new Fault(409, "ACTIVE_RUNS");
       w.deleting = true;
-      w.lock = { owner: crypto.randomUUID(), expires: Date.now() + 180000 };
+      w.lock = {
+        owner: crypto.randomUUID(),
+        expires: Date.now() + 180000,
+        kind: "lifecycle",
+      };
       return w;
     });
     let killed = false;
@@ -946,6 +1111,12 @@ export class SandboxManager {
         await this.store.tx(a.tenantId, (s) => {
           delete s.workspaces[wid]!.sandboxSnapshots![snapshot.id];
         });
+      }
+      const files = await this.capacity.get(a.tenantId, wid + ":files");
+      if (files) {
+        if (!files.sandboxId) throw new Fault(409, "SANDBOX_OUTCOME_UNKNOWN");
+        await this.provider.kill(files.sandboxId);
+        await this.capacity.released(a.tenantId, wid + ":files");
       }
       if (w.volumeId) await this.provider.destroyVolume(w.volumeId);
       await this.store.tx(a.tenantId, (s) => {

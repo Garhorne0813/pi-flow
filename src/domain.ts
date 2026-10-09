@@ -70,7 +70,12 @@ export type Workspace = {
   sandboxSnapshots?: Record<string, SandboxSnapshot>;
   sandboxSkills?: string[];
   bundle?: string;
-  lock?: { owner: string; expires: number };
+  lock?: {
+    owner: string;
+    expires: number;
+    kind?: "agent" | "files" | "lifecycle";
+  };
+  fileLock?: { owner: string; expires: number };
   deleting?: boolean;
 };
 export type Session = {

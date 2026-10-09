@@ -94,7 +94,7 @@ export function buildAPI(
   app.get("/api/v1/agents", async (req) => {
     const a = actor(req),
       p = page.parse(req.query);
-    return service.store.tx(a.tenantId, (s) => ({
+    return service.store.read(a.tenantId, (s) => ({
       items: Object.values(s.agents)
         .filter((v) => agentAllowed(v, a))
         .slice(p.offset, p.offset + p.limit),
@@ -107,7 +107,7 @@ export function buildAPI(
     const a = actor(req);
     admin(a);
     const p = page.parse(req.query);
-    return service.store.tx(a.tenantId, (s) => ({
+    return service.store.read(a.tenantId, (s) => ({
       items: Object.values(s.agents).slice(p.offset, p.offset + p.limit),
     }));
   });
@@ -142,7 +142,7 @@ export function buildAPI(
     const a = actor(req);
     admin(a);
     const p = page.parse(req.query);
-    return service.store.tx(a.tenantId, (s) => ({
+    return service.store.read(a.tenantId, (s) => ({
       items: Object.values(s.skills).slice(p.offset, p.offset + p.limit),
     }));
   });
@@ -185,7 +185,7 @@ export function buildAPI(
   app.get("/api/v1/admin/mcp-servers", async (req) => {
     const a = actor(req);
     admin(a);
-    return service.store.tx(a.tenantId, (s) => ({
+    return service.store.read(a.tenantId, (s) => ({
       items: Object.values(s.mcp),
     }));
   });
@@ -226,14 +226,14 @@ export function buildAPI(
     const a = actor(req);
     admin(a);
     const p = page.parse(req.query);
-    return service.store.tx(a.tenantId, (s) => ({
+    return service.store.read(a.tenantId, (s) => ({
       items: s.audit.slice(p.offset, p.offset + p.limit),
     }));
   });
   app.get("/api/v1/admin/stats", async (req) => {
     const a = actor(req);
     admin(a);
-    return service.store.tx(a.tenantId, (s) => {
+    return service.store.read(a.tenantId, (s) => {
       const runs = Object.values(s.runs);
       const byState: Record<string, number> = {};
       for (const r of runs) byState[r.state] = (byState[r.state] ?? 0) + 1;
@@ -263,7 +263,7 @@ export function buildAPI(
   app.get("/api/v1/workspaces", async (req) => {
     const a = actor(req),
       p = page.parse(req.query);
-    return service.store.tx(a.tenantId, (s) => ({
+    return service.store.read(a.tenantId, (s) => ({
       items: Object.values(s.workspaces)
         .filter((w) => Object.hasOwn(w.members, a.userId) && !w.deleting)
         .slice(p.offset, p.offset + p.limit)
@@ -273,7 +273,7 @@ export function buildAPI(
   app.get("/api/v1/workspaces/:id", async (req) => {
     const a = actor(req),
       wid = uuid.parse(params(req.params).id);
-    return service.store.tx(a.tenantId, (s) => {
+    return service.store.read(a.tenantId, (s) => {
       const w = workspace(s, a, wid);
       return { id: w.id, name: w.name, members: w.members };
     });
@@ -305,7 +305,7 @@ export function buildAPI(
   app.delete("/api/v1/workspaces/:id", async (req, reply) => {
     const a = actor(req),
       wid = uuid.parse(params(req.params).id);
-    await service.store.tx(a.tenantId, (s) => {
+    await service.store.read(a.tenantId, (s) => {
       if (workspace(s, a, wid, true).ownerId !== a.userId)
         throw new Fault(403, "OWNER_REQUIRED");
     });
@@ -403,7 +403,7 @@ export function buildAPI(
     const a = actor(req),
       wid = uuid.parse(params(req.params).id),
       p = page.parse(req.query);
-    return service.store.tx(a.tenantId, (s) => {
+    return service.store.read(a.tenantId, (s) => {
       workspace(s, a, wid);
       return {
         items: Object.values(s.sessions)
@@ -415,7 +415,7 @@ export function buildAPI(
   app.get("/api/v1/sessions/:id", async (req) => {
     const a = actor(req),
       sid = uuid.parse(params(req.params).id);
-    return service.store.tx(a.tenantId, (s) => ({
+    return service.store.read(a.tenantId, (s) => ({
       ...session(s, a, sid),
       todos: s.todos[sid] ?? [],
     }));
@@ -443,7 +443,7 @@ export function buildAPI(
   app.get("/api/v1/runs/:id", async (req) => {
     const a = actor(req),
       rid = uuid.parse(params(req.params).id);
-    return service.store.tx(a.tenantId, (s) => {
+    return service.store.read(a.tenantId, (s) => {
       const r = run(s, a, rid);
       return { ...r, lease: undefined, actor: undefined };
     });
@@ -479,7 +479,7 @@ export function buildAPI(
         .int()
         .min(0)
         .parse(req.headers["last-event-id"] ?? 0);
-    await service.store.tx(a.tenantId, (s) => run(s, a, rid));
+    await service.store.read(a.tenantId, (s) => run(s, a, rid));
     reply.hijack();
     reply.raw.writeHead(200, {
       "Content-Type": "text/event-stream",
@@ -495,7 +495,7 @@ export function buildAPI(
     let lastBeat = Date.now();
     try {
       while (!closed) {
-        const batch = await service.store.tx(a.tenantId, (s) => {
+        const batch = await service.store.read(a.tenantId, (s) => {
           const r = run(s, a, rid);
           return {
             state: r.state,
@@ -551,10 +551,10 @@ export function buildAPI(
     const q = z
       .object({ path: filePath.default("/workspace") })
       .parse(req.query);
-    const w = await service.store.tx(a.tenantId, (s) => workspace(s, a, wid));
+    const w = await service.store.read(a.tenantId, (s) => workspace(s, a, wid));
     if (!service.hasBundle(fileBundle(w, a), a.tenantId))
       throw new Fault(403, "BUNDLE_NOT_GRANTED");
-    return sandbox.execute(a, wid, req.id, fileBundle(w, a), "ls", {
+    return sandbox.executeFile(a, wid, req.id, "ls", {
       path: q.path,
       _workspaceOnly: true,
     });
@@ -569,12 +569,12 @@ export function buildAPI(
       })
       .strict()
       .parse(req.body);
-    const w = await service.store.tx(a.tenantId, (s) =>
+    const w = await service.store.read(a.tenantId, (s) =>
       workspace(s, a, wid, true),
     );
     if (!service.hasBundle(fileBundle(w, a), a.tenantId))
       throw new Fault(403, "BUNDLE_NOT_GRANTED");
-    await sandbox.execute(a, wid, req.id, fileBundle(w, a), "write", {
+    await sandbox.executeFile(a, wid, req.id, "write", {
       ...b,
       _workspaceOnly: true,
     });
@@ -594,10 +594,10 @@ export function buildAPI(
     const path = filePath.parse(
       Buffer.from(file, "base64url").toString("utf8"),
     );
-    const w = await service.store.tx(a.tenantId, (s) => workspace(s, a, wid));
+    const w = await service.store.read(a.tenantId, (s) => workspace(s, a, wid));
     if (!service.hasBundle(fileBundle(w, a), a.tenantId))
       throw new Fault(403, "BUNDLE_NOT_GRANTED");
-    return sandbox.execute(a, wid, req.id, fileBundle(w, a), "read", {
+    return sandbox.executeFile(a, wid, req.id, "read", {
       path,
       _workspaceOnly: true,
     });

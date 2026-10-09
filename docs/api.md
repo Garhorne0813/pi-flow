@@ -55,9 +55,9 @@ curl -N 'http://127.0.0.1:8080/api/v1/runs/<runId>/events' \
 | POST       | `/interactions/{id}/response`            | `{response}`；审批为 approve / deny；返回新 Run，202    |
 | GET        | `/workspaces/{id}/files?path=/workspace` | 列出目录，最多 1000 项                                  |
 | POST       | `/workspaces/{id}/files`                 | UTF-8 `{path,content}`，返回 `{fileId}`，201            |
-| GET        | `/workspaces/{id}/files/{fileId}`        | `{text,sha256}`（真实 Cube）；Demo `{text}`             |
+| GET        | `/workspaces/{id}/files/{fileId}`        | `{path,text,sha256}`（真实 Cube）；Demo `{text}`             |
 
-幂等键以 Tenant + User + Session 为范围。同键同 message 返回原 Run；同键不同 message 返回 `IDEMPOTENCY_CONFLICT`。新的不同键在 Session 已有活跃 Run 时返回 `SESSION_BUSY`。文件 ID 是路径的 base64url 表示，不承担访问授权；下载仍检查 Workspace ACL 和 Sandbox 内真实路径。File API 只允许工作区路径；Skill 内容通过已授权 Agent 的 remote_read 读取。
+幂等键以 Tenant + User + Session 为范围。同键同 message 返回原 Run；同键不同 message 返回 `IDEMPOTENCY_CONFLICT`。新的不同键在 Session 已有活跃 Run 时返回 `SESSION_BUSY`。文件 ID 是路径的 base64url 表示，不承担访问授权；下载仍检查 Workspace ACL 和 Sandbox 内真实路径。File API 只允许工作区路径；Skill 内容通过已授权 Agent 的 remote_read 读取。文件 API 使用单独的临时无 Skill Sandbox，读操作不改变 Agent Sandbox 的 ID、scope、state 或 lastUsedAt，可与 Agent 工具并发；写操作保持工作区工具互斥。临时实例计入 owner/全局活跃配额，请求后确认释放；配额不足返回 429。失败清理保留容量记录，后续文件请求会先清理已知实例再创建；没有 ID 的未知结果仍需运维对账。
 
 ## SSE 协议
 
@@ -81,7 +81,7 @@ data: {"eventId":17,"runId":"...","sessionId":"...","type":"message.delta","time
 | todo.updated                             | `{items:[{text,status}]}`                              |
 | subagent.started / subagent.completed    | `{childRunId,state?}`                                  |
 
-心跳为 `: heartbeat`，间隔约 15 秒。终态或 WAITING_INPUT 时服务端结束流。客户端根据 interaction ID 提交回答，并订阅响应里的新 Run ID。SSE 断连不取消 Run；重连使用最新 eventId。流期间访问撤销或存储错误会发送 `stream.error` 并关闭，客户端应重新请求 Run 状态。
+心跳为 `: heartbeat`，间隔约 15 秒。终态或 WAITING_INPUT 时服务端结束流。客户端根据 interaction ID 提交回答，并订阅响应里的新 Run ID。SSE 断连不取消 Run；重连使用最新 eventId。每次轮询使用只读数据库快照并重新检查 ACL，不锁定租户行、不更新 revision；请求结束审计保留为独立写事务。流期间访问撤销或存储错误会发送 `stream.error` 并关闭，客户端应重新请求 Run 状态。
 
 浏览器原生 EventSource 无法直接加 Authorization 头；建议用 fetch streaming / SSE 客户端库。API 不接受 URL query token。
 
@@ -147,7 +147,7 @@ Skills 登记（不会上传或执行文件）：
 }
 ```
 
-Skill 登记只保存元数据。生产部署必须在 `SKILL_VOLUMES_JSON` 为该 ID 配置一致的 Bundle 和路径；每个技能版本独占一个预发布 Volume，根目录存放 `SKILL.md` 和辅助文件。只有 Agent 的 `skills` 列表对应的 Volume 会被只读挂载到各自 SKILL.md 的父目录。Bundle 是租户授权分组，不是整包挂载源。重复或相互包含的挂载路径会在发布 Agent 时拒绝。空列表不挂载技能。
+Skill 登记只保存元数据。生产部署必须在 `SKILL_VOLUMES_JSON` 为该 ID 配置一致的 Bundle 和路径；每个技能版本独占一个预发布 Volume，根目录存放 `SKILL.md` 和辅助文件。只有 Agent 的 `skills` 列表对应的 Volume 会被只读挂载到各自 SKILL.md 的父目录。Bundle 是租户授权分组，不是整包挂载源。重复或相互包含的挂载路径会在发布 Agent 时拒绝。空列表不挂载技能。受信任的远程适配器在所有工具执行前验证已选 SKILL.md 的规范路径与摘要；read/grep 对实际读取的 manifest 字节再次校验，`..` 和指向 manifest 的符号链接别名遵循相同规则。无法确认登记 manifest 身份时返回 `SKILL_IDENTITY_UNCONFIRMED`，摘要不匹配返回 `SKILL_DIGEST_MISMATCH` (409)，不返回内容。登记 manifest 本身必须是规范路径下的普通文件，不能是符号链接；辅助文件在校验通过后仍可正常读取。bash 使用执行前校验，技能存储必须保持不可变。
 
 MCP 只发现该 Agent 的 `mcpServers` 列表；其他 Server 不出现在模型工具列表中，猜测工具名也不能调用或申请审批。子 Agent 使用父子 Server/技能列表的交集。管理 API 的注册目录仅供管理员管理，不作为 Agent 的工具发现目录。
 
@@ -184,7 +184,7 @@ MCP 登记：
 
 活跃配额默认 owner 每租户 3 个、部署全局 100 个，包含预留/未知结果，暂停不计。默认空闲 15 分钟暂停、24 小时释放，Worker 每分钟扫描一次；参数见 `.env.example`。容量统计不暴露其他租户的 Workspace 或用户 ID。
 
-配额超限返回 `USER_SANDBOX_LIMIT` / `GLOBAL_SANDBOX_LIMIT` (429)；快照数超限为 `SNAPSHOT_LIMIT` (429)。另有 `ACTIVE_RUNS` / `SANDBOX_OUTCOME_UNKNOWN` / `SANDBOX_NOT_CREATED` / `SNAPSHOT_SKILL_SCOPE_MISMATCH` (409)、`SNAPSHOT_NOT_FOUND` (404)、`SKILL_DENIED` / `BUNDLE_NOT_GRANTED` (403)。结果不确定的实例必须确认远端释放后才能退还容量；没有 ID 时需要运维对账。
+配额超限返回 `USER_SANDBOX_LIMIT` / `GLOBAL_SANDBOX_LIMIT` (429)；快照数超限为 `SNAPSHOT_LIMIT` (429)。文件实例清理未确认返回 `FILE_SANDBOX_CLEANUP_UNCONFIRMED` (502)，保留容量待清理。另有 `ACTIVE_RUNS` / `SANDBOX_OUTCOME_UNKNOWN` / `SANDBOX_NOT_CREATED` / `SNAPSHOT_SKILL_SCOPE_MISMATCH` (409)、`SNAPSHOT_NOT_FOUND` (404)、`SKILL_DENIED` / `BUNDLE_NOT_GRANTED` (403)。结果不确定的实例必须确认远端释放后才能退还容量；没有 ID 时需要运维对账。
 
 ## 常用错误码
 

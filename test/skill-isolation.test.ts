@@ -183,7 +183,7 @@ class MountedFixture extends DemoSandbox {
       );
       if (!selected) throw new Fault(404, "FILE_NOT_FOUND");
       if (op !== "read") throw new Fault(403, "SKILLS_READ_ONLY");
-      return { text: selected.name, sha256: selected.digest };
+      return { path: args.path, text: selected.name, sha256: selected.digest };
     }
     return super.execute(sid, op, args);
   }
@@ -200,7 +200,7 @@ async function fixture() {
   return { store, service, w, provider, sandbox };
 }
 
-test("switching Agent skill sets replaces Sandbox before access, retains workspace, and clears skills for file APIs", async () => {
+test("switching Agent skill sets replaces Sandbox before access, retains workspace, and supports an empty Agent skill set", async () => {
   const f = await fixture();
   const run = (op: string, path: string, skills: string[], content?: string) =>
     f.sandbox.execute(
@@ -405,4 +405,326 @@ test("parent and child skills intersect physically and parent mounts are restore
   } finally {
     await worker.stop();
   }
+});
+
+test("viewer file APIs run alongside a skilled Agent without changing its instance, scope or lifecycle", async () => {
+  const f = await fixture();
+  await f.sandbox.execute(
+    actor,
+    f.w.id,
+    "setup",
+    "default",
+    "write",
+    { path: "retained.txt", content: "retained" },
+    undefined,
+    [a.id],
+  );
+  const viewer = { ...actor, userId: "viewer", admin: false };
+  await f.store.tx(actor.tenantId, (s) => {
+    s.workspaces[f.w.id]!.members.viewer = "viewer";
+  });
+  const before = await f.store.read(
+    actor.tenantId,
+    (s) => s.workspaces[f.w.id]!,
+  );
+  let entered!: () => void, release!: () => void;
+  const started = new Promise<void>((r) => {
+    entered = r;
+  });
+  const gate = new Promise<void>((r) => {
+    release = r;
+  });
+  const execute = f.provider.execute.bind(f.provider);
+  const observed: {
+    sid: string;
+    skills: readonly Skill[];
+    args: Record<string, unknown>;
+  }[] = [];
+  f.provider.execute = async (sid, op, args) => {
+    observed.push({ sid, skills: f.provider.skillSelections.get(sid)!, args });
+    if (sid === before.sandboxId && op === "read") {
+      entered();
+      await gate;
+    }
+    return execute(sid, op, args);
+  };
+  const { buildAPI } = await import("../src/api.js");
+  const app = buildAPI(
+    f.service,
+    async (h) => (h === "Bearer viewer" ? viewer : actor),
+    f.sandbox,
+  );
+  const agent = f.sandbox.execute(
+    actor,
+    f.w.id,
+    "agent",
+    "default",
+    "read",
+    { path: a.path },
+    undefined,
+    [a.id],
+  );
+  try {
+    await started;
+    const held = await f.store.read(
+      actor.tenantId,
+      (s) => s.workspaces[f.w.id]!,
+    );
+    for (const suffix of [
+      "",
+      "/" + Buffer.from("retained.txt").toString("base64url"),
+    ]) {
+      const response = await app.inject({
+        method: "GET",
+        url: `/api/v1/workspaces/${f.w.id}/files${suffix}`,
+        headers: { authorization: "Bearer viewer" },
+      });
+      assert.equal(response.statusCode, 200, response.body);
+      const current = await f.store.read(
+        actor.tenantId,
+        (s) => s.workspaces[f.w.id]!,
+      );
+      for (const field of [
+        "sandboxId",
+        "sandboxSkillScope",
+        "sandboxState",
+        "sandboxLastUsedAt",
+        "lock",
+      ] as const)
+        assert.deepEqual(current[field], held[field]);
+    }
+    for (const path of [
+      a.path,
+      "/workspace/../skills/a/SKILL.md",
+      "../skills/a/SKILL.md",
+    ]) {
+      const response = await app.inject({
+        method: "GET",
+        url: `/api/v1/workspaces/${f.w.id}/files/${Buffer.from(path).toString("base64url")}`,
+        headers: { authorization: "Bearer viewer" },
+      });
+      assert.ok([400, 403].includes(response.statusCode), response.body);
+    }
+    assert.equal(
+      (
+        await app.inject({
+          method: "POST",
+          url: `/api/v1/workspaces/${f.w.id}/files`,
+          payload: { path: "x", content: "x" },
+          headers: { authorization: "Bearer viewer" },
+        })
+      ).statusCode,
+      403,
+    );
+    const files = observed.filter((o) => o.sid !== before.sandboxId);
+    assert.equal(files.length, 2);
+    assert.ok(
+      files.every(
+        (o) => o.skills.length === 0 && o.args._workspaceOnly === true,
+      ),
+    );
+    assert.equal(f.provider.boxes.size, 1, "file instances must be cleaned up");
+    assert.equal((await f.sandbox.capacity.usage(actor)).user.active, 1);
+  } finally {
+    release();
+    await agent;
+    await app.close();
+  }
+  assert.equal(f.provider.boxes.has(before.sandboxId!), true);
+});
+
+test("file instances obey owner capacity limits and retain uncertain cleanup for retry", async () => {
+  const f = await fixture();
+  const manager = new SandboxManager(f.store, f.provider, {
+    maxActivePerUser: 1,
+  });
+  await manager.execute(
+    actor,
+    f.w.id,
+    "agent",
+    "default",
+    "write",
+    { path: "x", content: "x" },
+    undefined,
+    [a.id],
+  );
+  const before = await manager.status(actor, f.w.id);
+  await assert.rejects(
+    manager.executeFile(actor, f.w.id, "files", "read", { path: "x" }),
+    { code: "USER_SANDBOX_LIMIT" },
+  );
+  assert.deepEqual(await manager.status(actor, f.w.id), before);
+  const kill = f.provider.kill.bind(f.provider);
+  f.provider.kill = async (sid) => {
+    if (sid !== before.sandboxId) throw Error("lost kill");
+    return kill(sid);
+  };
+  await assert.rejects(
+    f.sandbox.executeFile(actor, f.w.id, "files", "read", { path: "x" }),
+    { code: "FILE_SANDBOX_CLEANUP_UNCONFIRMED" },
+  );
+  assert.equal((await f.sandbox.capacity.usage(actor)).user.active, 2);
+  f.provider.kill = kill;
+  assert.deepEqual(
+    await f.sandbox.executeFile(actor, f.w.id, "retry", "read", { path: "x" }),
+    { text: "x" },
+  );
+  assert.equal((await f.sandbox.capacity.usage(actor)).user.active, 1);
+  assert.deepEqual(await f.sandbox.status(actor, f.w.id), before);
+});
+
+test("Sandbox injects only registered selected manifest identities, overriding untrusted arguments", async () => {
+  const f = await fixture();
+  let seen: Record<string, unknown> | undefined;
+  f.provider.execute = async (_sid, _op, args) => {
+    seen = args;
+    return {};
+  };
+  await f.sandbox.execute(
+    actor,
+    f.w.id,
+    "agent",
+    "default",
+    "grep",
+    { pattern: "x", _skillManifests: [] },
+    undefined,
+    [a.id],
+  );
+  assert.deepEqual(seen!._skillManifests, [{ path: a.path, digest: a.digest }]);
+});
+
+test("Worker verifies resolved manifest identities for aliases and rejects unconfirmed identities", async () => {
+  const f = await fixture();
+  const agent = await f.service.publish(actor, config({ skills: [a.id] }));
+  const session = await f.service.createSession(actor, f.w.id, agent.id);
+  let checked = 0;
+  f.provider.execute = async (_sid, _op, args) =>
+    args.path === "unknown"
+      ? { text: "unconfirmed", sha256: a.digest }
+      : { path: a.path, text: "drifted", sha256: "0".repeat(64) };
+  const worker = new Worker(
+    f.service,
+    {
+      execute: async (ctx) => {
+        for (const path of [
+          a.path,
+          "/skills/a/../a/SKILL.md",
+          "/workspace/link",
+          "unknown",
+        ]) {
+          await assert.rejects(ctx.call("remote_read", { path }), {
+            code:
+              path === "unknown"
+                ? "SKILL_IDENTITY_UNCONFIRMED"
+                : "SKILL_DIGEST_MISMATCH",
+          });
+          checked++;
+        }
+      },
+    },
+    f.sandbox,
+    new MCPManager(f.store, {}),
+  );
+  const run = await f.service.submit(actor, session.id, "integrity");
+  try {
+    await worker.tick();
+    for (let i = 0; i < 100; i++) {
+      const current = await f.store.read(
+        actor.tenantId,
+        (s) => s.runs[run.id]!,
+      );
+      if (current.state === "COMPLETED" && !current.lease) break;
+      await new Promise<void>((r) => setImmediate(r));
+    }
+    assert.equal(checked, 4);
+    assert.equal(
+      await f.store.read(
+        actor.tenantId,
+        (s) =>
+          s.events.filter(
+            (e) => e.runId === run.id && e.type === "tool.completed",
+          ).length,
+      ),
+      0,
+    );
+  } finally {
+    await worker.stop();
+  }
+});
+
+test("file lease blocks lifecycle and writes, allows Agent reads, and later file writes retain Agent scope", async () => {
+  const f = await fixture();
+  await f.sandbox.execute(
+    actor,
+    f.w.id,
+    "setup",
+    "default",
+    "write",
+    { path: "x", content: "before" },
+    undefined,
+    [a.id],
+  );
+  const agent = await f.sandbox.status(actor, f.w.id);
+  let entered!: () => void, release!: () => void;
+  const started = new Promise<void>((r) => {
+    entered = r;
+  });
+  const gate = new Promise<void>((r) => {
+    release = r;
+  });
+  const original = f.provider.execute.bind(f.provider);
+  f.provider.execute = async (sid, op, args) => {
+    if (sid !== agent.sandboxId && op === "read") {
+      entered();
+      await gate;
+    }
+    return original(sid, op, args);
+  };
+  const file = f.sandbox.executeFile(actor, f.w.id, "file", "read", {
+    path: "x",
+  });
+  try {
+    await started;
+    await assert.rejects(f.sandbox.pause(actor, f.w.id), {
+      code: "WORKSPACE_BUSY",
+    });
+    await assert.rejects(f.sandbox.destroy(actor, f.w.id), {
+      code: "WORKSPACE_BUSY",
+    });
+    await assert.rejects(
+      f.sandbox.executeFile(actor, f.w.id, "writer", "write", {
+        path: "x",
+        content: "blocked",
+      }),
+      { code: "WORKSPACE_BUSY" },
+    );
+    const read = await f.sandbox.execute(
+      actor,
+      f.w.id,
+      "agent",
+      "default",
+      "read",
+      { path: a.path },
+      undefined,
+      [a.id],
+    );
+    assert.equal((read as { text: string }).text, "a");
+  } finally {
+    release();
+    await file;
+  }
+  const beforeWrite = await f.sandbox.status(actor, f.w.id);
+  await f.sandbox.executeFile(actor, f.w.id, "write", "write", {
+    path: "x",
+    content: "after",
+  });
+  assert.deepEqual(await f.sandbox.status(actor, f.w.id), beforeWrite);
+  assert.deepEqual(
+    f.provider.skillSelections.get(agent.sandboxId!)!.map((s) => s.id),
+    [a.id],
+  );
+  assert.deepEqual(
+    await f.sandbox.executeFile(actor, f.w.id, "read", "read", { path: "x" }),
+    { text: "after" },
+  );
 });

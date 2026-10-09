@@ -40,7 +40,7 @@ export class SandboxCapacity {
   adoptLegacy() {
     return (this.adoption ??= (async () => {
       for (const tenant of await this.store.tenants()) {
-        const workspaces = await this.store.tx(tenant, (s) =>
+        const workspaces = await this.store.read(tenant, (s) =>
           Object.values(s.workspaces).filter((w) => w.sandboxId),
         );
         await this.store.capacityTx((s) => {
@@ -154,14 +154,14 @@ export class SandboxCapacity {
     });
   }
   async get(tenant: string, wid: string) {
-    return this.store.capacityTx((s) => {
+    return this.store.capacityRead((s) => {
       const e = s.entries[key(tenant, wid)];
       return e?.state === "released" ? undefined : e;
     });
   }
   async usage(a: Actor) {
     await this.adoptLegacy();
-    return this.store.capacityTx((s) => {
+    return this.store.capacityRead((s) => {
       const entries = Object.values(s.entries);
       return {
         policy: this.policy,

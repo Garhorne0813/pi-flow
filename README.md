@@ -30,7 +30,7 @@ DEV_TOKEN=local-demo-token-2026 docker compose -f compose.demo.yml up --build
 - UCS OIDC JWT 认证适配：HTTPS JWKS、签名、issuer、audience、过期与租户声明校验；禁止从请求参数指定租户。
 - Tenant 隔离、Workspace owner/editor/viewer ACL、Agent 使用 ACL、管理员发布与撤销。
 - 不可变 Agent 配置版本，Session 固定版本；Skills / MCP 注册和禁用；模型仅允许部署时批准的网关模型。
-- PostgreSQL 事务持久化、同 Session 单写 Run、幂等冲突检测、独立 Worker、心跳和租约；故障中的不确定操作以 FAILED 结束，禁止自动重放。
+- PostgreSQL 只读快照/写事务分离、跨 tick 租户轮询调度、同 Session 单写 Run、幂等冲突检测、独立 Worker、心跳和租约；故障中的不确定操作以 FAILED 结束，禁止自动重放。
 - 持久事件日志、SSE 回放和心跳；断连不取消 Run；取消、问答、审批和 Todo。
 - 真正调用 Pi SDK，受控 ResourceLoader，无本地资源自动发现；只暴露 `remote_*` 和构建期工具，关闭默认工具/动态 Extensions/Codemode。
 - CubeSandbox 独立工作区 Volume、按 Agent 授权挂载的只读技能 Volume、`/workspace` RW；按需启动、连接、重建、暂停、销毁；工作区工具执行互斥。
@@ -57,11 +57,11 @@ API 和 Worker 必须使用同一数据库、模型批准列表、Skills Bundle 
 
 LLM Gateway 当前采用 OpenAI Chat Completions 兼容协议，部署配置中的 `LLM_PROVIDER` / `LLM_MODEL_ID` 构成模型白名单；模型单次输出上限 4096。Token 预算按返回 usage 累计，是响应后检查的预算；单次响应可能超额，不是精确的预付费额度。
 
-Cube Template 必须预装 Python 3 / Bash，存在无 sudo 的执行用户，对其授予 Workspace 写权限；模板不得预置共享技能或额外技能挂载，`/skills` 应为空。持久 Volume 后端、非特权配置、磁盘/CPU/内存和网络出口限制由 Cube 集群配置。Harness 不向 Sandbox 注入 UCS、模型或 MCP 凭证。Skills 发布者负责不可变 Volume；登记的 SKILL.md 在显式读取时校验 SHA-256。
+Cube Template 必须预装 Python 3 / Bash，存在无 sudo 的执行用户，对其授予 Workspace 写权限；模板不得预置共享技能或额外技能挂载，`/skills` 应为空。持久 Volume 后端、非特权配置、磁盘/CPU/内存和网络出口限制由 Cube 集群配置。Harness 不向 Sandbox 注入 UCS、模型或 MCP 凭证。Skills 发布者负责不可变 Volume；每次远程工具执行前校验已挂载 SKILL.md 的规范路径和 SHA-256；read/grep 返回 manifest 内容前再次校验，路径别名使用同一策略。Skill Volume 必须保持不可变，bash 的执行前校验不能替代存储不可变性。
 
 每个技能版本使用独立 Volume，其根目录只包含该技能的 `SKILL.md`、脚本和资源。部署 `SKILL_VOLUMES_JSON` 将 skill ID 绑定到 Bundle、完整 SKILL.md 路径和 Volume；例如 `{"review@v1":{"bundle":"default","path":"/skills/review/v1/SKILL.md","volume":"skill-review-v1"}}`。Agent 配置 `skills:["review@v1"]` 后，Sandbox 仅在 `/skills/review/v1` 只读挂载该 Volume，不挂载整个 Bundle。`skills:[]` 不挂载任何技能；缺少或不匹配的映射会拒绝创建，禁止回退到共享 Bundle Volume。`SKILL_BUNDLES_JSON` 保留为租户权限分组，其值不再作为挂载源。旧部署需要把 Bundle 文件拆成每技能 Volume 并配置新映射。
 
-共享 Workspace 切换到不同技能集合时，下一次远程工具访问会先 Kill 旧 Sandbox，再按当前 Agent 权限重建，保留 `/workspace` Volume。子 Agent 使用父子权限交集，返回父 Agent 后下一次工具调用恢复父 Agent 挂载。旧实例没有技能范围标记时也强制重建；Kill 未确认成功则停止访问。文件 API 只访问 Workspace，并使用无技能挂载。MCP 只发现 Agent `mcpServers` 指定的 Server，子 Agent 同样取权限交集；未授权的 Server/工具在审批前拒绝，已发现的 Server 被撤销或更换 Endpoint 后也拒绝调用。租户管理员的技能/MCP 登记列表属于管理面，不暴露给模型。
+共享 Workspace 切换到不同技能集合时，下一次远程工具访问会先 Kill 旧 Sandbox，再按当前 Agent 权限重建，保留 `/workspace` Volume。子 Agent 使用父子权限交集，返回父 Agent 后下一次工具调用恢复父 Agent 挂载。旧实例没有技能范围标记时也强制重建；Kill 未确认成功则停止访问。文件 API 使用独立、仅挂载 Workspace 的临时实例，请求结束后确认 Kill；不改变 Agent 的实例、技能范围或空闲计时。读取可与 Agent 工具并行，写入与 Agent 工具互斥；临时实例计入 Workspace owner 和全局容量，配额满时返回 429，不会释放 Agent 实例来腾挪容量。MCP 只发现 Agent `mcpServers` 指定的 Server，子 Agent 同样取权限交集；未授权的 Server/工具在审批前拒绝，已发现的 Server 被撤销或更换 Endpoint 后也拒绝调用。租户管理员的技能/MCP 登记列表属于管理面，不暴露给模型。
 
 Cube Node SDK 的 npm 包在开发时返回 404，已从官方固定 commit 构建并随工程打包。来源、构建方法和许可证见 [vendor/README.md](vendor/README.md)。不存在运行时安装 SDK 的逻辑。Pi 仍为 0.99.2；官方包仅重打包更新 shrinkwrap 中的 brace-expansion 依赖，SDK 源码未修改。Fastify / MCP SDK 锁定修复后的 5.12.5 / 1.32.1；详细来源与复现步骤同见 vendor/README.md。
 
@@ -130,3 +130,7 @@ NODE_USE_ENV_PROXY=1 npm run test:deepseek:capabilities
 ```
 
 覆盖 Todo 创建/状态更新和 Session API 持久状态、ask_user_question 等待输入/Worker 重建/回答恢复与响应幂等、Skill 注册/显式远程读取/SHA-256 校验/摘要错误与撤销、子 Agent 独立 Session/权限交集/子任务 Todo/结果回传，以及本地真实 HTTPS Streamable HTTP MCP Server 的发现/审批/执行一次/拒绝无副作用/白名单/撤销。用户回答和审批决定由测试驱动器模拟；文件和只读 `/skills` 使用内存夹具，Store 也是内存实现，不代表真实 CubeSandbox 或数据库持久化验收。结果写入 `work/deepseek-capabilities-result.json`。每个 Run 最长 120 秒、最多 30 步、30,000 tokens；单次模型输出上限 4096 tokens。需要 `openssl`。测试失败后可加 `-- --only=skills`（或 `todo`、`askUser`、`subagent`、`mcp`）复测一项并合并先前结果，报告明确记录复测。
+
+## 只读轮询负载对比
+
+`npm run bench:store:reads` 在已迁移的 `TEST_DATABASE_URL` 测试库上，对比旧 SSE 写事务路径与新只读路径。创建并清理专用租户，模拟 100 个 250 ms 事件轮询与 4 个 1 s Run 心跳；不连接模型或 Sandbox。参数与实测结果见 [docs/read-benchmark.md](docs/read-benchmark.md)。SSE/列表查询不锁定或写回租户行；每个请求结束时仍保留一次审计写入。

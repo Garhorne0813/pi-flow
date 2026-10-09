@@ -490,3 +490,61 @@ test("prototype names do not impersonate a workspace member", async () => {
     );
   }
 });
+
+test("SSE polls are read-only, replay ordered pages via Last-Event-ID, and recheck ACL on every poll", async () => {
+  const { event } = await import("../src/domain.js");
+  const f = await fixture();
+  const r = await f.service.submit(alice, f.ses.id, "stream");
+  await f.store.tx("one", (s) => {
+    s.runs[r.id]!.state = "RUNNING";
+    s.workspaces[f.w.id]!.members.bob = "viewer";
+    for (let i = 0; i < 155; i++)
+      event(s, s.runs[r.id]!, "test.event", { index: i });
+  });
+  let reads = 0,
+    writes = 0;
+  const originalRead = f.store.read.bind(f.store),
+    originalTx = f.store.tx.bind(f.store);
+  f.store.read = async (...args) => {
+    reads++;
+    return originalRead(...args);
+  };
+  f.store.tx = async (...args) => {
+    writes++;
+    return originalTx(...args);
+  };
+  const app = buildAPI(f.service, async () => bob, f.sandbox);
+  const stream = app.inject({
+    method: "GET",
+    url: `/api/v1/runs/${r.id}/events`,
+    headers: { authorization: "Bearer bob", "last-event-id": "1" },
+  });
+  try {
+    const deadline = Date.now() + 2000;
+    while (reads < 4 && Date.now() < deadline)
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.ok(reads >= 4, "wait for two pages and an idle poll");
+    assert.equal(writes, 0, "SSE polling must not issue write transactions");
+    await originalTx("one", (s) => {
+      delete s.workspaces[f.w.id]!.members.bob;
+    });
+    const response = await stream;
+    const ids = [...response.body.matchAll(/^id: (\d+)$/gm)].map((m) =>
+      Number(m[1]),
+    );
+    assert.deepEqual(
+      ids,
+      Array.from({ length: 155 }, (_, i) => i + 2),
+    );
+    assert.match(response.body, /ACCESS_REVOKED_OR_UNAVAILABLE/);
+    assert.doesNotMatch(response.body, /event: run.queued/);
+    assert.ok(writes <= 1, "only request completion audit may write");
+  } finally {
+    // Ensure a failed assertion cannot leave a hijacked stream running.
+    await originalTx("one", (s) => {
+      s.runs[r.id]!.state = "COMPLETED";
+    });
+    await stream;
+    await app.close();
+  }
+});

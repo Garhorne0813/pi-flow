@@ -61,7 +61,7 @@ class FixtureSandbox extends DemoSandbox {
         throw new Fault(404, "FILE_NOT_FOUND");
       if (op !== "read") throw new Fault(403, "SKILLS_READ_ONLY");
       const contents = args.path === skillPath ? skillText : hiddenSkillText;
-      return { text: contents, sha256: digest(contents) };
+      return { path: args.path, text: contents, sha256: digest(contents) };
     }
     return super.execute(s, op, args);
   }

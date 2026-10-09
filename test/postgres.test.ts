@@ -174,3 +174,167 @@ test(
     }
   },
 );
+
+test(
+  "PostgreSQL reads preserve revisions, overlap, and see committed snapshots without waiting for a writer lock",
+  { skip: !url },
+  async () => {
+    const store = new PostgresStore(url!);
+    const tenant = "read-" + id();
+    let release!: () => void;
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    const writer = await store.pool.connect();
+    try {
+      await store.pool.query(
+        await readFile("migrations/001_initial.sql", "utf8"),
+      );
+      await store.tx(tenant, (s) => {
+        s.sequence = 7;
+      });
+      const revision = async () =>
+        Number(
+          (
+            await store.pool.query(
+              "SELECT revision FROM harness_tenants WHERE tenant_id=$1",
+              [tenant],
+            )
+          ).rows[0].revision,
+        );
+      const before = await revision();
+      await writer.query("BEGIN");
+      await writer.query(
+        "SELECT state FROM harness_tenants WHERE tenant_id=$1 FOR UPDATE",
+        [tenant],
+      );
+      let entered = 0;
+      const reads = [1, 2].map(() =>
+        store.read(tenant, async (s) => {
+          entered++;
+          assert.equal(s.sequence, 7);
+          await gate;
+          s.sequence = 999;
+          return s.sequence;
+        }),
+      );
+      const deadline = Date.now() + 1000;
+      while (entered < 2 && Date.now() < deadline)
+        await new Promise((r) => setTimeout(r, 5));
+      assert.equal(
+        entered,
+        2,
+        "readers must not wait on the writer row lock or each other",
+      );
+      release();
+      await Promise.all(reads);
+      assert.equal(await revision(), before);
+      assert.equal(await store.read(tenant, (s) => s.sequence), 7);
+      const missing = tenant + "-absent";
+      await store.read(missing, (s) => {
+        s.sequence = 100;
+      });
+      assert.equal(
+        (
+          await store.pool.query(
+            "SELECT tenant_id FROM harness_tenants WHERE tenant_id=$1",
+            [missing],
+          )
+        ).rowCount,
+        0,
+      );
+    } finally {
+      release();
+      await writer.query("ROLLBACK");
+      writer.release();
+      await store.pool.query("DELETE FROM harness_tenants WHERE tenant_id=$1", [
+        tenant,
+      ]);
+      await store.close();
+    }
+  },
+);
+
+test(
+  "PostgreSQL independent workers never claim the same Run twice",
+  { skip: !url },
+  async () => {
+    const { Worker } = await import("../src/worker.js");
+    const { SandboxManager, DemoSandbox } = await import(
+      "../src/adapters/sandbox.js"
+    );
+    const { MCPManager } = await import("../src/adapters/mcp.js");
+    const stores = [new PostgresStore(url!), new PostgresStore(url!)];
+    const actor = { tenantId: "worker-" + id(), userId: "user", admin: true };
+    let release!: () => void;
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    let executions = 0;
+    const services = stores.map(
+      (store) => new HarnessService(store, [], ["default"]),
+    );
+    const workers = services.map(
+      (service) =>
+        new Worker(
+          service,
+          {
+            execute: async (ctx) => {
+              executions++;
+              ctx.signal.addEventListener("abort", release, { once: true });
+              await gate;
+            },
+          },
+          new SandboxManager(service.store, new DemoSandbox()),
+          new MCPManager(service.store, {}),
+          1,
+        ),
+    );
+    try {
+      await stores[0]!.pool.query(
+        await readFile("migrations/001_initial.sql", "utf8"),
+      );
+      const agent = await services[0]!.publish(
+        actor,
+        AgentConfig.parse({
+          name: "worker",
+          systemPrompt: "probe",
+          model: { provider: "demo", modelId: "demo" },
+          skillBundle: "default",
+          tools: [],
+        }),
+      );
+      const workspace = await services[0]!.createWorkspace(actor, "worker");
+      const session = await services[0]!.createSession(
+        actor,
+        workspace.id,
+        agent.id,
+      );
+      const r = await services[0]!.submit(actor, session.id, "race");
+      await Promise.all(
+        workers.flatMap((worker) => [worker.tick(), worker.tick()]),
+      );
+      const deadline = Date.now() + 1000;
+      while (executions < 1 && Date.now() < deadline)
+        await new Promise((r) => setTimeout(r, 5));
+      assert.equal(executions, 1);
+      assert.equal(
+        await stores[0]!.read(
+          actor.tenantId,
+          (s) =>
+            s.events.filter((e) => e.runId === r.id && e.type === "run.started")
+              .length,
+        ),
+        1,
+      );
+    } finally {
+      release();
+      await Promise.all(workers.map((w) => w.stop()));
+      await stores[0]!.pool.query(
+        "DELETE FROM harness_tenants WHERE tenant_id=$1",
+        [actor.tenantId],
+      );
+      await Promise.all(stores.map((s) => s.close()));
+    }
+  },
+);

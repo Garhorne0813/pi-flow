@@ -2,8 +2,10 @@ import pg from "pg";
 import { emptyState, type State } from "./domain.js";
 import type { CapacityState } from "./adapters/sandbox-policy.js";
 export interface Store {
+  read<T>(tenant: string, fn: (state: State) => T | Promise<T>): Promise<T>;
   tx<T>(tenant: string, fn: (state: State) => T | Promise<T>): Promise<T>;
   tenants(): Promise<string[]>;
+  capacityRead<T>(fn: (state: CapacityState) => T | Promise<T>): Promise<T>;
   capacityTx<T>(fn: (state: CapacityState) => T | Promise<T>): Promise<T>;
   close(): Promise<void>;
 }
@@ -11,6 +13,12 @@ export class MemoryStore implements Store {
   private states = new Map<string, State>();
   private tail: Promise<unknown> = Promise.resolve();
   private capacity: CapacityState = { entries: {} };
+  async capacityRead<T>(
+    fn: (state: CapacityState) => T | Promise<T>,
+  ): Promise<T> {
+    await this.tail;
+    return structuredClone(await fn(structuredClone(this.capacity)));
+  }
   capacityTx<T>(fn: (state: CapacityState) => T | Promise<T>): Promise<T> {
     const task = this.tail.then(async () => {
       const s = structuredClone(this.capacity),
@@ -31,6 +39,11 @@ export class MemoryStore implements Store {
     this.tail = task.catch(() => {});
     return task;
   }
+  async read<T>(tenant: string, fn: (s: State) => T | Promise<T>): Promise<T> {
+    await this.tail;
+    const snapshot = structuredClone(this.states.get(tenant) ?? emptyState());
+    return structuredClone(await fn(snapshot));
+  }
   async tenants() {
     return [...this.states.keys()];
   }
@@ -40,6 +53,14 @@ export class PostgresStore implements Store {
   pool: pg.Pool;
   constructor(url: string) {
     this.pool = new pg.Pool({ connectionString: url, max: 10 });
+  }
+  async capacityRead<T>(
+    fn: (state: CapacityState) => T | Promise<T>,
+  ): Promise<T> {
+    const row = await this.pool.query(
+      "SELECT state FROM harness_sandbox_capacity WHERE id=1",
+    );
+    return structuredClone(await fn(row.rows[0]?.state ?? { entries: {} }));
   }
   async capacityTx<T>(
     fn: (state: CapacityState) => T | Promise<T>,
@@ -95,9 +116,18 @@ export class PostgresStore implements Store {
       c.release();
     }
   }
+  async read<T>(tenant: string, fn: (s: State) => T | Promise<T>): Promise<T> {
+    const row = await this.pool.query(
+      "SELECT state FROM harness_tenants WHERE tenant_id=$1",
+      [tenant],
+    );
+    return structuredClone(await fn(row.rows[0]?.state ?? emptyState()));
+  }
   async tenants() {
     return (
-      await this.pool.query("SELECT tenant_id FROM harness_tenants")
+      await this.pool.query(
+        "SELECT tenant_id FROM harness_tenants ORDER BY tenant_id",
+      )
     ).rows.map((x) => x.tenant_id as string);
   }
   async close() {

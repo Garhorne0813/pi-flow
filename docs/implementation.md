@@ -8,7 +8,7 @@
 | --------------------------- | --------------------------------------------------------------- |
 | `api.ts` / `auth.ts`        | REST/SSE、输入校验、UCS OIDC JWT、请求审计                      |
 | `domain.ts` / `service.ts`  | ACL、不可变版本、状态机、幂等与交互续跑                         |
-| `store.ts`                  | PostgreSQL 行锁事务 / 测试内存适配器                            |
+| `store.ts`                  | PostgreSQL 只读快照 / 行锁写事务 / 测试内存适配器                            |
 | `worker.ts`                 | 调度、续租、取消、故障收敛、工具治理与子 Agent                  |
 | `runtime.ts`                | Pi AgentFactory、EnterpriseResourceLoader、Session entry 持久化 |
 | `adapters/sandbox.ts`       | Cube Volume / Sandbox 管理、工作区工具租约                      |
@@ -29,7 +29,7 @@ MCP 发现只遍历当前 Agent 的 Server 列表；调用与审批前再次检�
 
 审批保存模型请求的工具名称和校验后的参数；批准后新 Run 先检查当前 ACL/工具能力，再执行保存的操作一次，随后将结果送入 Pi。拒绝不会执行该操作。中途 Worker 故障将新 Run 标记 FAILED，不会自动重新执行批准过的操作。
 
-同 Session 写入互斥由事务保证。不同 Session 可并行推理；同 Workspace 的所有远程工具串行，冲突返回 WORKSPACE_BUSY。SDK/工具错误不由 Harness 自动重试，模型可看到已确认失败的结果；未知结果必须人工处理。
+同 Session 写入互斥由事务保证。不同 Session 可并行推理；同 Workspace 的 Agent 远程工具与文件写入串行，冲突返回 WORKSPACE_BUSY；文件读取使用独立临时实例，可与 Agent 工具并行，不改变 Agent 生命周期。文件租约阻止生命周期操作/删除与文件访问重叠；独立实例只挂载 Workspace，纳入 owner/全局配额，结束后确认 Kill，未知创建/清理结果保留容量。SDK/工具错误不由 Harness 自动重试，模型可看到已确认失败的结果；未知结果必须人工处理。
 
 取消会中断 Pi；远程工具执行中会 Kill 整个 Workspace Sandbox，并保留 Volume。Kill 失败时尝试记录 `REMOTE_CANCEL_UNCONFIRMED` / FAILED，而不是声称远端进程已停止。取消期间同 Workspace 的工具租约阻止其他工具进入。下一次访问会连接或重建实例。真实远端取消语义仍需集群验收。
 
@@ -66,10 +66,18 @@ Sandbox 容量保存在单独的 `harness_sandbox_capacity` JSONB 行，PostgreS
 
 Worker 定期扫描空闲工作区，并通过同一 Workspace 工具租约再次检查最后访问时间与 QUEUED/RUNNING Run。暂停保留实例；释放只 Kill 实例，不删除 Volume/Session/登记快照。快照创建/列表/删除/恢复/克隆加入 Workspace ACL 和审计。恢复/克隆用 SDK 快照模板显式重建网络与挂载，检查快照的技能范围与当前注册/部署映射；克隆不复用原 Workspace Volume。快照不是外置 Volume 或 PostgreSQL 的备份。真实 Cube 暂停/恢复、快照语义与跨节点行为仍需集群验收。
 
-`migrations/001_initial.sql` 可重复执行。首版有一张 `harness_tenants` 表，整个租户状态作为事务聚合。所有 API/Worker 操作从可信身份选择 Tenant，使用参数化 SQL；租户行锁保证多实例一致性。这是明确的容量折中，不宣称等价于附件中的完整关系表设计。
+`migrations/001_initial.sql` 可重复执行。首版有一张 `harness_tenants` 表，整个租户状态作为事务聚合。所有 API/Worker 操作从可信身份选择 Tenant，使用参数化 SQL；写事务使用租户行锁保证多实例一致性；只读接口执行单条普通 SELECT，返回分离快照，不创建缺失租户、不获取 FOR UPDATE 锁、不更新 revision。SSE、列表、统计、MCP 授权检查及 Worker 空闲扫描/执行上下文查询采用只读接口，业务变更、心跳、事件和每请求完成审计仍写事务。容量 get/usage 同样采用 capacityRead。这是明确的容量折中，不宣称等价于附件中的完整关系表设计。
 
 事件序号在租户内单调递增；SSE `Last-Event-ID` / `after` 仅回放该 Run 的事件。当前保留期为无限，生产必须设置归档/删除政策并拆分大日志表。SSE 暂停于 WAITING_INPUT；回答返回新 Run ID 后，前端订阅新 Run。
 
 Volume 名为 `ws-{workspace UUID}`，创建前查询同名 Volume，允许恢复“创建后未保存引用”的情况。Sandbox 附有 Workspace Volume / Bundle 的 metadata 供外部资产对账。创建 Sandbox 后、记录 ID 前进程崩溃仍可能留下孤儿实例；首版无完整资产扫描任务，需按 metadata 与数据库引用对账。禁止删除仍有 Run 或工具租约的工作区；先取消并等终态，再删除。清理依次 Kill Sandbox → 删除 Volume → 删除 Workspace 元数据；Session/Run 日志保留但资源不再可访问，适用于审计归档策略定稿前。
 
 部署服务应使用独立的数据库账号、容器非 root 身份、仅必要网络出口。生产 `TENANT_CAPABILITIES_JSON` 限定每个租户可引用的 Skill Bundle 和 MCP Endpoint，租户管理员也不能扩大这个上限。MCP URL 和模型网关 URL 只来自部署配置，后台不能填写任意 URL 或可执行代码。Endpoint 网络 allowlist、TLS CA 与凭证授权必须由基础设施提供。
+
+## work 分支 Issue #1–#4 回归
+
+Worker 对排序后的租户保存上次扫描游标，下个 tick 从后继租户开始；游标随 Worker 生命周期保存，新建/删除租户仍按排序寻找后继。每 tick 每租户至多领取一个 Run；同 Worker 的重叠 tick 串行，多 Worker 仍在数据库写事务中原子领取。空闲扫描不写回状态，过期租约和实际领取会在写事务里再次检查。Run 租约恢复、取消和状态迁移沿用原规则。
+
+Sandbox 工具参数中的 manifest 注册表由 Harness 覆盖注入，模型不能选择摘要。远程代码在规范路径检查后读取 manifest 并比对实际字节的 SHA-256，所有工具执行前校验当前挂载清单；read/grep 返回内容前再次验证解析后的文件身份。grep 不吞掉完整性异常。Worker 对返回的规范路径追加验证，有 Skill 的读取缺少路径身份时拒绝。辅助文件不套用 manifest 摘要。允许读取指向 manifest 的范围内符号链接别名，但登记 manifest 本身不能是符号链接。bash 的执行前校验依赖只读不可变技能 Volume，不能保证外部发布者并发改写后的内容。
+
+回归覆盖：只读快照不持久化变更、读回调并行；PostgreSQL revision 不变、持有写锁时读旧已提交快照；SSE 两页以上顺序回放、Last-Event-ID、空闲轮询无写事务和即时 ACL 撤销；viewer 文件 API 与 Skill Agent 并发、实例/范围/空闲计时不变、路径拒绝、配额及未知清理重试；规范/点点/符号链接路径摘要错误拒绝、grep/bash 执行前检查、辅助文件兼容；双租户持续入队轮询、重叠 tick 与真实 PostgreSQL 独立 Worker 单次领取。只读混合负载结果与限制见 [read-benchmark.md](read-benchmark.md)。

@@ -19,6 +19,8 @@ export class Worker {
   private active = new Set<Promise<void>>();
   private controllers = new Set<AbortController>();
   private maintenance?: Promise<unknown>;
+  private lastTenant?: string;
+  private tickTail: Promise<void> = Promise.resolve();
   constructor(
     private service: HarnessService,
     private runtime: Runtime,
@@ -26,7 +28,13 @@ export class Worker {
     private mcp: MCPManager,
     private concurrency = 4,
   ) {}
-  async tick() {
+  tick() {
+    const task = this.tickTail.then(() => this.tickOnce());
+    this.tickTail = task.catch(() => {});
+    return task;
+  }
+  private async tickOnce() {
+    if (this.stopping) return;
     if (!this.maintenance) {
       const task = this.sandbox.sweepIfDue().catch(() => {});
       this.maintenance = task;
@@ -34,8 +42,24 @@ export class Worker {
         if (this.maintenance === task) this.maintenance = undefined;
       });
     }
-    for (const tenant of await this.service.store.tenants()) {
-      if (this.active.size >= this.concurrency) break;
+    const tenants = (await this.service.store.tenants()).sort();
+    let start =
+      this.lastTenant === undefined
+        ? 0
+        : tenants.findIndex((t) => t > this.lastTenant!);
+    if (start < 0) start = 0;
+    for (let i = 0; i < tenants.length; i++) {
+      const tenant = tenants[(start + i) % tenants.length]!;
+      if (this.stopping || this.active.size >= this.concurrency) break;
+      this.lastTenant = tenant;
+      // Idle scans are snapshots; claiming/recovering still rechecks under tx.
+      const pending = await this.service.store.read(tenant, (s) =>
+        Object.values(s.runs).some(
+          (r) =>
+            r.state === "QUEUED" || (r.lease && r.lease.expires < Date.now()),
+        ),
+      );
+      if (!pending) continue;
       const r = await this.service.store.tx(tenant, (s) => {
         for (const old of Object.values(s.runs)) {
           if (old.lease && old.lease.expires < Date.now()) {
@@ -80,6 +104,7 @@ export class Worker {
   }
   async stop() {
     this.stopping = true;
+    await this.tickTail;
     for (const c of this.controllers) c.abort();
     await Promise.all(this.active);
     await this.maintenance;
@@ -122,7 +147,7 @@ export class Worker {
         event(s, r, type, data);
       });
     const get = () =>
-      this.service.store.tx(tenant, (s) => {
+      this.service.store.read(tenant, (s) => {
         const r = this.owned(s, initial.id);
         const { ses, config } = authorizedRun(s, r);
         if (!this.service.hasBundle(config.skillBundle, r.actor.tenantId))
@@ -237,8 +262,14 @@ export class Worker {
           );
           if (bare === "read") {
             const fresh = await get();
-            const sk = fresh.skills.find((s) => s.path === args.path);
-            if (sk && (result as { sha256?: string }).sha256 !== sk.digest)
+            const path = (result as { path?: string }).path;
+            if (fresh.skills.length && typeof path !== "string")
+              throw new Fault(409, "SKILL_IDENTITY_UNCONFIRMED");
+            const skill = fresh.skills.find((s) => s.path === path);
+            if (
+              skill &&
+              (result as { sha256?: string }).sha256 !== skill.digest
+            )
               throw new Fault(409, "SKILL_DIGEST_MISMATCH");
           }
         }
@@ -260,7 +291,7 @@ export class Worker {
       const mcp = await this.mcp.discover(initial.actor, ctx.config);
       let prompt = ctx.r.prompt;
       if (initial.resumedFrom) {
-        const i = await this.service.store.tx(
+        const i = await this.service.store.read(
           tenant,
           (s) => s.interactions[initial.resumedFrom!],
         );

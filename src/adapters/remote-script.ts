@@ -3,6 +3,8 @@ export const remoteScript = String.raw`
 import os,sys,json,base64,hashlib,tempfile,subprocess,signal,uuid
 p=json.loads(base64.b64decode(sys.argv[1])); op=p['op']; a=p['args']; limit=262144
 root='/workspace'
+manifest_hashes={}
+class SkillIntegrityError(Exception): pass
 def path(value,write=False):
  if not isinstance(value,str) or '\x00' in value: raise Exception('INVALID_PATH')
  v=value if value.startswith('/') else root+'/'+value
@@ -30,6 +32,7 @@ def read(v):
    b=f.read(limit+1)
  finally: os.close(fd)
  if len(b)>limit: raise Exception('FILE_TOO_LARGE')
+ if v in manifest_hashes and hashlib.sha256(b).hexdigest()!=manifest_hashes[v]: raise SkillIntegrityError('SKILL_DIGEST_MISMATCH')
  return b.decode('utf8')
 def write(v,content):
  b=content.encode('utf8')
@@ -43,8 +46,15 @@ def write(v,content):
   try: os.unlink(tmp,dir_fd=fd)
   except FileNotFoundError: pass
   os.close(fd)
+# Only the harness supplies this registry; validate canonical identities and bytes
+# before all tools, including grep and approved shell commands.
+for manifest in a.get('_skillManifests',[]):
+ v=path(manifest['path'])
+ if v!=manifest['path']: raise SkillIntegrityError('SKILL_IDENTITY_UNCONFIRMED')
+ manifest_hashes[v]=manifest['digest']
+for v in manifest_hashes: read(v)
 if op=='read':
- v=path(a['path']); text=read(v); result={'text':text,'sha256':hashlib.sha256(text.encode()).hexdigest()}
+ v=path(a['path']); text=read(v); result={'path':v,'text':text,'sha256':hashlib.sha256(text.encode()).hexdigest()}
 elif op in ['write','edit']:
  v=path(a['path'],True)
  if op=='edit':
@@ -76,7 +86,8 @@ elif op in ['find','grep']:
      for n,line in enumerate(text.splitlines()):
       if a['pattern'] in line: matches.append({'path':q,'line':n+1,'text':line[:1000]})
       if len(matches)>=500: break
-    except (UnicodeError,Exception): pass
+    except SkillIntegrityError: raise
+    except Exception: pass
    if len(matches)>=500: break
   if scanned>10000 or bytes_scanned>16777216 or len(matches)>=500: break
  result={'matches':matches,'truncated':scanned>10000 or bytes_scanned>16777216 or len(matches)>=500}
