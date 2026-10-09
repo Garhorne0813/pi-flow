@@ -35,10 +35,10 @@ DEV_TOKEN=local-demo-token-2026 docker compose -f compose.demo.yml up --build
 - 真正调用 Pi SDK，受控 ResourceLoader，无本地资源自动发现；只暴露 `remote_*` 和构建期工具，关闭默认工具/动态 Extensions/Codemode。
 - CubeSandbox 独立工作区 Volume、按 Agent 授权挂载的只读技能 Volume、`/workspace` RW；按需启动、连接、重建、暂停、销毁；工作区工具执行互斥。
 - Remote read/write/edit/bash/ls/grep/find：非 root、路径与符号链接限制、原子替换、SHA-256 编辑冲突检测、扫描与输出限制、远程命令超时。
-- 真实 Streamable HTTP MCP Client：部署配置中的 HTTPS Endpoint、工具白名单、调用前撤销检查、服务凭证与审批。
+- 真实 Streamable HTTP MCP Client：部署配置中的 HTTPS Endpoint、工具白名单、调用前撤销检查、服务凭证与审批；发现继承 Run 取消/剩余 deadline，总预算最多 30 秒，单 Agent 最多 16 个 Server，连接清理最多等待 250 ms。
 - 独立 Session 子 Agent；能力交集、相同 Skill Bundle、深度/数量/共享步骤与 Token 预算、级联取消。
 - 请求 ID、Run/Session/Tool 事件关联、元数据审计和租户运行统计。
-- Sandbox 用户/全局活跃配额、跨 Worker 原子预留、空闲暂停/释放、手动恢复与保留 Volume 的释放；Workspace 绑定的实例快照创建/列表/删除/恢复/克隆。
+- Sandbox 用户/全局活跃配额、跨 Worker 原子预留与持久 fencing、创建/连接期间取消清理、空闲暂停/释放、手动恢复与保留 Volume 的释放；Workspace 绑定的实例快照创建/列表/删除/恢复/克隆。
 
 ## 接入真实服务
 
@@ -134,3 +134,5 @@ NODE_USE_ENV_PROXY=1 npm run test:deepseek:capabilities
 ## 只读轮询负载对比
 
 `npm run bench:store:reads` 在已迁移的 `TEST_DATABASE_URL` 测试库上，对比旧 SSE 写事务路径与新只读路径。创建并清理专用租户，模拟 100 个 250 ms 事件轮询与 4 个 1 s Run 心跳；不连接模型或 Sandbox。参数与实测结果见 [docs/read-benchmark.md](docs/read-benchmark.md)。SSE/列表查询不锁定或写回租户行；每个请求结束时仍保留一次审计写入。
+
+容量 `operation` 是每次操作生成的唯一持久标识，激活后也保留；预留与接管原子比较前一条记录，暂停/释放/未知结果只更新匹配的标识。过期请求不能覆盖新请求的配额，普通 Agent 实例、文件实例和生命周期操作使用同一规则。取消在创建/连接/激活各阶段检查：已知实例确认 Kill 后退还配额；无 ID 的创建未知结果或 Kill 未确认继续占用，Workspace Volume 保留。升级时须同时更新并重启 API 与所有 Worker，避免与旧版不校验 fencing 的写入者混跑；现有 JSONB 状态兼容，无额外迁移。

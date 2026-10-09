@@ -38,7 +38,7 @@ export const AgentConfig = z
       .strict(),
     tools: z.array(z.enum(tools)).max(10),
     skills: z.array(z.string()).default([]),
-    mcpServers: z.array(z.string()).default([]),
+    mcpServers: z.array(z.string()).max(16).default([]),
     subagents: z.array(z.string()).default([]),
     skillBundle: z.string().min(1),
     maxTokens: z.number().int().min(100).max(1000000).default(100000),

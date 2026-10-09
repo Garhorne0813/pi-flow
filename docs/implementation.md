@@ -81,3 +81,15 @@ Worker 对排序后的租户保存上次扫描游标，下个 tick 从后继租�
 Sandbox 工具参数中的 manifest 注册表由 Harness 覆盖注入，模型不能选择摘要。远程代码在规范路径检查后读取 manifest 并比对实际字节的 SHA-256，所有工具执行前校验当前挂载清单；read/grep 返回内容前再次验证解析后的文件身份。grep 不吞掉完整性异常。Worker 对返回的规范路径追加验证，有 Skill 的读取缺少路径身份时拒绝。辅助文件不套用 manifest 摘要。允许读取指向 manifest 的范围内符号链接别名，但登记 manifest 本身不能是符号链接。bash 的执行前校验依赖只读不可变技能 Volume，不能保证外部发布者并发改写后的内容。
 
 回归覆盖：只读快照不持久化变更、读回调并行；PostgreSQL revision 不变、持有写锁时读旧已提交快照；SSE 两页以上顺序回放、Last-Event-ID、空闲轮询无写事务和即时 ACL 撤销；viewer 文件 API 与 Skill Agent 并发、实例/范围/空闲计时不变、路径拒绝、配额及未知清理重试；规范/点点/符号链接路径摘要错误拒绝、grep/bash 执行前检查、辅助文件兼容；双租户持续入队轮询、重叠 tick 与真实 PostgreSQL 独立 Worker 单次领取。只读混合负载结果与限制见 [read-benchmark.md](read-benchmark.md)。
+
+## work 分支 Issue #5–#7 回归
+
+容量操作使用唯一 `operation` 作为持久 fencing token，激活、暂停和 released tombstone 都保留标识。reserve/claim 在同一 `capacityTx` 内比较预期 operation、实例 ID、状态与更新时间；active/pending 失去标识时拒绝，released/unknown/paused 的迟到标识不修改状态。接管先更新标识及 reserved 状态，再 Kill 旧实例；旧实例清理与新实例配额归属分别处理。临时文件实例、Agent、手动生命周期、快照恢复和 Workspace 删除均检查归属。每次 Agent 工具租约生成新标识，即使同 Run 连续调用也不会复用；心跳失败后 Kill 同样检查标识，避免迟到取消杀掉新请求复用的实例。
+
+Run AbortSignal 贯穿 Sandbox provisioning：创建前、连接/创建完成、容量激活和回调边界重新检查。已取消信号在 listener 安装后再次检查，防止遗漏。取消时等待已发起 provisioning 的 SDK 返回；得到 ID 后确认 Kill 并清除所属实例/容量，保留 Workspace Volume。创建结果未知（无 ID）或 Kill 未确认保持 unknown/charged；不会把取消当作远端从未创建的证明。清理只能修改本代容量和仍由本代持有的 Workspace 元数据。
+
+MCP discovery 继承 Run 信号，完整预算最多 30 秒且不超过剩余 deadline；Server 配置最多 16 项，兼容历史状态时也检查上限。connect/listTools 的 SDK options 和 transport 的 fetch 都传播 signal；本地 Promise race 保证故障实现忽略 signal 时也能退出等待。连接失败和每个 Server 结束后都直接尝试关闭 Client 与 Transport，以 250 ms 限制清理等待，避免异常关闭覆盖原始错误。成功发现后移除发现定时器与 Run listener；实际工具调用使用该次调用的 Run signal。
+
+确定性回归编排 A 文件租约过期、B 接管并激活、A 迟到成功/未知 Kill，两种情况都保持 B 记录与配额；Agent 迟到取消同样不 Kill B 复用的实例。真实 PostgreSQL 的两个客户端竞争同一观察值，仅一方接管，旧 active/paused/released/unknown 无法覆盖新记录。取消覆盖创建前、阻塞创建、连接、激活/listener 边界、已知清理成功、Kill 未确认和无 ID 创建未知。MCP 覆盖多 Server、多页、connect/listTools 永久卡住、关闭抛错/卡住、总预算、预先取消/过期 deadline/Server 上限、Worker 释放槽位并调度下一条，以及真实本地 HTTPS 卡住 tools/list 时断开传输。原有白名单、Endpoint/grant 与撤销测试继续保留。
+
+部署升级须同时更新 API 和所有 Worker，不混跑旧版无 fencing 的容量写入者。JSONB 中旧 active/paused 条目可能缺少 operation，新的 reserve/claim 在比较原记录后为本次操作建立标识；无数据库结构迁移。真实 Cube 集群的取消和存储挂载语义仍需验收。

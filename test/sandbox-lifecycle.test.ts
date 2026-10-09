@@ -517,3 +517,285 @@ test("worker loop waits for in-flight idle maintenance before database shutdown"
     await Promise.all([loop, stopping]);
   }
 });
+
+for (const lateKillFails of [false, true])
+  test(`expired file request cannot ${lateKillFails ? "mark unknown" : "release"} successor capacity`, async () => {
+    const f = await fixture();
+    const w = await f.make();
+    await f.service.createSession(alice, w.id, f.agent.id);
+    await f.seed(w.id);
+    const agent = (await f.sandbox.status(alice, w.id)).sandboxId;
+    let enteredA!: () => void,
+      enteredB!: () => void,
+      releaseA!: () => void,
+      releaseB!: () => void;
+    const startedA = new Promise<void>((r) => {
+        enteredA = r;
+      }),
+      startedB = new Promise<void>((r) => {
+        enteredB = r;
+      });
+    const gateA = new Promise<void>((r) => {
+        releaseA = r;
+      }),
+      gateB = new Promise<void>((r) => {
+        releaseB = r;
+      });
+    const execute = f.provider.execute.bind(f.provider),
+      kill = f.provider.kill.bind(f.provider);
+    let oldSid: string | undefined,
+      files = 0,
+      rejectOldKill = false;
+    f.provider.execute = async (sid, op, args) => {
+      if (sid !== agent) {
+        if (++files === 1) {
+          oldSid = sid;
+          enteredA();
+          await gateA;
+          return { text: "old" };
+        }
+        enteredB();
+        await gateB;
+      }
+      return execute(sid, op, args);
+    };
+    f.provider.kill = async (sid) => {
+      if (rejectOldKill && sid === oldSid) throw Error("late old Kill unknown");
+      return kill(sid);
+    };
+    const a = f.sandbox.executeFile(alice, w.id, "A", "read", {
+      path: "file.txt",
+    });
+    const checkedA = assert.rejects(a, {
+      code: lateKillFails ? "FILE_SANDBOX_CLEANUP_UNCONFIRMED" : "LEASE_LOST",
+    });
+    let b: Promise<unknown> | undefined;
+    try {
+      await startedA;
+      await f.store.tx("one", (s) => {
+        s.workspaces[w.id]!.fileLock!.expires = 0;
+      });
+      b = f.sandbox.executeFile(alice, w.id, "B", "read", { path: "file.txt" });
+      await startedB;
+      const before = await f.sandbox.capacity.get("one", w.id + ":files");
+      assert.equal(before!.state, "active");
+      assert.notEqual(before!.sandboxId, oldSid);
+      rejectOldKill = lateKillFails;
+      releaseA();
+      await checkedA;
+      assert.deepEqual(
+        await f.sandbox.capacity.get("one", w.id + ":files"),
+        before,
+      );
+      assert.equal((await f.sandbox.capacity.usage(alice)).user.active, 2);
+      assert.equal(f.provider.boxes.has(before!.sandboxId!), true);
+    } finally {
+      releaseA();
+      releaseB();
+      await checkedA;
+      if (b) await b;
+    }
+    assert.equal((await f.sandbox.capacity.usage(alice)).user.active, 1);
+  });
+
+for (const stage of ["before", "create", "connect", "activation"] as const)
+  test(`cancellation at ${stage} cleans known instances without running commands`, async () => {
+    const f = await fixture();
+    const w = await f.make();
+    const controller = new AbortController();
+    let commands = 0,
+      creations = 0;
+    const create = f.provider.create.bind(f.provider),
+      connect = f.provider.connect.bind(f.provider);
+    if (stage === "connect") await f.seed(w.id);
+    f.provider.execute = async () => {
+      commands++;
+      return {};
+    };
+    f.provider.create = async (...args) => {
+      creations++;
+      const sid = await create(...args);
+      if (stage === "create") controller.abort();
+      return sid;
+    };
+    f.provider.connect = async (sid) => {
+      await connect(sid);
+      if (stage === "connect") controller.abort();
+    };
+    if (stage === "activation") {
+      const active = f.sandbox.capacity.active.bind(f.sandbox.capacity);
+      f.sandbox.capacity.active = async (...args) => {
+        await active(...args);
+        controller.abort();
+      };
+    }
+    if (stage === "before") controller.abort();
+    await assert.rejects(
+      f.sandbox.execute(
+        alice,
+        w.id,
+        "cancel",
+        "default",
+        "ls",
+        {},
+        controller.signal,
+      ),
+      { name: "AbortError" },
+    );
+    assert.equal(commands, 0);
+    assert.equal(f.provider.boxes.size, 0);
+    assert.equal((await f.sandbox.capacity.usage(alice)).user.active, 0);
+    assert.equal((await f.sandbox.status(alice, w.id)).state, "released");
+    if (stage === "before") assert.equal(creations, 0);
+  });
+
+for (const killFails of [false, true])
+  test(`cancellation during blocked create ${killFails ? "retains unknown capacity" : "confirms cleanup"}`, async () => {
+    const f = await fixture();
+    const w = await f.make();
+    let started!: () => void, release!: () => void;
+    const begun = new Promise<void>((r) => {
+        started = r;
+      }),
+      gate = new Promise<void>((r) => {
+        release = r;
+      });
+    const create = f.provider.create.bind(f.provider);
+    f.provider.create = async (...args) => {
+      started();
+      await gate;
+      return create(...args);
+    };
+    if (killFails)
+      f.provider.kill = async () => {
+        throw Error("Kill unknown");
+      };
+    const controller = new AbortController();
+    const execution = f.sandbox.execute(
+      alice,
+      w.id,
+      "cancel",
+      "default",
+      "ls",
+      {},
+      controller.signal,
+    );
+    const checked = assert.rejects(
+      execution,
+      killFails
+        ? { code: "REMOTE_CANCEL_UNCONFIRMED" }
+        : { name: "AbortError" },
+    );
+    try {
+      await begun;
+      controller.abort();
+      assert.equal(
+        (await f.sandbox.capacity.get("one", w.id))!.state,
+        "reserved",
+      );
+      assert.equal((await f.sandbox.capacity.usage(alice)).user.active, 1);
+    } finally {
+      release();
+    }
+    await checked;
+    const entry = await f.sandbox.capacity.get("one", w.id);
+    if (killFails) {
+      assert.equal(entry!.state, "unknown");
+      assert.ok(entry!.sandboxId);
+      assert.equal(f.provider.boxes.has(entry!.sandboxId!), true);
+      assert.equal((await f.sandbox.capacity.usage(alice)).user.active, 1);
+    } else {
+      assert.equal(entry, undefined);
+      assert.equal(f.provider.boxes.size, 0);
+      assert.equal((await f.sandbox.capacity.usage(alice)).user.active, 0);
+    }
+  });
+
+test("cancelled create with no returned ID keeps an unknown charged reservation", async () => {
+  const f = await fixture();
+  const w = await f.make();
+  const controller = new AbortController();
+  f.provider.create = async () => {
+    controller.abort();
+    throw Error("create outcome unknown");
+  };
+  await assert.rejects(
+    f.sandbox.execute(
+      alice,
+      w.id,
+      "cancel",
+      "default",
+      "ls",
+      {},
+      controller.signal,
+    ),
+    { code: "REMOTE_CANCEL_UNCONFIRMED" },
+  );
+  const entry = await f.sandbox.capacity.get("one", w.id);
+  assert.equal(entry!.state, "unknown");
+  assert.equal(entry!.sandboxId, undefined);
+  assert.equal((await f.sandbox.capacity.usage(alice)).user.active, 1);
+});
+
+test("late Agent cancellation cannot kill a reused instance or clear the successor generation", async () => {
+  const f = await fixture();
+  const w = await f.make();
+  await f.seed(w.id);
+  let enteredA!: () => void,
+    enteredB!: () => void,
+    releaseA!: () => void,
+    releaseB!: () => void;
+  const startedA = new Promise<void>((r) => {
+      enteredA = r;
+    }),
+    startedB = new Promise<void>((r) => {
+      enteredB = r;
+    });
+  const gateA = new Promise<void>((r) => {
+      releaseA = r;
+    }),
+    gateB = new Promise<void>((r) => {
+      releaseB = r;
+    });
+  const controller = new AbortController();
+  const a = f.sandbox.withLease(
+    alice,
+    w.id,
+    "same-run",
+    "default",
+    async () => {
+      enteredA();
+      await gateA;
+    },
+    [],
+    controller.signal,
+  );
+  const checkedA = assert.rejects(a, { code: "CAPACITY_LEASE_LOST" });
+  let b: Promise<void> | undefined;
+  try {
+    await startedA;
+    const old = await f.sandbox.capacity.get("one", w.id);
+    await f.store.tx("one", (s) => {
+      s.workspaces[w.id]!.lock!.expires = 0;
+    });
+    b = f.sandbox.withLease(alice, w.id, "same-run", "default", async () => {
+      enteredB();
+      await gateB;
+    });
+    await startedB;
+    const before = await f.sandbox.capacity.get("one", w.id);
+    assert.notEqual(before!.operation, old!.operation);
+    assert.equal(before!.sandboxId, old!.sandboxId);
+    controller.abort();
+    releaseA();
+    await checkedA;
+    assert.deepEqual(await f.sandbox.capacity.get("one", w.id), before);
+    assert.equal(f.provider.boxes.has(before!.sandboxId!), true);
+    assert.equal((await f.sandbox.status(alice, w.id)).state, "active");
+  } finally {
+    releaseA();
+    releaseB();
+    await checkedA;
+    if (b) await b;
+  }
+});

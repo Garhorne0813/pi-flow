@@ -95,7 +95,7 @@ test(
       );
       const results = await Promise.allSettled(
         workspaces.map((w, i) =>
-          managers[i % 2]!.reserve(tenants[i]!, w, "op-" + i),
+          managers[i % 2]!.reserve(tenants[i]!, w, "op-" + i, undefined),
         ),
       );
       const successes = results.flatMap((r, i) =>
@@ -143,9 +143,18 @@ test(
           2,
         );
         const released = successes[0]!;
-        await capacity.paused(tenants[released]!, workspaces[released]!.id);
+        await capacity.paused(
+          tenants[released]!,
+          workspaces[released]!.id,
+          "op-" + released,
+        );
         const next = results.findIndex((r) => r.status === "rejected");
-        await capacity.reserve(tenants[next]!, workspaces[next]!, "resumed");
+        await capacity.reserve(
+          tenants[next]!,
+          workspaces[next]!,
+          "resumed",
+          undefined,
+        );
         assert.equal(
           (
             await capacity.usage({
@@ -157,7 +166,15 @@ test(
           2,
         );
         await assert.rejects(
-          capacity.reserve(tenants[released]!, workspaces[released]!, "resume"),
+          capacity.reserve(
+            tenants[released]!,
+            { ...workspaces[released]!, sandboxId: "box-" + released },
+            "resume",
+            await capacity.inspect(
+              tenants[released]!,
+              workspaces[released]!.id,
+            ),
+          ),
           { code: "GLOBAL_SANDBOX_LIMIT" },
         );
       } finally {
@@ -334,6 +351,82 @@ test(
         "DELETE FROM harness_tenants WHERE tenant_id=$1",
         [actor.tenantId],
       );
+      await Promise.all(stores.map((s) => s.close()));
+    }
+  },
+);
+
+test(
+  "PostgreSQL fencing atomically elects takeover and rejects stale capacity transitions",
+  { skip: !url },
+  async () => {
+    const stores = [new PostgresStore(url!), new PostgresStore(url!)];
+    const tenant = "fence-" + id(),
+      wid = id();
+    const w = {
+      id: wid,
+      ownerId: "user",
+      name: "fence",
+      members: { user: "owner" as const },
+    };
+    const managers = stores.map(
+      (s) =>
+        new SandboxCapacity(
+          s,
+          SandboxPolicySchema.parse({
+            maxActivePerUser: 1,
+            maxActiveTotal: 100,
+          }),
+        ),
+    );
+    try {
+      await stores[0]!.pool.query(
+        await readFile("migrations/001_initial.sql", "utf8"),
+      );
+      await managers[0]!.reserve(tenant, w, "A", undefined);
+      await managers[0]!.active(tenant, wid, "A", "sid-A");
+      const old = (await managers[0]!.get(tenant, wid))!;
+      const claims = await Promise.allSettled(
+        managers.map((m, i) => m.claim(tenant, wid, old, "B" + i)),
+      );
+      assert.equal(claims.filter((c) => c.status === "fulfilled").length, 1);
+      const winner = claims.findIndex((c) => c.status === "fulfilled"),
+        token = "B" + winner;
+      const manager = managers[winner]!;
+      await manager.pending(tenant, wid, token, "sid-B");
+      await manager.active(tenant, wid, token, "sid-B");
+      const before = await manager.get(tenant, wid);
+      const stale = await Promise.all([
+        managers[0]!.released(tenant, wid, "A"),
+        managers[1]!.unknown(tenant, wid, "A", "sid-A"),
+        managers[0]!.paused(tenant, wid, "A"),
+      ]);
+      assert.deepEqual(stale, [false, false, false]);
+      assert.deepEqual(await managers[1]!.get(tenant, wid), before);
+      await assert.rejects(managers[0]!.active(tenant, wid, "A", "sid-A"), {
+        code: "CAPACITY_LEASE_LOST",
+      });
+      await assert.rejects(
+        managers[1]!.reserve(
+          tenant,
+          { ...w, sandboxId: "sid-A" },
+          "late-A",
+          old,
+        ),
+        { code: "CAPACITY_LEASE_LOST" },
+      );
+      await manager.unknown(tenant, wid, token, "sid-B");
+      assert.equal((await manager.get(tenant, wid))!.sandboxId, "sid-B");
+      assert.equal(
+        (await manager.usage({ tenantId: tenant, userId: "user", admin: true }))
+          .user.active,
+        1,
+      );
+    } finally {
+      await stores[0]!.capacityTx((s) => {
+        for (const [k, e] of Object.entries(s.entries))
+          if (e.tenantId === tenant) delete s.entries[k];
+      });
       await Promise.all(stores.map((s) => s.close()));
     }
   },

@@ -302,6 +302,47 @@ export class SandboxManager {
     this.policy = SandboxPolicySchema.parse(policy);
     this.capacity = new SandboxCapacity(store, this.policy);
   }
+  private async cancellationCleanup(
+    a: Actor,
+    wid: string,
+    owner: string,
+    sid: string | undefined,
+    killing?: Promise<void>,
+    creationStarted = false,
+  ) {
+    const current = await this.capacity.inspect(a.tenantId, wid);
+    if (current?.operation !== owner)
+      throw new Fault(409, "CAPACITY_LEASE_LOST");
+    if (!sid && creationStarted) {
+      await this.capacity.unknown(a.tenantId, wid, owner);
+      throw new Fault(502, "REMOTE_CANCEL_UNCONFIRMED");
+    }
+    try {
+      if (sid) {
+        await this.capacity.pending(a.tenantId, wid, owner, sid);
+        await (killing ?? this.provider.kill(sid));
+      }
+      const released = await this.capacity.released(a.tenantId, wid, owner);
+      if (released)
+        await this.store.tx(a.tenantId, (s) => {
+          const w = s.workspaces[wid];
+          if (w?.lock?.owner === owner) {
+            delete w.sandboxId;
+            delete w.sandboxState;
+            delete w.sandboxSkillScope;
+          }
+        });
+    } catch (e) {
+      if (e instanceof Fault && e.code === "CAPACITY_LEASE_LOST") throw e;
+      const marked = await this.capacity.unknown(a.tenantId, wid, owner, sid);
+      if (marked)
+        await this.store.tx(a.tenantId, (s) => {
+          const w = s.workspaces[wid];
+          if (w?.lock?.owner === owner) w.sandboxState = "unknown";
+        });
+      throw new Fault(502, "REMOTE_CANCEL_UNCONFIRMED");
+    }
+  }
   async withLease<T>(
     a: Actor,
     wid: string,
@@ -309,10 +350,14 @@ export class SandboxManager {
     bundle: string,
     fn: (sid: string) => Promise<T>,
     skillIds: readonly string[] = [],
+    signal?: AbortSignal,
   ): Promise<T> {
+    signal?.throwIfAborted();
+    owner = `${owner}:${crypto.randomUUID()}`;
     if (!this.canUseBundle(bundle, a.tenantId))
       throw new Fault(403, "BUNDLE_NOT_GRANTED");
     const { skills, scope } = await this.store.tx(a.tenantId, (s) => {
+      signal?.throwIfAborted();
       const w = workspace(s, a, wid);
       if (w.lock && w.lock.expires > Date.now())
         throw new Fault(409, "WORKSPACE_BUSY");
@@ -329,97 +374,139 @@ export class SandboxManager {
       w.bundle = bundle;
       return { skills, scope };
     });
-    let failed = false;
-    let activeSid: string | undefined;
-    let reserved = false;
-    let activated = false;
+    let failed = false,
+      reserved = false,
+      activated = false,
+      creationStarted = false;
+    let activeSid: string | undefined, killing: Promise<void> | undefined;
+    const assertOwned = async () => {
+      signal?.throwIfAborted();
+      if (failed) throw new Fault(409, "LEASE_LOST");
+      await this.store.read(a.tenantId, (s) => {
+        const w = workspace(s, a, wid);
+        if (w.lock?.owner !== owner || w.lock.expires < Date.now())
+          throw new Fault(409, "LEASE_LOST");
+      });
+      signal?.throwIfAborted();
+    };
+    const stop = () => {
+      if (activeSid && !killing) {
+        const sid = activeSid;
+        killing = (async () => {
+          // Keep ownership while deletion is in flight; a late callback cannot
+          // kill a reused instance or overwrite a successor's capacity record.
+          await this.capacity.pending(a.tenantId, wid, owner, sid);
+          await this.provider.kill(sid);
+        })();
+        void killing.catch(() => {});
+      }
+    };
     const timer = setInterval(() => {
       void this.store
         .tx(a.tenantId, (s) => {
           const w = s.workspaces[wid];
-          if (w?.lock?.owner !== owner) throw new Fault(409, "LEASE_LOST");
+          if (w?.lock?.owner !== owner || w.lock.expires < Date.now())
+            throw new Fault(409, "LEASE_LOST");
           w.lock.expires = Date.now() + 180000;
         })
         .catch(() => {
           failed = true;
-          if (activeSid) void this.provider.kill(activeSid).catch(() => {});
+          stop();
         });
     }, 10000);
     try {
+      await assertOwned();
       const w = await this.store.read(a.tenantId, (s) => workspace(s, a, wid));
+      await this.capacity.adoptLegacy();
+      const expected = await this.capacity.inspect(a.tenantId, wid);
       let vid = w.volumeId;
       if (!vid) {
+        await assertOwned();
         vid = await this.provider.createVolume(`ws-${wid}`);
-        await this.store.tx(a.tenantId, (s) => {
-          const w = workspace(s, a, wid);
-          if (w.lock?.owner !== owner) throw new Fault(409, "LEASE_LOST");
+        await this.record(a, wid, owner, (w) => {
           w.volumeId = vid;
         });
       }
-      let sid = w.sandboxId;
-      await this.capacity.reserve(a.tenantId, w, owner);
+      await assertOwned();
+      await this.capacity.reserve(a.tenantId, w, owner, expected);
       reserved = true;
-      // Legacy boxes mounted entire bundles. Missing scope also forces replacement.
+      let sid = w.sandboxId;
+      activeSid = sid;
+      await assertOwned();
       if (sid && w.sandboxSkillScope !== scope) {
         await this.provider.kill(sid);
-        await this.store.tx(a.tenantId, (s) => {
-          const w = workspace(s, a, wid);
-          if (w.lock?.owner !== owner) throw new Fault(409, "LEASE_LOST");
+        activeSid = sid = undefined;
+        await this.record(a, wid, owner, (w) => {
           delete w.sandboxId;
           delete w.sandboxSkillScope;
           delete w.sandboxState;
         });
         await this.capacity.pending(a.tenantId, wid, owner);
-        sid = undefined;
       }
       if (sid) {
+        await assertOwned();
         try {
           await this.provider.connect(sid);
         } catch (e) {
-          if (e instanceof Fault && e.code === "SANDBOX_GONE") {
-            sid = undefined;
-            await this.capacity.pending(a.tenantId, wid, owner);
-            await this.store.tx(a.tenantId, (s) => {
-              delete s.workspaces[wid]!.sandboxId;
-              delete s.workspaces[wid]!.sandboxState;
-            });
-          } else throw e;
+          if (!(e instanceof Fault && e.code === "SANDBOX_GONE")) throw e;
+          activeSid = sid = undefined;
+          await this.capacity.pending(a.tenantId, wid, owner);
+          await this.record(a, wid, owner, (w) => {
+            delete w.sandboxId;
+            delete w.sandboxState;
+          });
         }
+        await assertOwned();
       }
       if (!sid) {
+        await assertOwned();
+        creationStarted = true;
         sid = await this.provider.create(vid, bundle, skills);
         activeSid = sid;
         await this.capacity.pending(a.tenantId, wid, owner, sid);
-        const created = sid;
-        try {
-          await this.store.tx(a.tenantId, (s) => {
-            const w = workspace(s, a, wid);
-            if (w.lock?.owner !== owner) throw new Fault(409, "LEASE_LOST");
-            w.sandboxId = created;
-            w.sandboxSkillScope = scope;
-            w.sandboxSkills = [...skillIds];
-          });
-        } catch (e) {
-          await this.provider.kill(created);
-          await this.capacity.released(a.tenantId, wid);
-          reserved = false;
-          throw e;
-        }
+        await assertOwned();
+        await this.record(a, wid, owner, (w) => {
+          w.sandboxId = sid;
+          w.sandboxSkillScope = scope;
+          w.sandboxSkills = [...skillIds];
+        });
       }
       activeSid = sid;
-      await this.store.tx(a.tenantId, (s) => {
-        const w = workspace(s, a, wid);
-        if (w.lock?.owner !== owner) throw new Fault(409, "LEASE_LOST");
+      await assertOwned();
+      await this.record(a, wid, owner, (w) => {
         w.sandboxState = "active";
         w.sandboxLastUsedAt = Date.now();
       });
       await this.capacity.active(a.tenantId, wid, owner, sid);
       activated = true;
-      if (failed) throw new Fault(409, "LEASE_LOST");
+      signal?.addEventListener("abort", stop, { once: true });
+      // An already aborted signal does not dispatch a newly added listener.
+      if (signal?.aborted) stop();
+      await assertOwned();
       const result = await fn(sid);
-      if (failed) throw new Fault(409, "LEASE_LOST");
+      await assertOwned();
       return result;
+    } catch (e) {
+      if (
+        reserved &&
+        (signal?.aborted ||
+          failed ||
+          (e instanceof Fault &&
+            ["LEASE_LOST", "CAPACITY_LEASE_LOST"].includes(e.code)))
+      ) {
+        await this.cancellationCleanup(
+          a,
+          wid,
+          owner,
+          activeSid,
+          killing,
+          creationStarted,
+        );
+        reserved = false;
+      }
+      throw e;
     } finally {
+      signal?.removeEventListener("abort", stop);
       clearInterval(timer);
       if (reserved && !activated)
         await this.capacity.unknown(a.tenantId, wid, owner, activeSid);
@@ -427,8 +514,8 @@ export class SandboxManager {
         const w = s.workspaces[wid];
         if (w?.lock?.owner === owner) {
           delete w.lock;
-          if (activated) w.sandboxLastUsedAt = Date.now();
-          else if (reserved) w.sandboxState = "unknown";
+          if (activated && w.sandboxId) w.sandboxLastUsedAt = Date.now();
+          else if (reserved && !activated) w.sandboxState = "unknown";
         }
       });
     }
@@ -450,53 +537,22 @@ export class SandboxManager {
       bundle,
       async (sid) => {
         signal?.throwIfAborted();
-        let killing: Promise<void> | undefined;
-        const stop = () => {
-          killing = this.provider.kill(sid);
-          void killing.catch(() => {});
-        };
-        signal?.addEventListener("abort", stop, { once: true });
-        try {
-          const skills = await this.store.read(a.tenantId, (s) =>
-            skillIds.map((id) => {
-              const skill = s.skills[id];
-              if (!skill?.enabled || skill.bundle !== bundle)
-                throw new Fault(403, "SKILL_DENIED");
-              return { path: skill.path, digest: skill.digest };
-            }),
-          );
-          const r = await this.provider.execute(sid, op, {
-            ...args,
-            _skillManifests: skills,
-          });
-          signal?.throwIfAborted();
-          return r;
-        } finally {
-          signal?.removeEventListener("abort", stop);
-          if (killing) {
-            try {
-              await killing;
-              await this.capacity.released(a.tenantId, wid);
-              await this.store.tx(a.tenantId, (s) => {
-                const w = s.workspaces[wid];
-                if (w) {
-                  delete w.sandboxId;
-                  delete w.sandboxState;
-                  delete w.sandboxSkillScope;
-                }
-              });
-            } catch {
-              await this.capacity.unknown(a.tenantId, wid);
-              await this.store.tx(a.tenantId, (s) => {
-                if (s.workspaces[wid])
-                  s.workspaces[wid]!.sandboxState = "unknown";
-              });
-              throw new Fault(502, "REMOTE_CANCEL_UNCONFIRMED");
-            }
-          }
-        }
+        const skills = await this.store.read(a.tenantId, (s) =>
+          skillIds.map((id) => {
+            const skill = s.skills[id];
+            if (!skill?.enabled || skill.bundle !== bundle)
+              throw new Fault(403, "SKILL_DENIED");
+            return { path: skill.path, digest: skill.digest };
+          }),
+        );
+        signal?.throwIfAborted();
+        return this.provider.execute(sid, op, {
+          ...args,
+          _skillManifests: skills,
+        });
       },
       skillIds,
+      signal,
     );
   }
   // File APIs use a temporary instance with only the workspace volume. Its
@@ -540,12 +596,16 @@ export class SandboxManager {
     const capacityId = wid + ":files";
     let sid: string | undefined,
       reserved = false,
+      creationStarted = false,
       lost = false;
     const heartbeat = setInterval(() => {
       void this.store
         .tx(a.tenantId, (s) => {
           const current = workspace(s, a, wid, writing);
-          if (current.fileLock?.owner !== owner)
+          if (
+            current.fileLock?.owner !== owner ||
+            current.fileLock.expires < Date.now()
+          )
             throw new Fault(409, "LEASE_LOST");
           current.fileLock.expires = Date.now() + 180000;
           if (current.lock?.owner === owner)
@@ -555,13 +615,37 @@ export class SandboxManager {
           lost = true;
         });
     }, 10000);
+    const assertFileOwned = () =>
+      this.store.read(a.tenantId, (s) => {
+        const current = workspace(s, a, wid, writing);
+        if (
+          lost ||
+          current.fileLock?.owner !== owner ||
+          current.fileLock.expires < Date.now()
+        )
+          throw new Fault(409, "LEASE_LOST");
+      });
     try {
+      await assertFileOwned();
       const old = await this.capacity.get(a.tenantId, capacityId);
       if (old) {
+        await assertFileOwned();
         if (!old.sandboxId) throw new Fault(409, "SANDBOX_OUTCOME_UNKNOWN");
-        await this.provider.kill(old.sandboxId);
-        await this.capacity.released(a.tenantId, capacityId);
+        await this.capacity.claim(a.tenantId, capacityId, old, owner);
+        try {
+          await this.provider.kill(old.sandboxId);
+          await this.capacity.released(a.tenantId, capacityId, owner);
+        } catch (e) {
+          await this.capacity.unknown(
+            a.tenantId,
+            capacityId,
+            owner,
+            old.sandboxId,
+          );
+          throw e;
+        }
       }
+      await assertFileOwned();
       let volume = w.volumeId;
       if (!volume) {
         volume = await this.provider.createVolume(`ws-${wid}`);
@@ -576,6 +660,8 @@ export class SandboxManager {
           if (!writing) delete current.lock;
         });
       }
+      const expected = await this.capacity.inspect(a.tenantId, capacityId);
+      await assertFileOwned();
       await this.capacity.reserve(
         a.tenantId,
         {
@@ -585,20 +671,30 @@ export class SandboxManager {
           members: w.members,
         },
         owner,
+        expected,
       );
       reserved = true;
+      await assertFileOwned();
+      creationStarted = true;
       sid = await this.provider.create(volume, w.bundle!, []);
       await this.capacity.pending(a.tenantId, capacityId, owner, sid);
       await this.capacity.active(a.tenantId, capacityId, owner, sid);
       if (lost) throw new Fault(409, "LEASE_LOST");
-      await this.store.read(a.tenantId, (s) => workspace(s, a, wid, writing));
+      await this.store.read(a.tenantId, (s) => {
+        const current = workspace(s, a, wid, writing);
+        if (
+          current.fileLock?.owner !== owner ||
+          current.fileLock.expires < Date.now()
+        )
+          throw new Fault(409, "LEASE_LOST");
+      });
       const result = await this.provider.execute(sid, op, {
         ...args,
         path,
         _workspaceOnly: true,
         _skillManifests: [],
       });
-      if (lost) throw new Fault(409, "LEASE_LOST");
+      await assertFileOwned();
       return result;
     } finally {
       clearInterval(heartbeat);
@@ -607,17 +703,14 @@ export class SandboxManager {
           if (sid) {
             try {
               await this.provider.kill(sid);
-              await this.capacity.released(a.tenantId, capacityId);
+              await this.capacity.released(a.tenantId, capacityId, owner);
             } catch {
-              await this.capacity.unknown(
-                a.tenantId,
-                capacityId,
-                undefined,
-                sid,
-              );
+              await this.capacity.unknown(a.tenantId, capacityId, owner, sid);
               throw new Fault(502, "FILE_SANDBOX_CLEANUP_UNCONFIRMED");
             }
-          } else await this.capacity.unknown(a.tenantId, capacityId, owner);
+          } else if (creationStarted)
+            await this.capacity.unknown(a.tenantId, capacityId, owner);
+          else await this.capacity.released(a.tenantId, capacityId, owner);
         }
       } finally {
         await this.store.tx(a.tenantId, (s) => {
@@ -711,18 +804,27 @@ export class SandboxManager {
   ) {
     await this.store.tx(a.tenantId, (s) => {
       const w = workspace(s, a, wid);
-      if (w.lock?.owner !== owner) throw new Fault(409, "LEASE_LOST");
+      if (w.lock?.owner !== owner || w.lock.expires < Date.now())
+        throw new Fault(409, "LEASE_LOST");
       fn(w);
     });
   }
+  private async reserveManaged(a: Actor, w: Workspace, owner: string) {
+    const expected = await this.capacity.inspect(a.tenantId, w.id);
+    await this.record(a, w.id, owner, () => {});
+    await this.capacity.reserve(a.tenantId, w, owner, expected);
+  }
   private async pauseInstance(a: Actor, w: Workspace, owner: string) {
     if (!w.sandboxId || w.sandboxState === "paused") return;
+    const entry = await this.capacity.get(a.tenantId, w.id);
+    await this.record(a, w.id, owner, () => {});
+    if (entry) await this.capacity.claim(a.tenantId, w.id, entry, owner);
     try {
       await this.provider.pause(w.sandboxId);
       await this.record(a, w.id, owner, (w) => {
         w.sandboxState = "paused";
       });
-      await this.capacity.paused(a.tenantId, w.id);
+      await this.capacity.paused(a.tenantId, w.id, owner);
     } catch (e) {
       if (e instanceof Fault && e.code === "SANDBOX_GONE") {
         await this.record(a, w.id, owner, (w) => {
@@ -730,9 +832,9 @@ export class SandboxManager {
           delete w.sandboxState;
           delete w.sandboxSkillScope;
         });
-        await this.capacity.released(a.tenantId, w.id);
+        await this.capacity.released(a.tenantId, w.id, owner);
       } else {
-        await this.capacity.unknown(a.tenantId, w.id);
+        await this.capacity.unknown(a.tenantId, w.id, owner);
         await this.record(a, w.id, owner, (w) => {
           w.sandboxState = "unknown";
         });
@@ -744,6 +846,8 @@ export class SandboxManager {
     const entry = await this.capacity.get(a.tenantId, w.id);
     const sid = entry?.sandboxId ?? w.sandboxId;
     if (!sid && entry) throw new Fault(409, "SANDBOX_OUTCOME_UNKNOWN");
+    await this.record(a, w.id, owner, () => {});
+    if (entry) await this.capacity.claim(a.tenantId, w.id, entry, owner);
     try {
       if (sid) await this.provider.kill(sid);
       await this.record(a, w.id, owner, (w) => {
@@ -751,9 +855,9 @@ export class SandboxManager {
         delete w.sandboxState;
         delete w.sandboxSkillScope;
       });
-      await this.capacity.released(a.tenantId, w.id);
+      await this.capacity.released(a.tenantId, w.id, owner);
     } catch (e) {
-      await this.capacity.unknown(a.tenantId, w.id);
+      await this.capacity.unknown(a.tenantId, w.id, owner);
       await this.record(a, w.id, owner, (w) => {
         w.sandboxState = "unknown";
       });
@@ -916,7 +1020,7 @@ export class SandboxManager {
           skillScope: w.sandboxSkillScope,
         };
         await this.snapshotSelection(a, snapshot);
-        await this.capacity.reserve(a.tenantId, w, owner);
+        await this.reserveManaged(a, w, owner);
         try {
           await this.provider.connect(w.sandboxId);
           await this.record(a, wid, owner, (w) => {
@@ -971,7 +1075,7 @@ export class SandboxManager {
       w.volumeId = volume;
       w.bundle = snapshot.bundle;
     });
-    await this.capacity.reserve(a.tenantId, w, owner);
+    await this.reserveManaged(a, w, owner);
     let sid: string | undefined;
     try {
       if (w.sandboxId) await this.provider.kill(w.sandboxId);
@@ -1087,10 +1191,12 @@ export class SandboxManager {
       return w;
     });
     let killed = false;
+    const owner = w.lock!.owner;
     try {
       const entry = await this.capacity.get(a.tenantId, wid);
       const sid = entry?.sandboxId ?? w.sandboxId;
       if (entry && !sid) throw new Fault(409, "SANDBOX_OUTCOME_UNKNOWN");
+      if (entry) await this.capacity.claim(a.tenantId, wid, entry, owner);
       if (sid) {
         try {
           await this.provider.kill(sid);
@@ -1105,7 +1211,7 @@ export class SandboxManager {
         delete current.sandboxState;
         delete current.sandboxSkillScope;
       });
-      await this.capacity.released(a.tenantId, wid);
+      await this.capacity.released(a.tenantId, wid, owner);
       for (const snapshot of Object.values(w.sandboxSnapshots ?? {})) {
         await this.provider.deleteSnapshot(snapshot.id);
         await this.store.tx(a.tenantId, (s) => {
@@ -1115,15 +1221,26 @@ export class SandboxManager {
       const files = await this.capacity.get(a.tenantId, wid + ":files");
       if (files) {
         if (!files.sandboxId) throw new Fault(409, "SANDBOX_OUTCOME_UNKNOWN");
-        await this.provider.kill(files.sandboxId);
-        await this.capacity.released(a.tenantId, wid + ":files");
+        await this.capacity.claim(a.tenantId, wid + ":files", files, owner);
+        try {
+          await this.provider.kill(files.sandboxId);
+          await this.capacity.released(a.tenantId, wid + ":files", owner);
+        } catch (e) {
+          await this.capacity.unknown(
+            a.tenantId,
+            wid + ":files",
+            owner,
+            files.sandboxId,
+          );
+          throw e;
+        }
       }
       if (w.volumeId) await this.provider.destroyVolume(w.volumeId);
       await this.store.tx(a.tenantId, (s) => {
         delete s.workspaces[wid];
       });
     } catch (e) {
-      if (!killed) await this.capacity.unknown(a.tenantId, wid);
+      if (!killed) await this.capacity.unknown(a.tenantId, wid, owner);
       await this.store.tx(a.tenantId, (s) => {
         if (s.workspaces[wid]) {
           s.workspaces[wid]!.deleting = false;

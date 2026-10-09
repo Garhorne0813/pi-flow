@@ -191,3 +191,9 @@ MCP 登记：
 `UNAUTHENTICATED` (401)、`INVALID_REQUEST` (400)、`WORKSPACE_NOT_FOUND` / `SESSION_NOT_FOUND` / `RUN_NOT_FOUND` (404)、`ADMIN_REQUIRED` / `READ_ONLY` (403)、`SESSION_BUSY` / `WORKSPACE_BUSY` / `CHECKPOINT_PENDING` (409)、`IDEMPOTENCY_CONFLICT` (409)。
 
 Run 终态错误在 Run.error / run.failed 中给出，包括 `AGENT_REVOKED`、`ACTOR_TOKEN_EXPIRED`、`RUN_TIMEOUT`、`TOKEN_BUDGET_EXCEEDED`、`STEP_BUDGET_EXCEEDED`、`WORKER_LOST_UNKNOWN_TOOL_OUTCOME`、`REMOTE_CANCEL_UNCONFIRMED`。工具失败不一定立即结束 Pi：已确认的失败可以反馈给模型，未知副作用不应自动重试。
+
+## MCP 发现与取消边界
+
+Agent `mcpServers` 最多 16 项。Worker 将 Run 的 AbortSignal 与 deadline 传给 discovery；完整发现预算取剩余 Run 时间与 30 秒上限的较小值。每个 connect/listTools 请求仍最多等待 10 秒，分页最多 10 页，单 Server 白名单工具最多 100 个。发现开始、Server/分页循环和结果返回前检查取消；SDK 请求与实际 HTTPS fetch 都绑定信号，并以本地取消等待兜底。耗尽发现预算返回 `MCP_DISCOVERY_TIMEOUT`，耗尽 Run deadline 为 `RUN_TIMEOUT`；取消仍按 Run 取消状态处理。
+
+连接和传输都尝试关闭，单次 cleanup 最多等待 250 ms；关闭异常不会覆盖原始取消/超时原因。配额相关过期回调不会释放或标记新请求的记录：所有转换绑定持久唯一 operation，CAS 接管失败返回 `CAPACITY_LEASE_LOST`。Sandbox 创建/连接期间取消时不执行工具；已返回 ID 的实例按取消策略确认清理后退还配额，创建无 ID 或 Kill 未确认返回 `REMOTE_CANCEL_UNCONFIRMED` 并保持保守占用。持久 Workspace Volume 不随取消删除。

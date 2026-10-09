@@ -198,3 +198,139 @@ test("real Streamable HTTP MCP uses trusted HTTPS endpoint, filters tools and ch
     setDefaultCACertificates(oldRoots);
   }
 });
+
+test("real HTTPS MCP stalled tools/list is aborted at transport level without discovering the next server", async () => {
+  const directory = "work/mcp-abort-tls";
+  await mkdir(directory, { recursive: true });
+  execFileSync(
+    "openssl",
+    [
+      "req",
+      "-x509",
+      "-newkey",
+      "rsa:2048",
+      "-nodes",
+      "-keyout",
+      directory + "/key.pem",
+      "-out",
+      directory + "/cert.pem",
+      "-days",
+      "1",
+      "-subj",
+      "/CN=localhost",
+      "-addext",
+      "subjectAltName=DNS:localhost,IP:127.0.0.1",
+    ],
+    { stdio: "ignore" },
+  );
+  const cert = await readFile(directory + "/cert.pem", "utf8"),
+    roots = getCACertificates("default");
+  setDefaultCACertificates([...roots, cert]);
+  let started!: () => void;
+  const begun = new Promise<void>((r) => {
+    started = r;
+  });
+  let closed = 0,
+    nextRequests = 0;
+  const server = createServer(
+    { key: await readFile(directory + "/key.pem"), cert },
+    async (req, res) => {
+      if (req.url === "/next") {
+        nextRequests++;
+        res.writeHead(500);
+        res.end();
+        return;
+      }
+      if (req.method !== "POST") {
+        res.writeHead(405);
+        res.end();
+        return;
+      }
+      let text = "";
+      for await (const chunk of req) text += chunk;
+      const message = JSON.parse(text);
+      if (message.method === "initialize") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            id: message.id,
+            result: {
+              protocolVersion: message.params.protocolVersion,
+              capabilities: { tools: {} },
+              serverInfo: { name: "slow", version: "1" },
+            },
+          }),
+        );
+      } else if (message.method === "tools/list") {
+        res.once("close", () => {
+          closed++;
+        });
+        started(); // Deliberately never send a response.
+      } else {
+        res.writeHead(202);
+        res.end();
+      }
+    },
+  );
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+  const port = (server.address() as { port: number }).port;
+  const store = new MemoryStore();
+  const actor = { tenantId: "slow", userId: "user", admin: true };
+  await store.tx(actor.tenantId, (s) => {
+    s.mcp.slow = {
+      id: "slow",
+      endpointRef: "slow",
+      allowedTools: ["search"],
+      enabled: true,
+    };
+    s.mcp.next = {
+      id: "next",
+      endpointRef: "next",
+      allowedTools: ["search"],
+      enabled: true,
+    };
+  });
+  const mgr = new MCPManager(store, {
+    slow: { url: `https://localhost:${port}/slow` },
+    next: { url: `https://localhost:${port}/next` },
+  });
+  const controller = new AbortController();
+  const config = AgentConfig.parse({
+    name: "slow",
+    systemPrompt: "slow",
+    model: { provider: "demo", modelId: "demo" },
+    tools: [],
+    mcpServers: ["slow", "next"],
+    skillBundle: "default",
+  });
+  const load = mgr.discover(actor, config, controller.signal);
+  const checked = assert.rejects(load, { name: "AbortError" });
+  try {
+    await Promise.race([
+      begun,
+      new Promise<void>((_, reject) => {
+        const timer = setTimeout(
+          () => reject(Error("Discovery did not start")),
+          3000,
+        );
+        timer.unref();
+      }),
+    ]);
+    const begin = Date.now();
+    controller.abort();
+    await checked;
+    assert.ok(Date.now() - begin < 1000);
+    const deadline = Date.now() + 1000;
+    while (!closed && Date.now() < deadline)
+      await new Promise((r) => setTimeout(r, 5));
+    assert.equal(closed, 1);
+    assert.equal(nextRequests, 0);
+  } finally {
+    controller.abort();
+    await checked;
+    server.closeAllConnections();
+    await new Promise<void>((r) => server.close(() => r()));
+    setDefaultCACertificates(roots);
+  }
+});

@@ -288,7 +288,12 @@ export class Worker {
     };
     try {
       let ctx = await get();
-      const mcp = await this.mcp.discover(initial.actor, ctx.config);
+      const mcp = await this.mcp.discover(
+        initial.actor,
+        ctx.config,
+        controller.signal,
+        initial.deadline,
+      );
       let prompt = ctx.r.prompt;
       if (initial.resumedFrom) {
         const i = await this.service.store.read(
