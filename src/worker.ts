@@ -1,0 +1,360 @@
+import {
+  id,
+  Fault,
+  event,
+  audit,
+  terminal,
+  type Run,
+  type State,
+  type AgentConfig,
+} from "./domain.js";
+import { HarnessService, authorizedRun } from "./service.js";
+import type { Runtime } from "./runtime.js";
+import type { SandboxManager } from "./adapters/sandbox.js";
+import type { MCPManager } from "./adapters/mcp.js";
+import { argumentsSchemas, specs } from "./tool-specs.js";
+export class Worker {
+  readonly owner = id();
+  private stopping = false;
+  private active = new Set<Promise<void>>();
+  private controllers = new Set<AbortController>();
+  constructor(
+    private service: HarnessService,
+    private runtime: Runtime,
+    private sandbox: SandboxManager,
+    private mcp: MCPManager,
+    private concurrency = 4,
+  ) {}
+  async tick() {
+    for (const tenant of await this.service.store.tenants()) {
+      if (this.active.size >= this.concurrency) break;
+      const r = await this.service.store.tx(tenant, (s) => {
+        for (const old of Object.values(s.runs)) {
+          if (old.lease && old.lease.expires < Date.now()) {
+            delete old.lease;
+            if (old.state === "RUNNING") {
+              old.state = "FAILED";
+              old.error = "WORKER_LOST_UNKNOWN_TOOL_OUTCOME";
+              event(s, old, "run.failed", { code: old.error });
+            }
+          }
+        }
+        const r = Object.values(s.runs).find((r) => r.state === "QUEUED");
+        if (!r) return;
+        try {
+          const { config } = authorizedRun(s, r);
+          r.deadline ??= Date.now() + config.timeoutSeconds * 1000;
+          r.state = "RUNNING";
+          r.lease = { owner: this.owner, expires: Date.now() + 30000 };
+          event(s, r, "run.started");
+          return r;
+        } catch (e) {
+          r.state = "FAILED";
+          r.error = e instanceof Fault ? e.code : "AUTHORIZATION_FAILED";
+          event(s, r, "run.failed", { code: r.error });
+          return;
+        }
+      });
+      if (r) {
+        const p = this.execute(tenant, r).catch(() => {});
+        this.active.add(p);
+        void p.finally(() => this.active.delete(p));
+      }
+    }
+  }
+  async start() {
+    while (!this.stopping) {
+      await this.tick();
+      await new Promise((r) => setTimeout(r, 250));
+    }
+    await Promise.all(this.active);
+  }
+  async stop() {
+    this.stopping = true;
+    for (const c of this.controllers) c.abort();
+    await Promise.all(this.active);
+  }
+  private owned(s: State, rid: string) {
+    const r = s.runs[rid];
+    if (!r || r.lease?.owner !== this.owner || r.lease.expires < Date.now())
+      throw new Fault(409, "LEASE_LOST");
+    return r;
+  }
+  async execute(tenant: string, initial: Run): Promise<void> {
+    const controller = new AbortController();
+    this.controllers.add(controller);
+    let waiting = false;
+    let fault: string | undefined;
+    const timeout = setTimeout(
+      () => {
+        fault = "RUN_TIMEOUT";
+        controller.abort();
+      },
+      Math.max(0, (initial.deadline ?? Date.now() + 600000) - Date.now()),
+    );
+    const heartbeat = setInterval(() => {
+      void this.service.store
+        .tx(tenant, (s) => {
+          const r = this.owned(s, initial.id);
+          authorizedRun(s, r);
+          if ((r.deadline ?? 0) < Date.now())
+            throw new Fault(408, "RUN_TIMEOUT");
+          r.lease!.expires = Date.now() + 30000;
+        })
+        .catch((e) => {
+          fault = e instanceof Fault ? e.code : "HEARTBEAT_FAILED";
+          controller.abort();
+        });
+    }, 1000);
+    const emit = (type: string, data: unknown) =>
+      this.service.store.tx(tenant, (s) => {
+        const r = this.owned(s, initial.id);
+        event(s, r, type, data);
+      });
+    const get = () =>
+      this.service.store.tx(tenant, (s) => {
+        const r = this.owned(s, initial.id);
+        const { ses, config } = authorizedRun(s, r);
+        if (!this.service.hasBundle(config.skillBundle, r.actor.tenantId))
+          throw new Fault(403, "BUNDLE_NOT_GRANTED");
+        return {
+          r,
+          ses,
+          config,
+          skills: config.skills.map((k) => s.skills[k]!),
+        };
+      });
+    const defer = async (kind: "question" | "approval", payload: unknown) => {
+      if (initial.parentRunId)
+        throw new Fault(409, "SUBAGENT_INTERACTION_UNSUPPORTED");
+      await this.service.store.tx(tenant, (s) => {
+        const r = this.owned(s, initial.id);
+        authorizedRun(s, r);
+        const i = { id: id(), runId: r.id, kind, payload, resolved: false };
+        s.interactions[i.id] = i;
+        r.state = "WAITING_INPUT";
+        event(s, r, "interaction.required", { interaction: i });
+      });
+      waiting = true;
+      controller.abort();
+      throw new Fault(409, "INTERACTION_PENDING");
+    };
+    const executeTool = async (
+      name: string,
+      args: Record<string, unknown>,
+      config: AgentConfig,
+      wid: string,
+      mcpCall: (
+        name: string,
+        args: Record<string, unknown>,
+        signal: AbortSignal,
+      ) => Promise<unknown>,
+      approved = false,
+    ): Promise<unknown> => {
+      controller.signal.throwIfAborted();
+      const bare = name.replace(/^remote_/, "");
+      const mcpTool = name.startsWith("mcp_");
+      if (
+        !mcpTool &&
+        !config.tools.includes(bare as AgentConfig["tools"][number])
+      )
+        throw new Fault(403, "TOOL_DENIED");
+      if (!mcpTool) args = argumentsSchemas[bare]!.parse(args);
+      if (!approved && (mcpTool || ["write", "edit", "bash"].includes(bare)))
+        return defer("approval", { name, args });
+      const callId = id();
+      await this.service.store.tx(tenant, (s) => {
+        const r = this.owned(s, initial.id);
+        const { config } = authorizedRun(s, r);
+        let root = r;
+        while (root.parentRunId) root = s.runs[root.parentRunId]!;
+        const rc =
+          root.capabilities ??
+          s.agents[s.sessions[root.sessionId]!.agentVersionId]!.config;
+        if (r.steps >= config.maxSteps || root.steps >= rc.maxSteps)
+          throw new Fault(429, "STEP_BUDGET_EXCEEDED");
+        r.steps++;
+        if (root.id !== r.id) root.steps++;
+        event(s, r, "tool.started", { name, callId });
+        audit(s, r.actor, "tool.execute", name);
+      });
+      try {
+        let result: unknown;
+        if (mcpTool) result = await mcpCall(name, args, controller.signal);
+        else if (bare === "ask_user_question")
+          return await defer("question", { question: args.question });
+        else if (bare === "todo") {
+          await this.service.store.tx(tenant, (s) => {
+            const r = this.owned(s, initial.id);
+            s.todos[r.sessionId] = args.items;
+            event(s, r, "todo.updated", { items: args.items });
+          });
+          result = { saved: true };
+        } else if (bare === "delegate_to_agent") {
+          const child = await this.service.delegate(
+            tenant,
+            initial.id,
+            String(args.agentVersionId),
+            String(args.task),
+            this.owner,
+          );
+          await this.execute(tenant, child);
+          result = await this.service.store.tx(tenant, (s) => {
+            const cr = s.runs[child.id]!;
+            const messages = s.events
+              .filter(
+                (e) => e.runId === cr.id && e.type === "message.completed",
+              )
+              .map((e) => e.data);
+            event(s, s.runs[initial.id]!, "subagent.completed", {
+              childRunId: cr.id,
+              state: cr.state,
+            });
+            return { runId: cr.id, state: cr.state, messages };
+          });
+        } else {
+          result = await this.sandbox.execute(
+            initial.actor,
+            wid,
+            initial.id,
+            config.skillBundle,
+            bare,
+            args,
+            controller.signal,
+          );
+          if (bare === "read") {
+            const fresh = await get();
+            const sk = fresh.skills.find((s) => s.path === args.path);
+            if (sk && (result as { sha256?: string }).sha256 !== sk.digest)
+              throw new Fault(409, "SKILL_DIGEST_MISMATCH");
+          }
+        }
+        await emit("tool.completed", { name, callId, result });
+        return result;
+      } catch (e) {
+        if (e instanceof Fault && e.code === "REMOTE_CANCEL_UNCONFIRMED")
+          fault = e.code;
+        await emit("tool.failed", {
+          name,
+          callId,
+          code: e instanceof Fault ? e.code : "TOOL_FAILED",
+        });
+        throw e;
+      }
+    };
+    try {
+      let ctx = await get();
+      const mcp = await this.mcp.discover(initial.actor, ctx.config);
+      let prompt = ctx.r.prompt;
+      if (initial.resumedFrom) {
+        const i = await this.service.store.tx(
+          tenant,
+          (s) => s.interactions[initial.resumedFrom!],
+        );
+        if (i?.kind === "approval" && i.response === "approve") {
+          const p = i.payload as {
+            name: string;
+            args: Record<string, unknown>;
+          };
+          const result = await executeTool(
+            p.name,
+            p.args,
+            ctx.config,
+            ctx.ses.workspaceId,
+            mcp.call,
+            true,
+          );
+          prompt += `\nApproved operation completed: ${JSON.stringify(result)}`;
+        }
+      }
+      ctx = await get();
+      await this.runtime.execute({
+        config: ctx.config,
+        entries: ctx.ses.entries,
+        prompt,
+        skills: ctx.skills,
+        specs: [...specs(ctx.config.tools), ...mcp.specs],
+        signal: controller.signal,
+        call: async (name, args) => {
+          const fresh = await get();
+          return executeTool(
+            name,
+            args,
+            fresh.config,
+            fresh.ses.workspaceId,
+            mcp.call,
+          );
+        },
+        emit,
+        consume: async (tokens, turn) => {
+          const code = await this.service.store.tx(tenant, (s) => {
+            const r = this.owned(s, initial.id);
+            const { config } = authorizedRun(s, r);
+            let root = r;
+            while (root.parentRunId) root = s.runs[root.parentRunId]!;
+            const rc =
+              root.capabilities ??
+              s.agents[s.sessions[root.sessionId]!.agentVersionId]!.config;
+            r.tokens = (r.tokens ?? 0) + tokens;
+            if (root.id !== r.id) root.tokens = (root.tokens ?? 0) + tokens;
+            if (turn) {
+              r.steps++;
+              if (root.id !== r.id) root.steps++;
+            }
+            if (r.steps > config.maxSteps || root.steps > rc.maxSteps)
+              return "STEP_BUDGET_EXCEEDED";
+            if (
+              r.tokens > config.maxTokens ||
+              (root.tokens ?? 0) > rc.maxTokens
+            )
+              return "TOKEN_BUDGET_EXCEEDED";
+          });
+          if (code) throw new Fault(429, code);
+        },
+        checkpoint: (entries) =>
+          this.service.store.tx(tenant, (s) => {
+            const r = this.owned(s, initial.id);
+            s.sessions[r.sessionId]!.entries = entries;
+          }),
+      });
+      if (!waiting) {
+        controller.signal.throwIfAborted();
+        await this.service.store.tx(tenant, (s) => {
+          const r = this.owned(s, initial.id);
+          authorizedRun(s, r);
+          r.state = "COMPLETED";
+          event(s, r, "run.completed");
+        });
+      }
+    } catch (e) {
+      if (!waiting)
+        await this.service.store.tx(tenant, (s) => {
+          const r = s.runs[initial.id];
+          if (!r || r.lease?.owner !== this.owner || terminal(r.state)) return;
+          const code =
+            fault ?? (e instanceof Fault ? e.code : "RUN_EXECUTION_FAILED");
+          r.state =
+            code === "REMOTE_CANCEL_UNCONFIRMED"
+              ? "FAILED"
+              : r.cancelRequested || code === "RUN_CANCELLED"
+                ? "CANCELLED"
+                : "FAILED";
+          r.error = code;
+          event(
+            s,
+            r,
+            r.state === "CANCELLED" ? "run.cancelled" : "run.failed",
+            { code },
+          );
+        });
+    } finally {
+      this.controllers.delete(controller);
+      clearInterval(heartbeat);
+      clearTimeout(timeout);
+      await this.service.store.tx(tenant, (s) => {
+        const r = s.runs[initial.id];
+        if (r?.lease?.owner === this.owner) delete r.lease;
+      });
+    }
+  }
+}
