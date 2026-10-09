@@ -8,7 +8,7 @@
 | --------------------------- | --------------------------------------------------------------- |
 | `api.ts` / `auth.ts`        | REST/SSE、输入校验、UCS OIDC JWT、请求审计                      |
 | `domain.ts` / `service.ts`  | ACL、不可变版本、状态机、幂等与交互续跑                         |
-| `store.ts`                  | PostgreSQL 只读快照 / 行锁写事务 / 测试内存适配器                            |
+| `store.ts`                  | PostgreSQL 只读快照 / 行锁写事务 / 测试内存适配器               |
 | `worker.ts`                 | 调度、续租、取消、故障收敛、工具治理与子 Agent                  |
 | `runtime.ts`                | Pi AgentFactory、EnterpriseResourceLoader、Session entry 持久化 |
 | `adapters/sandbox.ts`       | Cube Volume / Sandbox 管理、工作区工具租约                      |
@@ -86,10 +86,22 @@ Sandbox 工具参数中的 manifest 注册表由 Harness 覆盖注入，模型�
 
 容量操作使用唯一 `operation` 作为持久 fencing token，激活、暂停和 released tombstone 都保留标识。reserve/claim 在同一 `capacityTx` 内比较预期 operation、实例 ID、状态与更新时间；active/pending 失去标识时拒绝，released/unknown/paused 的迟到标识不修改状态。接管先更新标识及 reserved 状态，再 Kill 旧实例；旧实例清理与新实例配额归属分别处理。临时文件实例、Agent、手动生命周期、快照恢复和 Workspace 删除均检查归属。每次 Agent 工具租约生成新标识，即使同 Run 连续调用也不会复用；心跳失败后 Kill 同样检查标识，避免迟到取消杀掉新请求复用的实例。
 
-Run AbortSignal 贯穿 Sandbox provisioning：创建前、连接/创建完成、容量激活和回调边界重新检查。已取消信号在 listener 安装后再次检查，防止遗漏。取消时等待已发起 provisioning 的 SDK 返回；得到 ID 后确认 Kill 并清除所属实例/容量，保留 Workspace Volume。创建结果未知（无 ID）或 Kill 未确认保持 unknown/charged；不会把取消当作远端从未创建的证明。清理只能修改本代容量和仍由本代持有的 Workspace 元数据。
+Run AbortSignal 贯穿 Sandbox provisioning：创建前、连接/创建完成、容量激活和回调边界重新检查。已取消信号在 listener 安装后再次检查，防止遗漏。取消时停止本地等待；迟到的实例 ID 按原 operation 对账并清理，保留 Workspace Volume。创建结果未知（无 ID）或 Kill 未确认保持 unknown/charged；不会把取消当作远端从未创建的证明。清理只能修改本代容量和仍由本代持有的 Workspace 元数据。
 
 MCP discovery 继承 Run 信号，完整预算最多 30 秒且不超过剩余 deadline；Server 配置最多 16 项，兼容历史状态时也检查上限。connect/listTools 的 SDK options 和 transport 的 fetch 都传播 signal；本地 Promise race 保证故障实现忽略 signal 时也能退出等待。连接失败和每个 Server 结束后都直接尝试关闭 Client 与 Transport，以 250 ms 限制清理等待，避免异常关闭覆盖原始错误。成功发现后移除发现定时器与 Run listener；实际工具调用使用该次调用的 Run signal。
 
 确定性回归编排 A 文件租约过期、B 接管并激活、A 迟到成功/未知 Kill，两种情况都保持 B 记录与配额；Agent 迟到取消同样不 Kill B 复用的实例。真实 PostgreSQL 的两个客户端竞争同一观察值，仅一方接管，旧 active/paused/released/unknown 无法覆盖新记录。取消覆盖创建前、阻塞创建、连接、激活/listener 边界、已知清理成功、Kill 未确认和无 ID 创建未知。MCP 覆盖多 Server、多页、connect/listTools 永久卡住、关闭抛错/卡住、总预算、预先取消/过期 deadline/Server 上限、Worker 释放槽位并调度下一条，以及真实本地 HTTPS 卡住 tools/list 时断开传输。原有白名单、Endpoint/grant 与撤销测试继续保留。
 
 部署升级须同时更新 API 和所有 Worker，不混跑旧版无 fencing 的容量写入者。JSONB 中旧 active/paused 条目可能缺少 operation，新的 reserve/claim 在比较原记录后为本次操作建立标识；无数据库结构迁移。真实 Cube 集群的取消和存储挂载语义仍需验收。
+
+## work 分支 Issue #8–#9 回归
+
+Sandbox 控制请求的本地等待最多 30 秒，工具执行最多 130 秒；Agent provisioning/执行同时接受 Run 的 AbortSignal，因此剩余 deadline 更短时按 Run deadline 停止等待。SDK 忽略取消也不占住 Worker 槽位。清理 Kill 最多等待 1 秒；未确认、无 ID 的创建以及仍在连接的实例保留 unknown/charged，Run 失败为 `REMOTE_CANCEL_UNCONFIRMED`。连接尚未返回时不能先释放配额：迟到的连接可能恢复实例，必须等结果返回后再清理。
+
+创建前记录 operation 与 Volume 引用，Cube Sandbox metadata 增加 `harnessOperation`。迟到 Volume 记录 `sandbox.volume.late`；Volume 名仍为 `ws-{workspace UUID}`，不会因请求取消而删除共享 Workspace 卷。迟到实例记录 `sandbox.creation.late`，仅原 generation 可以清理并释放容量；已被后继接管时，不 Kill 后继的 ID，独立孤儿 ID 登记到 `{workspace}:orphan:{operation}` 并继续计入原 Workspace owner 的配额。清理完成记录 `sandbox.creation.reconciled` / `sandbox.kill.reconciled`。这些记录供运维对账；本实现没有跨进程恢复后的 Cube 资产扫描器，进程丢失的 SDK 响应仍需按 metadata 人工对账。Worker stop/start 的收尾最多等待 5 秒，未完成时明确抛出 `WORKER_SHUTDOWN_UNSETTLED`，不能将它当作成功关闭。
+
+所有获批 MCP 工具都按可能有外部副作用处理。调用先持久化 `tool.dispatching` 意图，实际启动 tools/call 的 fetch 后记录 `tool.dispatched`；收到 SDK 校验后的工具响应记录 `tool.confirmed`，并保留 `tool.completed` 结果。发出请求后的取消、超时、响应丢失或传输错误记录 `tool.unknown`，抛出 `MCP_OUTCOME_UNKNOWN`，强制 Run 为 FAILED，即使用户已经请求取消也不改为 CANCELLED。Worker 立即中止模型，不自动重试或重放已批准的调用。发送前取消仍可正常取消；已确认响应不会仅因同时收到取消而改为未知。
+
+事件含 callId、runId 和可选 requestId；tools/call 的 JSON-RPC `_meta` 包含同样的关联信息，HTTP `x-harness-call-id` / `x-harness-run-id` 可供服务端日志对账。关联信息不构成服务端幂等保证，也不证明远端回滚。白名单、审批与实时撤销继续生效。
+
+新增回归覆盖四种 Sandbox 请求永久挂起、迟到 Volume/create/connect/kill、后继复用与独立孤儿、同 Worker 超时后调度下一 Run、有界停机错误；真实本地 HTTPS MCP 在副作用完成后阻塞响应，通过正常审批与继续流程取消，确认 FAILED/未知、关联 ID 一致且调用不重放。另验证发送前取消、确认结果后取消、Run deadline 超时和没有取消的响应丢失。

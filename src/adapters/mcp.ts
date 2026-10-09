@@ -7,6 +7,14 @@ import {
   type McpRegistration,
 } from "../domain.js";
 import type { Store } from "../store.js";
+export type McpCallContext = {
+  callId: string;
+  runId: string;
+  requestId?: string;
+  event: (
+    phase: "dispatching" | "dispatched" | "confirmed" | "unknown",
+  ) => Promise<void>;
+};
 export type McpEndpoint = { url: string; tokenEnv?: string };
 export type ToolSpec = {
   name: string;
@@ -21,6 +29,7 @@ function abortable<T>(
 ): Promise<T> {
   return new Promise((resolve, reject) => {
     const stop = () => {
+      signal.removeEventListener("abort", stop);
       reject(signal.reason);
     };
     signal.addEventListener("abort", stop, { once: true });
@@ -76,7 +85,12 @@ export class MCPManager {
       clearTimeout(timer);
     }
   }
-  private async client(reg: McpRegistration, signal: AbortSignal) {
+  private async client(
+    reg: McpRegistration,
+    signal: AbortSignal,
+    dispatch?: () => Promise<() => void>,
+    context?: McpCallContext,
+  ) {
     signal.throwIfAborted();
     const endpoint = this.endpoints[reg.endpointRef];
     if (!endpoint) throw new Fault(403, "MCP_ENDPOINT_NOT_REGISTERED");
@@ -88,15 +102,38 @@ export class MCPManager {
     if (endpoint.tokenEnv && !token)
       throw new Fault(503, "MCP_CREDENTIAL_UNAVAILABLE");
     const transport = new StreamableHTTPClientTransport(url, {
-      fetch: (input, init) =>
-        fetch(input, {
+      fetch: async (input, init) => {
+        const body =
+          typeof init?.body === "string" ? JSON.parse(init.body) : undefined;
+        let mark: (() => void) | undefined;
+        if (body?.method === "tools/call") {
+          signal.throwIfAborted();
+          mark = await dispatch?.();
+          signal.throwIfAborted();
+        }
+        mark?.();
+        const pending = fetch(input, {
           ...init,
           signal: init?.signal
             ? AbortSignal.any([init.signal, signal])
             : signal,
-        }),
+        });
+        // Attach a rejection handler immediately while the durable event is
+        // being saved, then preserve the fetch result for the SDK.
+        void pending.catch(() => {});
+        if (body?.method === "tools/call") await context?.event("dispatched");
+        return pending;
+      },
       requestInit: {
-        headers: token ? { Authorization: `Bearer ${token}` } : {},
+        headers: {
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          ...(context
+            ? {
+                "x-harness-call-id": context.callId,
+                "x-harness-run-id": context.runId,
+              }
+            : {}),
+        },
         redirect: "error",
       },
     });
@@ -129,6 +166,7 @@ export class MCPManager {
       name: string,
       args: Record<string, unknown>,
       signal: AbortSignal,
+      context?: McpCallContext,
     ) => Promise<unknown>;
   }> {
     signal?.throwIfAborted();
@@ -248,20 +286,59 @@ export class MCPManager {
       authorize: async (name) => {
         await authorized(name);
       },
-      call: async (name, args, signal) => {
+      call: async (name, args, signal, context) => {
         const { m, reg } = await authorized(name);
         signal.throwIfAborted();
-        const connection = await this.client(reg, signal);
-        const { c } = connection;
+        let dispatched = false,
+          confirmed = false;
+        const connection = await this.client(
+          reg,
+          signal,
+          async () => {
+            // Persist the dispatch intent before the network write. Cancellation
+            // during persistence is still safe: fetch has not started.
+            await context?.event("dispatching");
+            signal.throwIfAborted();
+            return () => {
+              dispatched = true;
+            };
+          },
+          context,
+        );
         try {
-          return await abortable(
+          const result = await abortable(
             () =>
-              c.callTool({ name: m.tool, arguments: args }, undefined, {
-                timeout: 30000,
-                signal,
-              }),
+              connection.c.callTool(
+                {
+                  name: m.tool,
+                  arguments: args,
+                  ...(context
+                    ? {
+                        _meta: {
+                          callId: context.callId,
+                          runId: context.runId,
+                          requestId: context.requestId,
+                        },
+                      }
+                    : {}),
+                },
+                undefined,
+                { timeout: 30000, signal },
+              ),
             signal,
           );
+          confirmed = true;
+          await context?.event("confirmed");
+          return result;
+        } catch (e) {
+          if (dispatched && !confirmed) {
+            try {
+              await context?.event("unknown");
+            } finally {
+              throw new Fault(502, "MCP_OUTCOME_UNKNOWN");
+            }
+          }
+          throw e;
         } finally {
           await connection.close();
         }

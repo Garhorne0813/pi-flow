@@ -11,7 +11,7 @@ import {
 import { HarnessService, authorizedRun } from "./service.js";
 import type { Runtime } from "./runtime.js";
 import type { SandboxManager } from "./adapters/sandbox.js";
-import type { MCPManager } from "./adapters/mcp.js";
+import type { MCPManager, McpCallContext } from "./adapters/mcp.js";
 import { argumentsSchemas, specs } from "./tool-specs.js";
 export class Worker {
   readonly owner = id();
@@ -27,7 +27,11 @@ export class Worker {
     private sandbox: SandboxManager,
     private mcp: MCPManager,
     private concurrency = 4,
-  ) {}
+    private shutdownTimeoutMs = 5000,
+  ) {
+    if (!Number.isFinite(shutdownTimeoutMs) || shutdownTimeoutMs <= 0)
+      throw new Error("Invalid Worker shutdown timeout");
+  }
   tick() {
     const task = this.tickTail.then(() => this.tickOnce());
     this.tickTail = task.catch(() => {});
@@ -99,15 +103,32 @@ export class Worker {
       await this.tick();
       await new Promise((r) => setTimeout(r, 250));
     }
-    await Promise.all(this.active);
-    await this.maintenance;
+    await this.stop();
   }
   async stop() {
     this.stopping = true;
-    await this.tickTail;
     for (const c of this.controllers) c.abort();
-    await Promise.all(this.active);
-    await this.maintenance;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        (async () => {
+          await this.tickTail;
+          // A tick already claiming a Run may register its controller after
+          // the first abort pass; drain those controllers as well.
+          for (const c of this.controllers) c.abort();
+          await Promise.all(this.active);
+          await this.maintenance;
+        })(),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(
+            () => reject(new Fault(503, "WORKER_SHUTDOWN_UNSETTLED")),
+            this.shutdownTimeoutMs,
+          );
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
   }
   private owned(s: State, rid: string) {
     const r = s.runs[rid];
@@ -183,6 +204,7 @@ export class Worker {
         name: string,
         args: Record<string, unknown>,
         signal: AbortSignal,
+        context?: McpCallContext,
       ) => Promise<unknown>,
       mcpAuthorize: (name: string) => Promise<void>,
       approved = false,
@@ -217,7 +239,19 @@ export class Worker {
       });
       try {
         let result: unknown;
-        if (mcpTool) result = await mcpCall(name, args, controller.signal);
+        if (mcpTool)
+          result = await mcpCall(name, args, controller.signal, {
+            callId,
+            runId: initial.id,
+            requestId: initial.requestId,
+            event: (phase) =>
+              emit(`tool.${phase}`, {
+                name,
+                callId,
+                runId: initial.id,
+                requestId: initial.requestId,
+              }),
+          });
         else if (bare === "ask_user_question")
           return await defer("question", { question: args.question });
         else if (bare === "todo") {
@@ -276,8 +310,13 @@ export class Worker {
         await emit("tool.completed", { name, callId, result });
         return result;
       } catch (e) {
-        if (e instanceof Fault && e.code === "REMOTE_CANCEL_UNCONFIRMED")
+        if (
+          e instanceof Fault &&
+          ["REMOTE_CANCEL_UNCONFIRMED", "MCP_OUTCOME_UNKNOWN"].includes(e.code)
+        ) {
           fault = e.code;
+          controller.abort(e);
+        }
         await emit("tool.failed", {
           name,
           callId,
@@ -384,12 +423,14 @@ export class Worker {
           if (!r || r.lease?.owner !== this.owner || terminal(r.state)) return;
           const code =
             fault ?? (e instanceof Fault ? e.code : "RUN_EXECUTION_FAILED");
-          r.state =
-            code === "REMOTE_CANCEL_UNCONFIRMED"
-              ? "FAILED"
-              : r.cancelRequested || code === "RUN_CANCELLED"
-                ? "CANCELLED"
-                : "FAILED";
+          r.state = [
+            "REMOTE_CANCEL_UNCONFIRMED",
+            "MCP_OUTCOME_UNKNOWN",
+          ].includes(code)
+            ? "FAILED"
+            : r.cancelRequested || code === "RUN_CANCELLED"
+              ? "CANCELLED"
+              : "FAILED";
           r.error = code;
           event(
             s,

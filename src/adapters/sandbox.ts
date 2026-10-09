@@ -39,6 +39,7 @@ export interface SandboxProvider {
     bundle: string,
     skills: readonly Skill[],
     snapshotId?: string,
+    operation?: string,
   ): Promise<string>;
   connect(sandboxId: string): Promise<void>;
   execute(
@@ -106,6 +107,7 @@ export class CubeProvider implements SandboxProvider {
     bundle: string,
     skills: readonly Skill[],
     snapshotId?: string,
+    operation?: string,
   ) {
     const scope = this.scope(bundle, skills);
     const selected = skills.map((skill) => ({
@@ -135,6 +137,7 @@ export class CubeProvider implements SandboxProvider {
         harnessWorkspaceVolume: volume,
         harnessSkillBundle: bundle,
         harnessSkillScope: scope,
+        ...(operation ? { harnessOperation: operation } : {}),
       },
     });
     return sb.sandboxId;
@@ -298,9 +301,195 @@ export class SandboxManager {
     policy: Partial<SandboxPolicy> = {},
     private canUseBundle: (bundle: string, tenant: string) => boolean = () =>
       true,
+    private limits = { remoteTimeoutMs: 30000, cleanupTimeoutMs: 1000 },
   ) {
+    if (Object.values(limits).some((v) => !Number.isFinite(v) || v <= 0))
+      throw new Error("Invalid Sandbox time limits");
+    // Every control-plane operation has a local bound, even for SDKs that
+    // ignore cancellation. Creation uses explicit late-result reconciliation.
+    const raw = provider;
+    this.provider = new Proxy(raw, {
+      get: (target, key) => {
+        const value = Reflect.get(target, key);
+        if (typeof value !== "function") return value;
+        if (
+          [
+            "scope",
+            "create",
+            "createVolume",
+            "connect",
+            "kill",
+            "execute",
+          ].includes(String(key))
+        )
+          return value.bind(target);
+        return (...args: unknown[]) =>
+          this.remote(
+            () => value.apply(target, args),
+            undefined,
+            undefined,
+            this.limits.remoteTimeoutMs,
+          );
+      },
+    });
     this.policy = SandboxPolicySchema.parse(policy);
     this.capacity = new SandboxCapacity(store, this.policy);
+  }
+  private remote<T>(
+    start: () => Promise<T>,
+    signal?: AbortSignal,
+    late?: (value: T) => Promise<void>,
+    timeout = this.limits.remoteTimeoutMs,
+  ): Promise<T> {
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      let abandoned = false;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const clean = () => {
+        clearTimeout(timer);
+        signal?.removeEventListener("abort", abort);
+      };
+      const stop = (error: unknown) => {
+        if (settled) return;
+        settled = abandoned = true;
+        clean();
+        reject(error);
+      };
+      const abort = () => stop(signal?.reason);
+      if (signal?.aborted) {
+        reject(signal.reason);
+        return;
+      }
+      signal?.addEventListener("abort", abort, { once: true });
+      timer = setTimeout(
+        () => stop(new Fault(504, "SANDBOX_REMOTE_TIMEOUT")),
+        timeout,
+      );
+      Promise.resolve()
+        .then(() => {
+          signal?.throwIfAborted();
+          return start();
+        })
+        .then(
+          (value) => {
+            if (abandoned) {
+              if (late) void late(value).catch(() => {});
+              return;
+            }
+            settled = true;
+            clean();
+            resolve(value);
+          },
+          (error) => {
+            if (!settled) {
+              settled = true;
+              clean();
+              reject(error);
+            }
+          },
+        );
+    });
+  }
+  private kill(a: Actor, wid: string, owner: string, sid: string) {
+    return this.remote(
+      () => this.provider.kill(sid),
+      undefined,
+      async () => {
+        const current = await this.capacity.inspect(a.tenantId, wid);
+        if (current?.operation === owner && current.sandboxId === sid) {
+          await this.capacity.released(a.tenantId, wid, owner);
+          await this.store.tx(a.tenantId, (s) =>
+            audit(
+              s,
+              a,
+              "sandbox.kill.reconciled",
+              wid,
+              JSON.stringify({ owner, sandboxId: sid }),
+            ),
+          );
+        }
+      },
+      this.limits.cleanupTimeoutMs,
+    );
+  }
+  private async lateVolume(
+    a: Actor,
+    wid: string,
+    owner: string,
+    volumeId: string,
+  ) {
+    await this.store.tx(a.tenantId, (s) => {
+      // Workspace volumes have a deterministic name; never destroy a shared
+      // volume merely because its response arrived after the Run finished.
+      audit(
+        s,
+        a,
+        "sandbox.volume.late",
+        wid,
+        JSON.stringify({ owner, volumeId }),
+      );
+    });
+    const current = await this.capacity.inspect(a.tenantId, wid);
+    if (
+      current?.operation === owner &&
+      !current.sandboxId &&
+      (await this.capacity.released(a.tenantId, wid, owner))
+    )
+      await this.store.tx(a.tenantId, (s) => {
+        const w = s.workspaces[wid];
+        if (w && !w.lock && !w.sandboxId) delete w.sandboxState;
+      });
+  }
+  private async lateSandbox(a: Actor, wid: string, owner: string, sid: string) {
+    await this.store.tx(a.tenantId, (s) => {
+      audit(
+        s,
+        a,
+        "sandbox.creation.late",
+        wid,
+        JSON.stringify({ owner, sandboxId: sid }),
+      );
+    });
+    const current = await this.capacity.inspect(a.tenantId, wid);
+    // Never kill a successor's instance, including a reused provider ID.
+    if (current?.operation !== owner) {
+      if (current?.sandboxId !== sid)
+        await this.capacity.orphan(
+          a,
+          wid,
+          owner,
+          sid,
+          current?.userId ??
+            (await this.store.read(
+              a.tenantId,
+              (s) =>
+                s.workspaces[wid.replace(/:files$/, "")]?.ownerId ?? a.userId,
+            )),
+        );
+      return;
+    }
+    try {
+      await this.capacity.pending(a.tenantId, wid, owner, sid);
+      await this.kill(a, wid, owner, sid);
+      if (await this.capacity.released(a.tenantId, wid, owner))
+        await this.store.tx(a.tenantId, (s) => {
+          const w = s.workspaces[wid];
+          if (w && !w.lock && (!w.sandboxId || w.sandboxId === sid)) {
+            delete w.sandboxId;
+            delete w.sandboxState;
+            delete w.sandboxSkillScope;
+          }
+          audit(
+            s,
+            a,
+            "sandbox.creation.reconciled",
+            wid,
+            JSON.stringify({ owner, sandboxId: sid }),
+          );
+        });
+    } catch {
+      await this.capacity.unknown(a.tenantId, wid, owner, sid);
+    }
   }
   private async cancellationCleanup(
     a: Actor,
@@ -320,7 +509,12 @@ export class SandboxManager {
     try {
       if (sid) {
         await this.capacity.pending(a.tenantId, wid, owner, sid);
-        await (killing ?? this.provider.kill(sid));
+        await this.remote(
+          () => killing ?? this.kill(a, wid, owner, sid),
+          undefined,
+          undefined,
+          this.limits.cleanupTimeoutMs,
+        );
       }
       const released = await this.capacity.released(a.tenantId, wid, owner);
       if (released)
@@ -377,7 +571,8 @@ export class SandboxManager {
     let failed = false,
       reserved = false,
       activated = false,
-      creationStarted = false;
+      creationStarted = false,
+      connecting = false;
     let activeSid: string | undefined, killing: Promise<void> | undefined;
     const assertOwned = async () => {
       signal?.throwIfAborted();
@@ -396,7 +591,7 @@ export class SandboxManager {
           // Keep ownership while deletion is in flight; a late callback cannot
           // kill a reused instance or overwrite a successor's capacity record.
           await this.capacity.pending(a.tenantId, wid, owner, sid);
-          await this.provider.kill(sid);
+          await this.kill(a, wid, owner, sid);
         })();
         void killing.catch(() => {});
       }
@@ -419,22 +614,30 @@ export class SandboxManager {
       const w = await this.store.read(a.tenantId, (s) => workspace(s, a, wid));
       await this.capacity.adoptLegacy();
       const expected = await this.capacity.inspect(a.tenantId, wid);
+      await this.capacity.reserve(a.tenantId, w, owner, expected);
+      reserved = true;
       let vid = w.volumeId;
       if (!vid) {
         await assertOwned();
-        vid = await this.provider.createVolume(`ws-${wid}`);
+        vid = await this.remote(
+          () => {
+            creationStarted = true;
+            return this.provider.createVolume(`ws-${wid}`);
+          },
+          signal,
+          (id) => this.lateVolume(a, wid, owner, id),
+        );
+        creationStarted = false;
         await this.record(a, wid, owner, (w) => {
           w.volumeId = vid;
         });
       }
       await assertOwned();
-      await this.capacity.reserve(a.tenantId, w, owner, expected);
-      reserved = true;
       let sid = w.sandboxId;
       activeSid = sid;
       await assertOwned();
       if (sid && w.sandboxSkillScope !== scope) {
-        await this.provider.kill(sid);
+        await this.remote(() => this.kill(a, wid, owner, sid!), signal);
         activeSid = sid = undefined;
         await this.record(a, wid, owner, (w) => {
           delete w.sandboxId;
@@ -446,9 +649,17 @@ export class SandboxManager {
       if (sid) {
         await assertOwned();
         try {
-          await this.provider.connect(sid);
+          connecting = true;
+          const connectingSid = sid;
+          await this.remote(
+            () => this.provider.connect(connectingSid),
+            signal,
+            () => this.lateSandbox(a, wid, owner, connectingSid),
+          );
+          connecting = false;
         } catch (e) {
           if (!(e instanceof Fault && e.code === "SANDBOX_GONE")) throw e;
+          connecting = false;
           activeSid = sid = undefined;
           await this.capacity.pending(a.tenantId, wid, owner);
           await this.record(a, wid, owner, (w) => {
@@ -460,8 +671,23 @@ export class SandboxManager {
       }
       if (!sid) {
         await assertOwned();
-        creationStarted = true;
-        sid = await this.provider.create(vid, bundle, skills);
+        await this.store.tx(a.tenantId, (s) =>
+          audit(
+            s,
+            a,
+            "sandbox.creation.dispatched",
+            wid,
+            JSON.stringify({ owner, volumeId: vid }),
+          ),
+        );
+        sid = await this.remote(
+          () => {
+            creationStarted = true;
+            return this.provider.create(vid!, bundle, skills, undefined, owner);
+          },
+          signal,
+          (id) => this.lateSandbox(a, wid, owner, id),
+        );
         activeSid = sid;
         await this.capacity.pending(a.tenantId, wid, owner, sid);
         await assertOwned();
@@ -483,7 +709,12 @@ export class SandboxManager {
       // An already aborted signal does not dispatch a newly added listener.
       if (signal?.aborted) stop();
       await assertOwned();
-      const result = await fn(sid);
+      const result = await this.remote(
+        () => fn(sid),
+        signal,
+        undefined,
+        130000,
+      );
       await assertOwned();
       return result;
     } catch (e) {
@@ -492,8 +723,16 @@ export class SandboxManager {
         (signal?.aborted ||
           failed ||
           (e instanceof Fault &&
-            ["LEASE_LOST", "CAPACITY_LEASE_LOST"].includes(e.code)))
+            [
+              "LEASE_LOST",
+              "CAPACITY_LEASE_LOST",
+              "SANDBOX_REMOTE_TIMEOUT",
+            ].includes(e.code)))
       ) {
+        if (connecting) {
+          await this.capacity.unknown(a.tenantId, wid, owner, activeSid);
+          throw new Fault(502, "REMOTE_CANCEL_UNCONFIRMED");
+        }
         await this.cancellationCleanup(
           a,
           wid,
@@ -510,12 +749,26 @@ export class SandboxManager {
       clearInterval(timer);
       if (reserved && !activated)
         await this.capacity.unknown(a.tenantId, wid, owner, activeSid);
+      const remaining =
+        reserved && !activated
+          ? await this.capacity.inspect(a.tenantId, wid)
+          : undefined;
       await this.store.tx(a.tenantId, (s) => {
         const w = s.workspaces[wid];
         if (w?.lock?.owner === owner) {
           delete w.lock;
           if (activated && w.sandboxId) w.sandboxLastUsedAt = Date.now();
-          else if (reserved && !activated) w.sandboxState = "unknown";
+          else if (
+            remaining?.operation === owner &&
+            remaining.state === "unknown"
+          )
+            w.sandboxState = "unknown";
+          else if (
+            remaining?.operation === owner &&
+            remaining.state === "released" &&
+            !w.sandboxId
+          )
+            delete w.sandboxState;
         }
       });
     }
@@ -633,7 +886,7 @@ export class SandboxManager {
         if (!old.sandboxId) throw new Fault(409, "SANDBOX_OUTCOME_UNKNOWN");
         await this.capacity.claim(a.tenantId, capacityId, old, owner);
         try {
-          await this.provider.kill(old.sandboxId);
+          await this.kill(a, capacityId, owner, old.sandboxId);
           await this.capacity.released(a.tenantId, capacityId, owner);
         } catch (e) {
           await this.capacity.unknown(
@@ -648,7 +901,11 @@ export class SandboxManager {
       await assertFileOwned();
       let volume = w.volumeId;
       if (!volume) {
-        volume = await this.provider.createVolume(`ws-${wid}`);
+        volume = await this.remote(
+          () => this.provider.createVolume(`ws-${wid}`),
+          undefined,
+          (id) => this.lateVolume(a, wid, owner, id),
+        );
         await this.store.tx(a.tenantId, (s) => {
           const current = workspace(s, a, wid, writing);
           if (
@@ -676,7 +933,11 @@ export class SandboxManager {
       reserved = true;
       await assertFileOwned();
       creationStarted = true;
-      sid = await this.provider.create(volume, w.bundle!, []);
+      sid = await this.remote(
+        () => this.provider.create(volume!, w.bundle!, [], undefined, owner),
+        undefined,
+        (id) => this.lateSandbox(a, capacityId, owner, id),
+      );
       await this.capacity.pending(a.tenantId, capacityId, owner, sid);
       await this.capacity.active(a.tenantId, capacityId, owner, sid);
       if (lost) throw new Fault(409, "LEASE_LOST");
@@ -688,12 +949,18 @@ export class SandboxManager {
         )
           throw new Fault(409, "LEASE_LOST");
       });
-      const result = await this.provider.execute(sid, op, {
-        ...args,
-        path,
-        _workspaceOnly: true,
-        _skillManifests: [],
-      });
+      const result = await this.remote(
+        () =>
+          this.provider.execute(sid!, op, {
+            ...args,
+            path,
+            _workspaceOnly: true,
+            _skillManifests: [],
+          }),
+        undefined,
+        undefined,
+        130000,
+      );
       await assertFileOwned();
       return result;
     } finally {
@@ -702,7 +969,7 @@ export class SandboxManager {
         if (reserved) {
           if (sid) {
             try {
-              await this.provider.kill(sid);
+              await this.kill(a, capacityId, owner, sid);
               await this.capacity.released(a.tenantId, capacityId, owner);
             } catch {
               await this.capacity.unknown(a.tenantId, capacityId, owner, sid);
@@ -849,7 +1116,7 @@ export class SandboxManager {
     await this.record(a, w.id, owner, () => {});
     if (entry) await this.capacity.claim(a.tenantId, w.id, entry, owner);
     try {
-      if (sid) await this.provider.kill(sid);
+      if (sid) await this.kill(a, w.id, owner, sid);
       await this.record(a, w.id, owner, (w) => {
         delete w.sandboxId;
         delete w.sandboxState;
@@ -1022,7 +1289,7 @@ export class SandboxManager {
         await this.snapshotSelection(a, snapshot);
         await this.reserveManaged(a, w, owner);
         try {
-          await this.provider.connect(w.sandboxId);
+          await this.remote(() => this.provider.connect(w.sandboxId!));
           await this.record(a, wid, owner, (w) => {
             w.sandboxState = "active";
           });
@@ -1070,7 +1337,12 @@ export class SandboxManager {
   ) {
     const skills = await this.snapshotSelection(a, snapshot);
     const volume =
-      w.volumeId ?? (await this.provider.createVolume(`ws-${w.id}`));
+      w.volumeId ??
+      (await this.remote(
+        () => this.provider.createVolume(`ws-${w.id}`),
+        undefined,
+        (id) => this.lateVolume(a, w.id, owner, id),
+      ));
     await this.record(a, w.id, owner, (w) => {
       w.volumeId = volume;
       w.bundle = snapshot.bundle;
@@ -1078,18 +1350,24 @@ export class SandboxManager {
     await this.reserveManaged(a, w, owner);
     let sid: string | undefined;
     try {
-      if (w.sandboxId) await this.provider.kill(w.sandboxId);
+      if (w.sandboxId) await this.kill(a, w.id, owner, w.sandboxId);
       await this.capacity.pending(a.tenantId, w.id, owner);
       await this.record(a, w.id, owner, (w) => {
         delete w.sandboxId;
         delete w.sandboxState;
         delete w.sandboxSkillScope;
       });
-      sid = await this.provider.create(
-        volume,
-        snapshot.bundle,
-        skills,
-        snapshot.id,
+      sid = await this.remote(
+        () =>
+          this.provider.create(
+            volume,
+            snapshot.bundle,
+            skills,
+            snapshot.id,
+            owner,
+          ),
+        undefined,
+        (id) => this.lateSandbox(a, w.id, owner, id),
       );
       await this.capacity.pending(a.tenantId, w.id, owner, sid);
       await this.record(a, w.id, owner, (w) => {
@@ -1199,7 +1477,7 @@ export class SandboxManager {
       if (entry) await this.capacity.claim(a.tenantId, wid, entry, owner);
       if (sid) {
         try {
-          await this.provider.kill(sid);
+          await this.kill(a, wid, owner, sid);
         } catch (e) {
           if (!(e instanceof Fault && e.code === "SANDBOX_GONE")) throw e;
         }
@@ -1223,7 +1501,7 @@ export class SandboxManager {
         if (!files.sandboxId) throw new Fault(409, "SANDBOX_OUTCOME_UNKNOWN");
         await this.capacity.claim(a.tenantId, wid + ":files", files, owner);
         try {
-          await this.provider.kill(files.sandboxId);
+          await this.kill(a, wid + ":files", owner, files.sandboxId);
           await this.capacity.released(a.tenantId, wid + ":files", owner);
         } catch (e) {
           await this.capacity.unknown(

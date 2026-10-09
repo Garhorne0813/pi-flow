@@ -37,6 +37,26 @@ export class SandboxCapacity {
     private store: Store,
     readonly policy: SandboxPolicy,
   ) {}
+  async orphan(
+    a: Actor,
+    wid: string,
+    operation: string,
+    sandboxId: string,
+    userId: string,
+  ) {
+    await this.store.capacityTx((s) => {
+      const orphanId = `${wid}:orphan:${operation}`;
+      s.entries[key(a.tenantId, orphanId)] = {
+        tenantId: a.tenantId,
+        workspaceId: orphanId,
+        userId,
+        operation,
+        sandboxId,
+        state: "unknown",
+        updatedAt: Date.now(),
+      };
+    });
+  }
   adoptLegacy() {
     return (this.adoption ??= (async () => {
       for (const tenant of await this.store.tenants()) {

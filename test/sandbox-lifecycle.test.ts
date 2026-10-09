@@ -640,8 +640,11 @@ for (const stage of ["before", "create", "connect", "activation"] as const)
         {},
         controller.signal,
       ),
-      { name: "AbortError" },
+      ["create", "connect"].includes(stage)
+        ? { code: "REMOTE_CANCEL_UNCONFIRMED" }
+        : { name: "AbortError" },
     );
+    await until(async () => !(await f.sandbox.capacity.get("one", w.id)));
     assert.equal(commands, 0);
     assert.equal(f.provider.boxes.size, 0);
     assert.equal((await f.sandbox.capacity.usage(alice)).user.active, 0);
@@ -680,12 +683,9 @@ for (const killFails of [false, true])
       {},
       controller.signal,
     );
-    const checked = assert.rejects(
-      execution,
-      killFails
-        ? { code: "REMOTE_CANCEL_UNCONFIRMED" }
-        : { name: "AbortError" },
-    );
+    const checked = assert.rejects(execution, {
+      code: "REMOTE_CANCEL_UNCONFIRMED",
+    });
     try {
       await begun;
       controller.abort();
@@ -698,6 +698,12 @@ for (const killFails of [false, true])
       release();
     }
     await checked;
+    await until(async () => {
+      const entry = await f.sandbox.capacity.get("one", w.id);
+      return killFails
+        ? entry?.state === "unknown" && !!entry.sandboxId
+        : !entry;
+    });
     const entry = await f.sandbox.capacity.get("one", w.id);
     if (killFails) {
       assert.equal(entry!.state, "unknown");
@@ -799,3 +805,12 @@ test("late Agent cancellation cannot kill a reused instance or clear the success
     if (b) await b;
   }
 });
+
+async function until(check: () => Promise<boolean>, timeout = 1000) {
+  const deadline = Date.now() + timeout;
+  while (Date.now() < deadline) {
+    if (await check()) return;
+    await new Promise((r) => setTimeout(r, 5));
+  }
+  assert.fail("Late cleanup did not settle");
+}
