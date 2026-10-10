@@ -36,6 +36,7 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y openssl python3 bash
       - run: npm ci
       - run: npm run check
+      - run: DATABASE_URL="$TEST_DATABASE_URL" npm run migrate
       - run: npm test
       - run: npm run build
       - run: npm run smoke

@@ -1,3 +1,4 @@
+import { alerts } from "./alerts.js";
 import Fastify from "fastify";
 import { SandboxReconciler } from "./sandbox-reconciler.js";
 import { bounded } from "./health.js";
@@ -124,15 +125,13 @@ export function buildAPI(
         w.lastSuccessfulTick !== undefined &&
         Date.now() - w.lastSuccessfulTick < 15000,
     );
-    return reply
-      .code(healthy.length ? 200 : 503)
-      .send({
-        status: healthy.length ? "ok" : "no_healthy_worker",
-        workers: workers.map((w) => ({
-          ...w,
-          stale: Date.now() - w.heartbeatAt >= 15000,
-        })),
-      });
+    return reply.code(healthy.length ? 200 : 503).send({
+      status: healthy.length ? "ok" : "no_healthy_worker",
+      workers: workers.map((w) => ({
+        ...w,
+        stale: Date.now() - w.heartbeatAt >= 15000,
+      })),
+    });
   });
   app.get("/api/v1/admin/metrics", async (req) => {
     admin(actor(req));
@@ -142,7 +141,11 @@ export function buildAPI(
         return counts;
       }, {}),
     );
-    return { counters: telemetry.snapshot(), sandbox: capacity };
+    return {
+      counters: telemetry.snapshot(),
+      sandbox: capacity,
+      alerts: alerts({}, {}, capacity.unknown ?? 0),
+    };
   });
   app.get("/api/v1/admin/usage", async (req) => {
     const a = actor(req);
@@ -612,7 +615,10 @@ export function buildAPI(
     let lastBeat = Date.now();
     try {
       while (!closed) {
-        if (expired()) { expire(); break; }
+        if (expired()) {
+          expire();
+          break;
+        }
         const batch = await service.store.eventPage(
           a.tenantId,
           rid,

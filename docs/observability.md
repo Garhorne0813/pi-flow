@@ -30,3 +30,5 @@ AsyncLocalStorage 保持 Runtime/Sandbox/MCP 异步日志关联，MCP _meta 携�
 不接受自定义 trace 属性或 baggage。上下文格式兼容 OpenTelemetry；本仓库不内置
 外部 OTel Collector/exporter，应在部署日志采集配置中绑定 trace_id/span_id。
 数据库事件仍以 requestId/runId/callId 关联；不把敏感执行输出复制进 trace。
+
+`src/alerts.ts` 是可执行告警规则：Worker 快照比较相邻累计计数，只报告新增错误；重启导致计数下降不触发告警。MCP unknown 和 API 查询到的 unknown 容量为 critical；心跳、租约、回收和 Worker 异常为 warning。`metrics_snapshot.alerts` 与 `/api/v1/admin/metrics.alerts` 返回稳定规则名、指标、数量和处理动作，不包含执行数据。部署采集器需将这些告警接入通知渠道；本次未配置外部通知。

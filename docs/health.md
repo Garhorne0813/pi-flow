@@ -38,3 +38,5 @@ API 默认请求超时 30 秒，SSE 是长连接：代理应关闭缓冲，并�
 5 秒），然后关闭 API 和数据库；未确认的远端结果保持 unknown，不重放。
 独立 Worker 不能用 API liveness 判断，监控上述共享心跳；Worker 停止时会发布
 stopping。数据库故障只应撤下 API readiness，不能用它重启仍存活的 API。
+
+组合运行时要求迁移 001–004；readiness 同时检查归一化 Run、Session、事件序列与容量表。仅执行 001 不会接受流量。

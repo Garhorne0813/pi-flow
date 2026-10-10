@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { readFile, readdir } from "node:fs/promises";
 import { buildAPI } from "../src/api.js";
 import { MemoryStore, PostgresStore } from "../src/store.js";
 import { HarnessService } from "../src/service.js";
@@ -75,17 +75,23 @@ test(
   "PostgreSQL readiness rejects missing migration and schema mismatch",
   { skip: !process.env.TEST_DATABASE_URL },
   async () => {
-    const store = new PostgresStore(process.env.TEST_DATABASE_URL!);
+    const adminStore = new PostgresStore(process.env.TEST_DATABASE_URL!);
+    const schema = "health_" + crypto.randomUUID().replaceAll("-", "");
+    await adminStore.pool.query(`CREATE SCHEMA ${schema}`);
+    const scoped = new URL(process.env.TEST_DATABASE_URL!);
+    scoped.searchParams.set("options", `-csearch_path=${schema}`);
+    const store = new PostgresStore(scoped.href);
     try {
-      await store.pool.query(
-        await readFile("migrations/001_initial.sql", "utf8"),
-      );
+      for (const file of (await readdir("migrations"))
+        .filter((n) => n.endsWith(".sql"))
+        .sort())
+        await store.pool.query(await readFile(`migrations/${file}`, "utf8"));
       await store.ready();
       await store.pool.query(
         "UPDATE harness_schema SET version=999 WHERE id=1",
       );
       await assert.rejects(store.ready(), /SCHEMA_MISMATCH/);
-      await store.pool.query("UPDATE harness_schema SET version=1 WHERE id=1");
+      await store.pool.query("UPDATE harness_schema SET version=4 WHERE id=1");
       await store.workerHeartbeat({
         workerId: "health-test",
         heartbeatAt: Date.now(),
@@ -99,12 +105,16 @@ test(
           ?.activeTasks,
         2,
       );
+      await store.pool.query("DROP TABLE harness_run_events");
+      await assert.rejects(store.ready(), /SCHEMA_INCOMPLETE/);
     } finally {
-      await store.pool.query("UPDATE harness_schema SET version=1 WHERE id=1");
+      await store.pool.query("UPDATE harness_schema SET version=4 WHERE id=1");
       await store.pool.query(
         "DELETE FROM harness_worker_health WHERE worker_id='health-test'",
       );
       await store.close();
+      await adminStore.pool.query(`DROP SCHEMA ${schema} CASCADE`);
+      await adminStore.close();
     }
     const absent = new PostgresStore(
       "postgres://harness:test-only@127.0.0.1:1/absent",

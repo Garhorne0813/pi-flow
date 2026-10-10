@@ -9,7 +9,8 @@ import {
   SandboxPolicySchema,
 } from "../src/adapters/sandbox-policy.js";
 const url = process.env.TEST_DATABASE_URL;
-if (process.env.REQUIRE_POSTGRES_TESTS === "true" && !url) throw new Error("TEST_DATABASE_URL required: PostgreSQL tests must not skip");
+if (process.env.REQUIRE_POSTGRES_TESTS === "true" && !url)
+  throw new Error("TEST_DATABASE_URL required: PostgreSQL tests must not skip");
 test(
   "PostgreSQL restart persistence, multi-client serialization and transaction rollback",
   { skip: !url },

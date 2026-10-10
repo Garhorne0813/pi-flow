@@ -65,7 +65,9 @@ export class Worker {
         await this.publishHealth();
       }
     });
-    this.tickTail = task.catch((e) => { telemetry.error("worker_tick", e, {workerId:this.owner}); });
+    this.tickTail = task.catch((e) => {
+      telemetry.error("worker_tick", e, { workerId: this.owner });
+    });
     return task;
   }
   private async tickOnce() {
@@ -78,7 +80,11 @@ export class Worker {
       const task = this.sandbox
         .sweepIfDue()
         .then(async (result) => {
-          if (result && process.env.SANDBOX_RECONCILE_ENABLED === "true") await new SandboxReconciler(this.service.store,this.sandbox).scan();
+          if (result && process.env.SANDBOX_RECONCILE_ENABLED === "true")
+            await new SandboxReconciler(
+              this.service.store,
+              this.sandbox,
+            ).scan();
           this.health.maintenance = result?.failed ? "failed" : "ok";
           if (result?.failed) {
             telemetry.count("sandbox_reclaim_failed_total", result.failed);
@@ -459,22 +465,22 @@ export class Worker {
       const modelStarted = Date.now();
       try {
         await this.runtime.execute({
-        beforeModelRequest: async (estimate) => {
-          try {
-            return await this.ledger.reserve(
-              tenant,
-              initial.id,
-              estimate,
-              this.owner,
-            );
-          } catch (e) {
-            fault = e instanceof Fault ? e.code : "MODEL_BUDGET_CHECK_FAILED";
-            controller.abort(e);
-            throw e;
-          }
-        },
-        recordModelUsage: (requestId, usage, duration) =>
-          this.ledger.settle(tenant, requestId, usage, duration),
+          beforeModelRequest: async (estimate) => {
+            try {
+              return await this.ledger.reserve(
+                tenant,
+                initial.id,
+                estimate,
+                this.owner,
+              );
+            } catch (e) {
+              fault = e instanceof Fault ? e.code : "MODEL_BUDGET_CHECK_FAILED";
+              controller.abort(e);
+              throw e;
+            }
+          },
+          recordModelUsage: (requestId, usage, duration) =>
+            this.ledger.settle(tenant, requestId, usage, duration),
 
           config: ctx.config,
           entries: ctx.ses.entries,

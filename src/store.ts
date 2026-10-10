@@ -154,9 +154,15 @@ export class PostgresStore implements Store {
       this.listening = (async () => {
         const c = await this.pool.connect();
         try {
-          if (this.closed) { c.release(true); return; }
+          if (this.closed) {
+            c.release(true);
+            return;
+          }
           await c.query("LISTEN harness_run_event");
-          if (this.closed) { c.release(true); return; }
+          if (this.closed) {
+            c.release(true);
+            return;
+          }
           this.listener = c;
           c.on("notification", (m) => {
             if (m.payload) this.notifications.emit(m.payload);
@@ -206,23 +212,40 @@ export class PostgresStore implements Store {
     limit: number,
     authorize: (s: State) => RunState,
   ) {
-    const c = await this.pool.connect();
-    try {
-      await c.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
-      const s = await loadState(c, tenant, false, runId, false),
-        state = authorize(s);
-      const result = await c.query(
-        "SELECT data FROM harness_run_events WHERE tenant_id=$1 AND run_id=$2 AND event_id>$3 ORDER BY event_id LIMIT $4",
-        [tenant, runId, after, limit],
-      );
-      await c.query("COMMIT");
-      return { state, events: result.rows.map((row) => row.data as Event) };
-    } catch (e) {
-      await c.query("ROLLBACK");
-      throw e;
-    } finally {
-      c.release();
-    }
+    // One SELECT authorizes and replays in the same MVCC snapshot without
+    // multiple round trips per subscriber poll.
+    const result = await this.pool.query(
+      `
+      WITH RECURSIVE chain AS (
+        SELECT data FROM harness_runs WHERE tenant_id=$1 AND run_id=$2
+        UNION
+        SELECT parent.data FROM harness_runs parent JOIN chain child
+          ON parent.run_id=child.data->>'parentRunId' WHERE parent.tenant_id=$1
+      )
+      SELECT t.state,
+        COALESCE((SELECT jsonb_agg(data) FROM chain), '[]'::jsonb) AS runs,
+        COALESCE((SELECT jsonb_agg(s.data - 'entries') FROM harness_sessions s
+          WHERE s.tenant_id=$1 AND s.session_id IN (SELECT data->>'sessionId' FROM chain)), '[]'::jsonb) AS sessions,
+        COALESCE((SELECT jsonb_agg(page.data ORDER BY page.event_id) FROM (
+          SELECT data,event_id FROM harness_run_events WHERE tenant_id=$1
+            AND run_id=$2 AND event_id>$3 ORDER BY event_id LIMIT $4
+        ) page), '[]'::jsonb) AS events
+      FROM harness_tenants t WHERE t.tenant_id=$1`,
+      [tenant, runId, after, limit],
+    );
+    const row = result.rows[0];
+    const s = {
+      ...emptyState(),
+      ...row?.state,
+      runs: Object.fromEntries(
+        (row?.runs ?? []).map((r: { id: string }) => [r.id, r]),
+      ),
+      sessions: Object.fromEntries(
+        (row?.sessions ?? []).map((ses: { id: string }) => [ses.id, ses]),
+      ),
+      events: [],
+    } as State;
+    return { state: authorize(s), events: (row?.events ?? []) as Event[] };
   }
   pool: pg.Pool;
   private healthPool: pg.Pool;
@@ -242,7 +265,7 @@ export class PostgresStore implements Store {
     if (result.rows[0]?.version !== SCHEMA_VERSION)
       throw new Error("SCHEMA_MISMATCH");
     const tables = await this.healthPool.query(
-      "SELECT to_regclass('harness_tenants') AS tenants, to_regclass('harness_sandbox_capacity') AS capacity, to_regclass('harness_worker_health') AS workers",
+      "SELECT to_regclass('harness_tenants') AS tenants, to_regclass('harness_sandbox_capacity') AS capacity, to_regclass('harness_worker_health') AS workers, to_regclass('harness_runs') AS runs, to_regclass('harness_sessions') AS sessions, to_regclass('harness_run_events') AS events, to_regclass('harness_event_sequences') AS sequences, to_regclass('harness_sandbox_leases') AS leases",
     );
     if (Object.values(tables.rows[0]).some((v) => v === null))
       throw new Error("SCHEMA_INCOMPLETE");
