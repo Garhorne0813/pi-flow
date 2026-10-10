@@ -118,3 +118,18 @@ This is connection loss/query blocking on real PostgreSQL with synthetic state.
 It does not stop the server, exhaust all server connection slots, validate a
 backup/Volume restoration or establish a production SLO. Those #18 gates remain
 open along with actual providers and representative mixed load.
+
+### Disposable server restart and backup recovery
+
+CI additionally runs `database-recovery.ts` with its own PostgreSQL service
+container ID in `ACCEPTANCE_PG_CONTAINER`. It takes a real custom-format pg_dump,
+commits a later checkpoint/event, stops and starts the server, checks bounded
+HTTP readiness failure and recovery, then restores into an independent database
+with pg_restore. It verifies the backup recovery point, checkpoint/event cursor,
+Run lease, unknown usage reservation, unknown capacity generation and tenant
+isolation. The temporary restore database and dump are removed.
+
+This actually interrupts the dedicated CI server; do not run it on a shared or
+production database. The results validate synthetic data and CI's single-server
+storage. Target deployment backup/PITR, Workspace Volume restoration, multi-node
+failover and production recovery objectives remain open under #18.
