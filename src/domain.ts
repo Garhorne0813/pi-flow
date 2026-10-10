@@ -127,6 +127,7 @@ export type Run = {
   deadline?: number;
   resumedFrom?: string;
   requestId?: string;
+  traceparent?: string;
   startedAt?: string;
   endedAt?: string;
 };

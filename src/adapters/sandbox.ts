@@ -1,4 +1,5 @@
 import { posix } from "node:path";
+import { telemetry } from "../telemetry.js";
 import {
   Fault,
   workspace,
@@ -903,8 +904,10 @@ export class SandboxManager {
                 "WORKSPACE_NOT_FOUND",
               ].includes(e.code)
             )
-          )
+          ) {
             result.failed++;
+            telemetry.error("sandbox_reclaim", e, { tenantId });
+          }
         }
       }
     }

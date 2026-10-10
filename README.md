@@ -95,6 +95,12 @@ JWT/MCP 测试使用本地 HTTPS 测试服务，需要 `openssl`；远程工具�
 
 API 协议和配置示例见 [docs/api.md](docs/api.md)。
 
+SSE 在连接 JWT 的 exp 到期时关闭，并返回无 event ID 的 `stream.error`
+（`AUTHENTICATION_EXPIRED`）。客户端通过 Authorization header 携带新令牌重连，
+用最后收到的 Run event ID 作为 Last-Event-ID 回放；不要把令牌放进 URL。
+每轮读取仍检查 Workspace ACL。离线 JWKS 验签只保证签名/到期检查，
+不提供 UCS 中央即时撤销；需要该保证的部署应接入企业 introspection/撤销事件。
+
 ## Sandbox 容量与生命周期
 
 默认每个租户内的用户（Workspace owner）最多 3 个活跃 Sandbox，整个 Harness 部署最多 100 个；协作者操作同一 Workspace 仍计入 owner 配额。创建/恢复/克隆先在共享数据库中原子预留容量，运行中、预留中和结果不确定的操作均计数，暂停实例不计数。配额覆盖同一数据库管理的实例，不包含 Cube 集群上其他应用创建的实例。`WORKER_CONCURRENCY` 仍只限制 Run 并发，不是 Sandbox 数量。API 与所有 Worker 必须使用相同配额和生命周期配置。
@@ -140,3 +146,9 @@ NODE_USE_ENV_PROXY=1 npm run test:deepseek:capabilities
 ## Cube 实例授权与快照限制
 
 Cube 创建时的 trafficAccessToken 随实例记录持久化，执行时复用，实例清除时删除。缺少 Token 的旧实例在租约内重建并保留工作区卷。快照恢复使用模板记录的挂载；Cube 快照继承源卷，当前拒绝跨 Workspace 克隆（SNAPSHOT_CLONE_UNSUPPORTED），避免共享源工作区数据。Demo 克隆仍使用独立卷。
+
+健康检查、Worker 心跳和 Kubernetes probes 见 [docs/health.md](docs/health.md)。
+
+## CI quality checks
+
+See [docs/ci.md](docs/ci.md) for required checks, mandatory PostgreSQL regressions, fault/load scenarios and retained reports.

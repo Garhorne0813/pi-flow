@@ -1,4 +1,5 @@
 import { Fault } from "../domain.js";
+import { telemetry } from "../telemetry.js";
 export function remote<T>(
   start: () => Promise<T>,
   signal?: AbortSignal,
@@ -37,7 +38,10 @@ export function remote<T>(
       .then(
         (value) => {
           if (abandoned) {
-            if (late) void late(value).catch(() => {});
+            if (late)
+              void late(value).catch((e) =>
+                telemetry.error("sandbox_late_cleanup", e),
+              );
             return;
           }
           settled = true;

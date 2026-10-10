@@ -18,3 +18,5 @@ kill 未确认或创建无 ID 的未知结果持续占用容量。文件临时�
 
 此次是渐进提取，保留已验证的文件/快照编排在 Manager；未来可在该边界逐项
 提取，不复制状态机、不降低 reserved/unknown 计数或不重放保证。
+
+Cube traffic-token persistence and rejection of cross-workspace snapshot clones are explicit security fixes alongside this extraction. The public manager/import paths remain compatible; SNAPSHOT_CLONE_UNSUPPORTED is a documented Cube capability restriction. Demo clone behavior is unchanged. Late cleanup failures retain structured telemetry after extraction.

@@ -1,4 +1,5 @@
 import { bootstrap } from "./bootstrap.js";
+import { telemetry } from "./telemetry.js";
 import { buildAPI } from "./api.js";
 import { authFromEnv } from "./auth.js";
 const auth = authFromEnv();
@@ -22,8 +23,14 @@ async function close() {
   await context.store.close();
 }
 process.once("SIGTERM", () => {
-  void close();
+  void close().catch((e) => {
+    telemetry.error("api_shutdown", e);
+    process.exitCode = 1;
+  });
 });
 process.once("SIGINT", () => {
-  void close();
+  void close().catch((e) => {
+    telemetry.error("api_shutdown", e);
+    process.exitCode = 1;
+  });
 });

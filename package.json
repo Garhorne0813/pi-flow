@@ -18,7 +18,9 @@
     "format": "prettier --write src test scripts",
     "test:deepseek": "node scripts/smoke-deepseek.mjs",
     "test:deepseek:capabilities": "node scripts/smoke-deepseek-capabilities.mjs",
-    "bench:store:reads": "node scripts/bench-store-reads.mjs"
+    "bench:store:reads": "node scripts/bench-store-reads.mjs",
+    "verify:vendor": "node scripts/verify-vendor.mjs",
+    "verify:vendor:upstream": "node scripts/verify-vendor.mjs --upstream"
   },
   "dependencies": {
     "@cubesandbox/sdk": "file:vendor/cubesandbox-sdk-0.3.0.tgz",
