@@ -1,0 +1,37 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: harness
+      POSTGRES_PASSWORD: local-demo-only
+      POSTGRES_DB: harness
+    volumes:
+      - harness-db:/var/lib/postgresql/data
+      - ./migrations/001_initial.sql:/docker-entrypoint-initdb.d/001.sql:ro
+      - ./migrations/002_sandbox_leases.sql:/docker-entrypoint-initdb.d/002.sql:ro
+      - ./migrations/003_runs_sessions_events.sql:/docker-entrypoint-initdb.d/003.sql:ro
+      - ./migrations/004_schema_readiness.sql:/docker-entrypoint-initdb.d/004.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U harness -d harness"]
+      interval: 2s
+      retries: 20
+  api:
+    build: .
+    environment:
+      HARNESS_MODE: demo
+      HOST: 0.0.0.0
+      PORT: 8080
+      DEV_TOKEN: ${DEV_TOKEN:?Set a demo token with at least 16 characters}
+      DATABASE_URL: postgres://harness:local-demo-only@postgres:5432/harness
+    ports: ["127.0.0.1:8080:8080"]
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/health/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 5s
+      timeout: 2s
+      retries: 3
+      start_period: 10s
+    stop_grace_period: 30s
+    depends_on:
+      postgres: {condition: service_healthy}
+volumes:
+  harness-db:

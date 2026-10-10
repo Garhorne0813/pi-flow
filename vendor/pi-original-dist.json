@@ -1,0 +1,23 @@
+{
+  "shasum": "6f95461d41661aea1243f6cc2ac0ace8497d21f7",
+  "tarball": "https://registry.npmjs.org/@earendil-works/pi-coding-agent/-/pi-coding-agent-0.99.2.tgz",
+  "fileCount": 1228,
+  "integrity": "sha512-6R1BZ2N77CrVcGf3eC2KovTz1Q4RYiAeydvVWQT546N2fi1nBc81aURlbOZCgruWoW9VY/UrLzDynF4YTolpoA==",
+  "signatures": [
+    {
+      "sig": "MEUCIQDWWJr5FBImrs7ApG2ZrcYVpgEBMUErorKOFLDusfIGtgIgOguIUk3LsNsEXyBTKZcujRV3YqjMg1CimhhqbRxMRbY=",
+      "keyid": "SHA256:DhQ8wR5APBvFHLF/+Tc+AYvPOdTpcIDqOhxsBHRwC7U"
+    },
+    {
+      "sig": "MEUCICt+f8yyZChVvJCzwDJNpFqeXgO1yzXenNPdZ10hmlOcAiEAo7P87N5DXi14p70P1zcuH6kJRWBbIAyoZE1xGB0YXSI=",
+      "keyid": "SHA256:DhQ8wR5APBvFHLF/+Tc+AYvPOdTpcIDqOhxsBHRwC7U"
+    }
+  ],
+  "attestations": {
+    "url": "https://registry.npmjs.org/-/npm/v1/attestations/@earendil-works%2fpi-coding-agent@0.99.2",
+    "provenance": {
+      "predicateType": "https://slsa.dev/provenance/v1"
+    }
+  },
+  "unpackedSize": 22776255
+}
