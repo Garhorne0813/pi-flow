@@ -250,7 +250,8 @@ test("switching Agent skill sets replaces Sandbox before access, retains workspa
 test("legacy unscoped Sandbox is replaced; revoked or cross-bundle skills fail before tools run", async () => {
   const f = await fixture();
   const oldVolume = await f.provider.createVolume("legacy-workspace");
-  const oldBox = await f.provider.create(oldVolume, "default", [a, b, c]);
+  const oldBox = (await f.provider.create(oldVolume, "default", [a, b, c]))
+    .sandboxId;
   await f.store.tx(actor.tenantId, (s) => {
     s.workspaces[f.w.id]!.volumeId = oldVolume;
     s.workspaces[f.w.id]!.sandboxId = oldBox;

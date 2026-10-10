@@ -51,3 +51,13 @@ Pi SDK + 本地 HTTP 网关的合约与失真测试是阶段成果；部署端�
 财务级结算独立由 [#38](https://github.com/Garhorne0813/pi-flow/issues/38) 跟踪，
 需要实际提供商账单导入、幂等匹配、差异/冲销审计和金额核验。本次未实现账单对账，
 该后续任务不作为 #19 预算控制与估算审计的关闭条件，也不据此声称准确供应商结算。
+
+## Reproducible protocol usage example
+
+The real local HTTP gateway in test/pi-contract.test.ts returns an OpenAI-compatible
+SSE usage frame: {"prompt_tokens":3,"completion_tokens":4,"total_tokens":7}.
+Pi normalizes this response into trusted request usage; the contract verifies
+request output limits and refusal before dispatch. This is a protocol fixture,
+not an enterprise deployment capture. test/usage.test.ts covers missing/zero/invalid
+usage, repeated settlement and shared PostgreSQL budgets. Actual deployment
+usage, cache semantics and fault evidence remain release gates in #37/#18.
