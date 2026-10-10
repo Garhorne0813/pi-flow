@@ -69,6 +69,8 @@ Cube Node SDK 的 npm 包在开发时返回 404，已从官方固定 commit 构�
 
 ## 验证
 
+PR 自动执行 Node 24 质量门禁和真实 PostgreSQL 测试；开发、发布、分支保护与回滚步骤见 [docs/release.md](docs/release.md)。
+
 ```bash
 npm run check
 npm test
