@@ -3,7 +3,8 @@
 The individual PRs target `work`, except the main baseline PR. The
 `integration/issue-fixes` branch assembles them on the main baseline and resolves
 shared Store/API/Worker/Sandbox conflicts. It is a reviewable combined candidate;
-no PR has been merged or deployment performed by this task.
+PRs #26, #23, #24 and #27 have now been merged into work. Main remains
+unmerged and no deployment has been performed.
 
 | Issue | Review PR | Scope |
 | --- | --- | --- |
@@ -60,3 +61,17 @@ contention or establish a production SLO.
 - [x] #18 保持开放且为生产发布阻塞项，#14/#35 Open、Reconciler 默认关闭。
 
 长期 Usage/Event/Audit 增长治理另见 #39，不作为本轮已完成内容。
+
+## Completed implementation issues (2026-10-10)
+
+Issues #21, #16, #17 and #15 are closed as completed after merging their
+PRs into work in that order. Each validated head passed the quality workflow
+(TypeScript, real PostgreSQL tests, build and Demo smoke) and vendor workflow
+(provenance/rebuild, SBOM and remote contract regressions). #26 adds quality CI
+to work; #27 resolves the API/Worker overlaps while preserving health reporting,
+telemetry, maintenance status and SSE token expiry cleanup.
+
+Issue bodies record exact validated heads, merge commits and CI links. These
+closures do not complete #10 or #18: main release, branch protection and real
+production-service acceptance remain pending. Alert notification routing remains
+a deployment configuration task.
