@@ -20,10 +20,15 @@ import { MCPManager } from "../dist/adapters/mcp.js";
 import { Worker } from "../dist/worker.js";
 import { buildAPI } from "../dist/api.js";
 
-// Real Pi/DeepSeek and HTTPS MCP transport; all file contents are test fixtures.
+// Real Pi model request and HTTPS MCP transport; all file contents are test
+// fixtures. DeepSeek is the default; OpenAI-compatible gateways can be selected
+// with SMOKE_PROVIDER, SMOKE_MODEL and SMOKE_BASE_URL.
+const provider = process.env.SMOKE_PROVIDER ?? "deepseek";
+const model = process.env.SMOKE_MODEL ?? "deepseek-flash";
+const endpoint = process.env.SMOKE_BASE_URL ?? "https://api.deepseek.com";
 const report = {
-  provider: "deepseek",
-  model: "deepseek-flash",
+  provider,
+  model,
   status: "running",
   startedAt: new Date().toISOString(),
   scope:
@@ -67,12 +72,17 @@ class FixtureSandbox extends DemoSandbox {
   }
 }
 try {
-  const preflight = await fetch("https://api.deepseek.com/models", {
+  const preflight = await fetch(endpoint + "/models", {
     signal: AbortSignal.timeout(15000),
     redirect: "error",
   });
   assert.ok([200, 401].includes(preflight.status), "NETWORK_PREFLIGHT_FAILED");
-  let key = process.env.DEEPSEEK_API_KEY;
+  let key =
+    process.env.SMOKE_API_KEY ??
+    (provider === "deepseek" ? process.env.DEEPSEEK_API_KEY : undefined) ??
+    (process.env.LLM_PROVIDER === provider
+      ? process.env.LLM_API_KEY
+      : undefined);
   if (process.argv.includes("--key-stdin")) {
     const input = createInterface({ input: process.stdin, terminal: false });
     key = await new Promise((resolve, reject) => {
@@ -88,9 +98,9 @@ try {
   }
   assert.ok(key, "API_KEY_REQUIRED");
   Object.assign(process.env, {
-    LLM_PROVIDER: "deepseek",
-    LLM_MODEL_ID: "deepseek-flash",
-    LLM_BASE_URL: "https://api.deepseek.com",
+    LLM_PROVIDER: provider,
+    LLM_MODEL_ID: model,
+    LLM_BASE_URL: endpoint,
     LLM_API_KEY: key,
     LOG_LEVEL: "silent",
   });
@@ -217,7 +227,7 @@ try {
     store,
     ["probe", "hidden"],
     ["default"],
-    [{ provider: "deepseek", modelId: "deepseek-flash" }],
+    [{ provider, modelId: model }],
   );
   const sandbox = new SandboxManager(store, new FixtureSandbox());
   const mcp = new MCPManager(store, {
@@ -291,7 +301,7 @@ try {
       name: "Live capabilities probe",
       systemPrompt:
         "Follow the explicit test instructions. Call the requested tool before replying. Never guess an unread marker. After a user response or approval, finish using the supplied response or recorded result; do not repeat an already completed operation.",
-      model: { provider: "deepseek", modelId: "deepseek-flash" },
+      model: { provider, modelId: model },
       tools: [],
       skillBundle: "default",
       maxTokens: 30000,
