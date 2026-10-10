@@ -13,6 +13,7 @@ import type { Runtime } from "./runtime.js";
 import type { SandboxManager } from "./adapters/sandbox.js";
 import type { MCPManager, McpCallContext } from "./adapters/mcp.js";
 import { argumentsSchemas, specs } from "./tool-specs.js";
+import { telemetry, traceContext, withContext } from "./telemetry.js";
 import { bounded, type WorkerHealth } from "./health.js";
 export class Worker {
   readonly owner = id();
@@ -22,6 +23,7 @@ export class Worker {
   private maintenance?: Promise<unknown>;
   private lastTenant?: string;
   private tickTail: Promise<void> = Promise.resolve();
+  private lastMetricPublish = 0;
   private health: WorkerHealth = {
     workerId: this.owner,
     heartbeatAt: 0,
@@ -58,20 +60,35 @@ export class Worker {
         await this.publishHealth();
       }
     });
-    this.tickTail = task.catch(() => {});
+    this.tickTail = task.catch((e) => {
+      telemetry.error("worker_tick", e, { workerId: this.owner });
+    });
     return task;
   }
   private async tickOnce() {
     if (this.stopping) return;
+    if (Date.now() - this.lastMetricPublish >= 5000) {
+      telemetry.publish(this.owner);
+      this.lastMetricPublish = Date.now();
+    }
     if (!this.maintenance) {
-      const task = this.sandbox.sweepIfDue().then(
-        () => {
-          this.health.maintenance = "ok";
-        },
-        () => {
+      const task = this.sandbox
+        .sweepIfDue()
+        .then((result) => {
+          this.health.maintenance = result?.failed ? "failed" : "ok";
+          if (result?.failed) {
+            telemetry.count("sandbox_reclaim_failed_total", result.failed);
+            telemetry.error(
+              "maintenance",
+              new Fault(503, "SANDBOX_RECLAIM_FAILED"),
+              { workerId: this.owner },
+            );
+          }
+        })
+        .catch((e) => {
           this.health.maintenance = "failed";
-        },
-      );
+          telemetry.error("maintenance", e, { workerId: this.owner });
+        });
       this.maintenance = task;
       void task.finally(() => {
         if (this.maintenance === task) this.maintenance = undefined;
@@ -124,7 +141,24 @@ export class Worker {
       });
       if (r) {
         this.health.lastClaimAt = Date.now();
-        const p = this.execute(tenant, r).catch(() => {});
+        telemetry.duration("run_queue", Date.now() - Date.parse(r.createdAt));
+        const p = withContext(
+          {
+            tenantId: tenant,
+            runId: r.id,
+            workerId: this.owner,
+            requestId: r.requestId,
+            ...traceContext(r.traceparent),
+          },
+          () => this.execute(tenant, r),
+        ).catch((e) => {
+          telemetry.error("execute_unhandled", e, {
+            tenantId: tenant,
+            runId: r.id,
+            workerId: this.owner,
+            requestId: r.requestId,
+          });
+        });
         this.active.add(p);
         void p.finally(() => this.active.delete(p));
       }
@@ -132,7 +166,7 @@ export class Worker {
   }
   async start() {
     while (!this.stopping) {
-      await this.tick();
+      await this.tick().catch(() => this.tickTail);
       await new Promise((r) => setTimeout(r, 250));
     }
     await this.stop();
@@ -158,6 +192,9 @@ export class Worker {
           );
         }),
       ]);
+    } catch (e) {
+      telemetry.error("shutdown", e, { workerId: this.owner });
+      throw e;
     } finally {
       clearTimeout(timer);
       await this.publishHealth(true);
@@ -170,6 +207,7 @@ export class Worker {
     return r;
   }
   async execute(tenant: string, initial: Run): Promise<void> {
+    const started = Date.now();
     const controller = new AbortController();
     this.controllers.add(controller);
     let waiting = false;
@@ -191,6 +229,11 @@ export class Worker {
           r.lease!.expires = Date.now() + 30000;
         })
         .catch((e) => {
+          telemetry.error("heartbeat", e, {
+            tenantId: tenant,
+            runId: initial.id,
+            workerId: this.owner,
+          });
           fault = e instanceof Fault ? e.code : "HEARTBEAT_FAILED";
           controller.abort();
         });
@@ -343,6 +386,7 @@ export class Worker {
         await emit("tool.completed", { name, callId, result });
         return result;
       } catch (e) {
+        telemetry.error("tool", e, { callId });
         if (
           e instanceof Fault &&
           ["REMOTE_CANCEL_UNCONFIRMED", "MCP_OUTCOME_UNKNOWN"].includes(e.code)
@@ -390,56 +434,61 @@ export class Worker {
         }
       }
       ctx = await get();
-      await this.runtime.execute({
-        config: ctx.config,
-        entries: ctx.ses.entries,
-        prompt,
-        skills: ctx.skills,
-        specs: [...specs(ctx.config.tools), ...mcp.specs],
-        signal: controller.signal,
-        call: async (name, args) => {
-          const fresh = await get();
-          return executeTool(
-            name,
-            args,
-            fresh.config,
-            fresh.ses.workspaceId,
-            mcp.call,
-            mcp.authorize,
-          );
-        },
-        emit,
-        consume: async (tokens, turn) => {
-          const code = await this.service.store.tx(tenant, (s) => {
-            const r = this.owned(s, initial.id);
-            const { config } = authorizedRun(s, r);
-            let root = r;
-            while (root.parentRunId) root = s.runs[root.parentRunId]!;
-            const rc =
-              root.capabilities ??
-              s.agents[s.sessions[root.sessionId]!.agentVersionId]!.config;
-            r.tokens = (r.tokens ?? 0) + tokens;
-            if (root.id !== r.id) root.tokens = (root.tokens ?? 0) + tokens;
-            if (turn) {
-              r.steps++;
-              if (root.id !== r.id) root.steps++;
-            }
-            if (r.steps > config.maxSteps || root.steps > rc.maxSteps)
-              return "STEP_BUDGET_EXCEEDED";
-            if (
-              r.tokens > config.maxTokens ||
-              (root.tokens ?? 0) > rc.maxTokens
-            )
-              return "TOKEN_BUDGET_EXCEEDED";
-          });
-          if (code) throw new Fault(429, code);
-        },
-        checkpoint: (entries) =>
-          this.service.store.tx(tenant, (s) => {
-            const r = this.owned(s, initial.id);
-            s.sessions[r.sessionId]!.entries = entries;
-          }),
-      });
+      const modelStarted = Date.now();
+      try {
+        await this.runtime.execute({
+          config: ctx.config,
+          entries: ctx.ses.entries,
+          prompt,
+          skills: ctx.skills,
+          specs: [...specs(ctx.config.tools), ...mcp.specs],
+          signal: controller.signal,
+          call: async (name, args) => {
+            const fresh = await get();
+            return executeTool(
+              name,
+              args,
+              fresh.config,
+              fresh.ses.workspaceId,
+              mcp.call,
+              mcp.authorize,
+            );
+          },
+          emit,
+          consume: async (tokens, turn) => {
+            const code = await this.service.store.tx(tenant, (s) => {
+              const r = this.owned(s, initial.id);
+              const { config } = authorizedRun(s, r);
+              let root = r;
+              while (root.parentRunId) root = s.runs[root.parentRunId]!;
+              const rc =
+                root.capabilities ??
+                s.agents[s.sessions[root.sessionId]!.agentVersionId]!.config;
+              r.tokens = (r.tokens ?? 0) + tokens;
+              if (root.id !== r.id) root.tokens = (root.tokens ?? 0) + tokens;
+              if (turn) {
+                r.steps++;
+                if (root.id !== r.id) root.steps++;
+              }
+              if (r.steps > config.maxSteps || root.steps > rc.maxSteps)
+                return "STEP_BUDGET_EXCEEDED";
+              if (
+                r.tokens > config.maxTokens ||
+                (root.tokens ?? 0) > rc.maxTokens
+              )
+                return "TOKEN_BUDGET_EXCEEDED";
+            });
+            if (code) throw new Fault(429, code);
+          },
+          checkpoint: (entries) =>
+            this.service.store.tx(tenant, (s) => {
+              const r = this.owned(s, initial.id);
+              s.sessions[r.sessionId]!.entries = entries;
+            }),
+        });
+      } finally {
+        telemetry.duration("model", Date.now() - modelStarted);
+      }
       if (!waiting) {
         controller.signal.throwIfAborted();
         await this.service.store.tx(tenant, (s) => {
@@ -450,6 +499,12 @@ export class Worker {
         });
       }
     } catch (e) {
+      telemetry.error("run_execute", e, {
+        tenantId: tenant,
+        runId: initial.id,
+        workerId: this.owner,
+        requestId: initial.requestId,
+      });
       if (!waiting)
         await this.service.store.tx(tenant, (s) => {
           const r = s.runs[initial.id];
@@ -473,6 +528,7 @@ export class Worker {
           );
         });
     } finally {
+      telemetry.duration("run", Date.now() - started);
       this.controllers.delete(controller);
       clearInterval(heartbeat);
       clearTimeout(timeout);

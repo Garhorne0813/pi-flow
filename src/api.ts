@@ -1,4 +1,6 @@
+import { alerts } from "./alerts.js";
 import Fastify from "fastify";
+import { telemetry, traceContext } from "./telemetry.js";
 import { bounded } from "./health.js";
 import { z } from "zod";
 import {
@@ -97,6 +99,20 @@ export function buildAPI(
       );
   });
   app.get("/health", async () => ({ status: "ok" }));
+  app.get("/api/v1/admin/metrics", async (req) => {
+    admin(actor(req));
+    const capacity = await service.store.capacityRead((s) =>
+      Object.values(s.entries).reduce<Record<string, number>>((counts, e) => {
+        counts[e.state] = (counts[e.state] ?? 0) + 1;
+        return counts;
+      }, {}),
+    );
+    return {
+      counters: telemetry.snapshot(),
+      sandbox: capacity,
+      alerts: alerts({}, {}, capacity.unknown ?? 0),
+    };
+  });
   app.get("/health/live", async () => ({ status: "ok" }));
   app.get("/health/ready", async (_req, reply) => {
     try {
@@ -116,15 +132,13 @@ export function buildAPI(
         w.lastSuccessfulTick !== undefined &&
         Date.now() - w.lastSuccessfulTick < 15000,
     );
-    return reply
-      .code(healthy.length ? 200 : 503)
-      .send({
-        status: healthy.length ? "ok" : "no_healthy_worker",
-        workers: workers.map((w) => ({
-          ...w,
-          stale: Date.now() - w.heartbeatAt >= 15000,
-        })),
-      });
+    return reply.code(healthy.length ? 200 : 503).send({
+      status: healthy.length ? "ok" : "no_healthy_worker",
+      workers: workers.map((w) => ({
+        ...w,
+        stale: Date.now() - w.heartbeatAt >= 15000,
+      })),
+    });
   });
   app.get("/api/v1/agents", async (req) => {
     const a = actor(req),
@@ -463,17 +477,23 @@ export function buildAPI(
     const k = req.headers["idempotency-key"];
     const key =
       k === undefined ? undefined : z.string().min(1).max(128).parse(k);
-    return reply
-      .code(202)
-      .send(
-        await service.submit(
-          actor(req),
-          uuid.parse(params(req.params).id),
-          b.message,
-          key,
-          req.id,
-        ),
-      );
+    return reply.code(202).send(
+      await service.submit(
+        actor(req),
+        uuid.parse(params(req.params).id),
+        b.message,
+        key,
+        req.id,
+        (() => {
+          const trace = traceContext(
+            typeof req.headers.traceparent === "string"
+              ? req.headers.traceparent
+              : undefined,
+          );
+          return `00-${trace.traceId}-${trace.spanId}-01`;
+        })(),
+      ),
+    );
   });
   app.get("/api/v1/runs/:id", async (req) => {
     const a = actor(req),
@@ -518,6 +538,7 @@ export function buildAPI(
     if (a.expiresAt !== undefined && Date.now() >= a.expiresAt)
       throw new Fault(401, "AUTHENTICATION_EXPIRED");
     reply.hijack();
+    telemetry.count("sse_active", 1);
     reply.raw.writeHead(200, {
       "Content-Type": "text/event-stream",
       "Cache-Control": "no-cache",
@@ -554,6 +575,7 @@ export function buildAPI(
     };
     reply.raw.on("close", () => {
       closed = true;
+      telemetry.count("sse_active", -1);
       clearTimeout(expiryTimer);
     });
     armExpiry();
