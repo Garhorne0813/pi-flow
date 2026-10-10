@@ -98,8 +98,8 @@ observed Sandbox durations do not establish an invoice or paid charges.
 `sse-history.ts`（5,000 条 Unicode 历史、满终态页、实际中途断连续传），CI 保存 JSON 报告。
 它们补充早期 20 事件负载场景，仍是合成数据，不能替代 #35/#36/#37 及 #18 生产验收。
 隔离 schema 的 001–004 升级/离线回滚回归见 `test/migration-roundtrip.test.ts`；
-目标部署全停、备份/Volume 恢复与签署仍待完成。main protection API 返回 Forbidden，
-可执行规则配置已准备，远程启用仍未完成。开发基线合并审查与生产部署门禁分开记录。
+目标部署全停、备份/Volume 恢复与签署仍待完成。main 分支保护已于 2026-10-10 通过 API 启用并读取核验，
+要求三项 strict CI、一名审核者、讨论解决、禁止强推/删除及管理员约束。开发基线合并审查与生产部署门禁分开记录。
 ## Database connection fault stage (#18)
 
 Run `node --import tsx scripts/acceptance/database-faults.ts` against a dedicated

@@ -1,7 +1,7 @@
 # 发布与回滚
 
 应用基线来自 `work`，通过 PR 发布到 `main`，禁止强制覆盖或绕过评审。
-所有后续发布 PR 必须通过 `quality / quality`：Node 24 的安装、类型检查、
+所有后续发布 PR 必须通过 `quality`、`vendor` 和 `postgres-fault-load`：Node 24 的安装、类型检查、
 真实 PostgreSQL 集成测试、完整测试、构建和 Demo smoke。
 CI 显式设置 REQUIRE_POSTGRES_TESTS，缺失数据库地址将失败，不能隐式跳过。
 
@@ -46,8 +46,9 @@ Reconciler 默认关闭，未确认实例不按超时或列表缺失释放容量
 gh api --method PUT repos/Garhorne0813/pi-flow/branches/main/protection --input .github/main-protection.json
 ```
 
-本轮对 protection API 的 GET/PUT 均返回 Forbidden，因此**尚未启用**。配置文件与绿色
-CI 不代表远程规则已生效，#10 仍须核验仓库设置并通过评审发布 main；本轮未合并。
+2026-10-10 已通过 protection API 启用，并读取核验 strict 三项检查、一名审核者、
+新提交撤销旧批准、讨论解决、管理员约束及禁止强推/删除。#10 仍须完成 PR 独立审核
+并合并应用基线至 main；启用保护不代表已发布，也不解除 #18 的生产部署门槛。
 
 ## Complete CI workflow
 

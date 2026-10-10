@@ -3,12 +3,12 @@
 The individual PRs target `work`, except the main baseline PR. The
 `integration/issue-fixes` branch assembles them on the main baseline and resolves
 shared Store/API/Worker/Sandbox conflicts. It is a reviewable combined candidate;
-PRs #26, #23, #24, #27, #25, #32, #28, #30 and #31 have now been merged into work. Main remains
+PRs #26, #23, #24, #27, #25, #32, #28, #30, #31, #41 and #33 have now been merged into work. Main remains
 unmerged and no deployment has been performed.
 
 | Issue | Review PR | Scope |
 | --- | --- | --- |
-| #10 | [#22](https://github.com/Garhorne0813/pi-flow/pull/22) | main baseline + mandatory PostgreSQL CI; repository branch protection still requires administrator configuration |
+| #10 | [#22](https://github.com/Garhorne0813/pi-flow/pull/22) | main baseline + mandatory PostgreSQL CI; branch protection enabled; application baseline awaits independent review and merge |
 | #11 | [#30](https://github.com/Garhorne0813/pi-flow/pull/30) | normalized runs/sessions/leases and per-Run writes; ordinary cross-entity transactions retain tenant metadata locks |
 | #12 | [#31](https://github.com/Garhorne0813/pi-flow/pull/31) | batched deltas, indexed event replay and notification hints; merged into work after #30 |
 | #13 | [#28](https://github.com/Garhorne0813/pi-flow/pull/28) | remove global JSONB full rewrites, retain atomic quota/fencing and a global advisory lock |
@@ -57,7 +57,7 @@ contention or establish a production SLO.
 - [x] #12：SSE 满页立即追赶并让步，5,000 条历史 HTTP 中途断线回放。
 - [x] 本地隔离 PG：001–004 升级、重复迁移、失败回滚、当前状态还原；目标部署演练仍待 #18。
 - [x] 整合代码本地完整回归、构建/smoke；远程三项 CI 结果在 PR #34 按提交核对。
-- [ ] main 分支保护：配置已准备；最新读取返回 Branch not protected，尚未远程启用。
+- [x] main 分支保护：已启用并读取核验三项 strict 检查、一名审核者、管理员约束、讨论解决及禁止强推/删除。
 - [x] #18 保持开放且为生产发布阻塞项，#14/#35 Open、Reconciler 默认关闭。
 
 长期 Usage/Event/Audit 增长治理另见 #39，不作为本轮已完成内容。
@@ -72,7 +72,7 @@ to work; #27 resolves the API/Worker overlaps while preserving health reporting,
 telemetry, maintenance status and SSE token expiry cleanup.
 
 Issue bodies record exact validated heads, merge commits and CI links. These
-closures do not complete #10 or #18: main release, branch protection and real
+closures do not complete #10 or #18: main baseline merge and real
 production-service acceptance remain pending. Alert notification routing remains
 a deployment configuration task.
 
@@ -88,3 +88,21 @@ of 5,000 synthetic Unicode events. These are implementation and synthetic
 acceptance evidence. Actual Cube/MCP/gateway and production mixed-load acceptance
 remain open under #18 and #35–#37; invoice reconciliation and archival growth
 remain tracked by #38 and #39.
+
+## Further progress (2026-10-10)
+
+PR #41 merged into work after all three checks passed, completing O(n) Sandbox
+interval statistics. #39 stays open for normalized usage/audit storage, billing
+aggregates, archival and representative growth measurements.
+
+PR #33 merged into work after all three checks passed at head
+42d908659851067093e7205319c52786f35c9bf6. Its real PostgreSQL/HTTP stages include
+application pool saturation, blocked probes, transaction/idle/LISTEN connection
+loss, actual CI server restart and pg_dump/pg_restore into an independent database.
+Reports verify preserved checkpoints, event cursors, Run leases, unknown usage
+and capacity generations. #18 stays open for target deployment recovery/Volumes,
+actual providers, representative mixed load and signed-off production objectives.
+
+Main branch protection is enabled and verified. PR #22 has been refreshed with
+current work and release documentation; its application baseline still requires
+one independent approving review before merging. #10 remains open.
