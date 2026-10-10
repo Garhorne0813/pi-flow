@@ -589,9 +589,13 @@ export function buildAPI(
       if (closed) return;
       closed = true;
       disconnected.abort();
-      reply.raw.end(
-        'event: stream.error\ndata: {"code":"AUTHENTICATION_EXPIRED"}\n\n',
-      );
+      // A stalled reader may prevent end() from flushing and emitting close.
+      // Destroy a backpressured response so expiry also releases the waiter.
+      if (reply.raw.writableNeedDrain) reply.raw.destroy();
+      else
+        reply.raw.end(
+          'event: stream.error\ndata: {"code":"AUTHENTICATION_EXPIRED"}\n\n',
+        );
     };
     const armExpiry = () => {
       if (a.expiresAt === undefined || closed) return;
