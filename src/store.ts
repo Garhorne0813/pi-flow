@@ -1,14 +1,36 @@
 import pg from "pg";
+import type { Audit } from "./domain.js";
 import {
   loadState,
   saveState,
   saveRun,
   saveEvents,
   metadata,
+  runSnapshotQuery,
+  snapshotState,
+  claimableRunsQuery,
 } from "./run-store.js";
 import { emptyState, type State } from "./domain.js";
 import type { CapacityState } from "./adapters/sandbox-policy.js";
 export interface Store {
+  appendAudit(tenant: string, entry: Audit): Promise<void>;
+  listClaimableRuns(
+    tenant: string,
+    now: number,
+    limit: number,
+  ): Promise<string[]>;
+  readRun<T>(
+    tenant: string,
+    runId: string,
+    fn: (state: State) => T | Promise<T>,
+    includeEntries?: boolean,
+  ): Promise<T>;
+  readMetadata<T>(
+    tenant: string,
+    keys: (keyof State)[],
+    fn: (state: State) => T | Promise<T>,
+  ): Promise<T>;
+
   read<T>(tenant: string, fn: (state: State) => T | Promise<T>): Promise<T>;
   tx<T>(tenant: string, fn: (state: State) => T | Promise<T>): Promise<T>;
   runTx<T>(
@@ -21,7 +43,55 @@ export interface Store {
   capacityTx<T>(fn: (state: CapacityState) => T | Promise<T>): Promise<T>;
   close(): Promise<void>;
 }
+function candidateLimit(limit: number) {
+  if (!Number.isInteger(limit) || limit < 1 || limit > 100)
+    throw new Error("Invalid candidate limit");
+}
 export class MemoryStore implements Store {
+  async appendAudit(tenant: string, entry: Audit) {
+    await this.tx(tenant, (s) => {
+      s.audit.push(structuredClone(entry));
+    });
+  }
+  async listClaimableRuns(tenant: string, now: number, limit: number) {
+    candidateLimit(limit);
+    return this.read(tenant, (s) => {
+      const runs = Object.values(s.runs);
+      const expired = runs
+        .filter((r) => r.state !== "QUEUED" && r.lease && r.lease.expires < now)
+        .sort(
+          (a, b) =>
+            a.lease!.expires - b.lease!.expires || a.id.localeCompare(b.id),
+        );
+      const queued = runs
+        .filter((r) => r.state === "QUEUED")
+        .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+      return [...expired, ...queued].slice(0, limit).map((r) => r.id);
+    });
+  }
+  readRun<T>(
+    tenant: string,
+    _runId: string,
+    fn: (state: State) => T | Promise<T>,
+    _includeEntries = false,
+  ) {
+    return this.read(tenant, fn);
+  }
+  readMetadata<T>(
+    tenant: string,
+    keys: (keyof State)[],
+    fn: (state: State) => T | Promise<T>,
+  ) {
+    return this.read(tenant, (s) =>
+      fn(
+        Object.assign(
+          emptyState(),
+          Object.fromEntries(keys.map((k) => [k, s[k]])),
+        ),
+      ),
+    );
+  }
+
   private states = new Map<string, State>();
   private tail: Promise<unknown> = Promise.resolve();
   private capacity: CapacityState = { entries: {} };
@@ -69,6 +139,61 @@ export class MemoryStore implements Store {
   async close() {}
 }
 export class PostgresStore implements Store {
+  async appendAudit(tenant: string, entry: Audit) {
+    // Atomic row update serializes with metadata transactions without loading
+    // Runs, Sessions, Events or the existing audit array into the application.
+    await this.pool.query(
+      `INSERT INTO harness_tenants(tenant_id,state,revision) VALUES($1,$2,1)
+       ON CONFLICT(tenant_id) DO UPDATE SET
+       state=jsonb_set(harness_tenants.state,'{audit}',COALESCE(harness_tenants.state->'audit','[]'::jsonb)||$3::jsonb),
+       revision=harness_tenants.revision+1`,
+      [
+        tenant,
+        JSON.stringify({ ...metadata(emptyState()), audit: [entry] }),
+        JSON.stringify([entry]),
+      ],
+    );
+  }
+  async listClaimableRuns(tenant: string, now: number, limit: number) {
+    candidateLimit(limit);
+    const result = await this.pool.query(claimableRunsQuery, [
+      tenant,
+      now,
+      limit,
+    ]);
+    return result.rows.map((row) => row.run_id as string);
+  }
+  async readRun<T>(
+    tenant: string,
+    runId: string,
+    fn: (state: State) => T | Promise<T>,
+    includeEntries = false,
+  ) {
+    const result = await this.pool.query(runSnapshotQuery, [
+      tenant,
+      runId,
+      0,
+      0,
+      includeEntries,
+      true,
+    ]);
+    return structuredClone(await fn(snapshotState(result.rows[0])));
+  }
+  async readMetadata<T>(
+    tenant: string,
+    keys: (keyof State)[],
+    fn: (state: State) => T | Promise<T>,
+  ) {
+    const result = await this.pool.query(
+      `SELECT COALESCE(jsonb_object_agg(k,state->k) FILTER (WHERE state ? k), '{}'::jsonb) AS state
+       FROM harness_tenants CROSS JOIN unnest($2::text[]) k WHERE tenant_id=$1`,
+      [tenant, keys],
+    );
+    return structuredClone(
+      await fn({ ...emptyState(), ...result.rows[0]?.state }),
+    );
+  }
+
   pool: pg.Pool;
   constructor(url: string) {
     this.pool = new pg.Pool({ connectionString: url, max: 10 });
@@ -148,7 +273,13 @@ export class PostgresStore implements Store {
         throw new Error(
           "runTx may only change the target Run and append events",
         );
-      if (Object.keys(s.runs).some((rid) => rid !== runId && JSON.stringify(s.runs[rid])!==JSON.stringify(before.runs[rid])))
+      if (
+        Object.keys(s.runs).some(
+          (rid) =>
+            rid !== runId &&
+            JSON.stringify(s.runs[rid]) !== JSON.stringify(before.runs[rid]),
+        )
+      )
         throw new Error("runTx scope violation");
       const r = s.runs[runId];
       if (r && JSON.stringify(r) !== JSON.stringify(before.runs[runId]))
