@@ -83,7 +83,8 @@ test("server pricing snapshots, cost caps, malformed usage and resource transiti
   const store = new MemoryStore(),
     f = await setup(store),
     policy = UsagePolicy.parse({
-      tenantDailyCostMicros: 250,
+      tenantDailyCostMicros: 1000,
+      userDailyCostMicros: 250,
       prices: { "gateway/model": { version: "v1", input: 1, output: 2 } },
     }),
     ledger = new UsageLedger(store, policy);
@@ -94,6 +95,14 @@ test("server pricing snapshots, cost caps, malformed usage and resource transiti
     "worker",
   );
   assert.equal(r.maxOutputTokens, 75);
+  const warnings = await store.read(f.actor.tenantId, (s) =>
+    usageReport(s, policy, f.actor.userId),
+  );
+  assert.equal(
+    warnings.budgetWarnings.find((w) => w.dimension === "costMicros")?.scope,
+    "user",
+  );
+  assert.equal(warnings.requestCount, 1);
   await assert.rejects(
     ledger.reserve(f.actor.tenantId, f.runs[1]!.id, 10, "worker"),
     { code: "MODEL_COST_BUDGET_EXCEEDED" },

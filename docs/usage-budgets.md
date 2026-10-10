@@ -29,3 +29,5 @@ Sandbox 报告统计数据库观察到的 Workspace active/paused/unknown 区间
 临时文件实例和外部孤儿的完整成本需接供应商资源账单，目前覆盖范围仅 Workspace
 生命周期观察。老实例历史无法补推，只有升级后观察。账本目前仍在租户 JSON 聚合，
 后续可拆表但必须保留同等并发额度协议，不允许各 Worker 本地独立预算。
+
+用户也可配置 `userDailyCostMicros` / `userMonthlyCostMicros`。`budgetWarnings` 以 UTC 日/月窗口报告租户/用户 token 与费用接近阈值，管理员仅看到本租户，用户仅看到自己，单 Run 报告不计算整个用户预算。`requestCount` 和 `unknownRequests` 区分请求数量与未确认用量；配额汇总仍使用 `/api/v1/sandbox-capacity`。Run 的 Sandbox 时长是其所属 Workspace 的观察区间，不表示该 Run 独占或供应商费用。

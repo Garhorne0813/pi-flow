@@ -11,6 +11,8 @@ export const UsagePolicy = z
     userMonthlyTokens: limit,
     tenantDailyCostMicros: limit,
     tenantMonthlyCostMicros: limit,
+    userDailyCostMicros: limit,
+    userMonthlyCostMicros: limit,
     alertRatio: z.number().min(0).max(1).default(0.8),
     prices: z
       .record(
@@ -169,6 +171,14 @@ export class UsageLedger {
       for (const [list, cap] of [
         [day, this.policy.tenantDailyCostMicros],
         [month, this.policy.tenantMonthlyCostMicros],
+        [
+          day.filter((x) => x.userId === r.actor.userId),
+          this.policy.userDailyCostMicros,
+        ],
+        [
+          month.filter((x) => x.userId === r.actor.userId),
+          this.policy.userMonthlyCostMicros,
+        ],
       ] as const) {
         if (cap === undefined) continue;
         if (!price || list.some((x) => x.costMicros === null))
@@ -306,12 +316,67 @@ export function usageReport(
     )
       sandbox.observedCreates++;
   }
+  const budgetWarnings: {
+    scope: "tenant" | "user";
+    userId?: string;
+    period: "day" | "month";
+    dimension: "tokens" | "costMicros";
+    used: number;
+    limit: number;
+  }[] = [];
+  const warn = (
+    scope: "tenant" | "user",
+    list: UsageRecord[],
+    owner?: string,
+  ) => {
+    const now = new Date().toISOString();
+    for (const period of ["day", "month"] as const) {
+      const recent = list.filter(
+        (r) =>
+          r.at.slice(0, period === "day" ? 10 : 7) ===
+          now.slice(0, period === "day" ? 10 : 7),
+      );
+      for (const dimension of ["tokens", "costMicros"] as const) {
+        const key =
+          `${scope}${period === "day" ? "Daily" : "Monthly"}${dimension === "tokens" ? "Tokens" : "CostMicros"}` as keyof Policy;
+        const cap = policy[key];
+        if (
+          typeof cap !== "number" ||
+          (dimension === "costMicros" &&
+            recent.some((r) => r.costMicros === null))
+        )
+          continue;
+        const used = total(recent, dimension);
+        if (used >= cap * policy.alertRatio)
+          budgetWarnings.push({
+            scope,
+            userId: owner,
+            period,
+            dimension,
+            used,
+            limit: cap,
+          });
+      }
+    }
+  };
+  if (!runId) {
+    if (!userId) warn("tenant", records);
+    for (const owner of new Set(records.map((r) => r.userId)))
+      warn(
+        "user",
+        records.filter((r) => r.userId === owner),
+        owner,
+      );
+  }
   return {
     records,
     tokens,
     costMicros,
     costIsEstimate: true,
     billingTimezone: "UTC",
+    requestCount: records.length,
+    unknownRequests: records.filter((r) => r.status !== "confirmed").length,
+    budgetWarnings,
     sandbox,
     nearDailyBudget:
       policy.tenantDailyTokens !== undefined &&
