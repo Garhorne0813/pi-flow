@@ -1,4 +1,5 @@
 import pg from "pg";
+import { resourceTransitions } from "./usage.js";
 import { emptyState, type State } from "./domain.js";
 import type { CapacityState } from "./adapters/sandbox-policy.js";
 export interface Store {
@@ -32,7 +33,9 @@ export class MemoryStore implements Store {
   tx<T>(tenant: string, fn: (s: State) => T | Promise<T>): Promise<T> {
     const task = this.tail.then(async () => {
       const s = structuredClone(this.states.get(tenant) ?? emptyState());
+      const before = structuredClone(s);
       const result = await fn(s);
+      resourceTransitions(before, s);
       this.states.set(tenant, s);
       return structuredClone(result);
     });
@@ -102,7 +105,9 @@ export class PostgresStore implements Store {
         [tenant],
       );
       const s = row.rows[0].state as State;
+      const before = structuredClone(s);
       const result = await fn(s);
+      resourceTransitions(before, s);
       await c.query(
         "UPDATE harness_tenants SET state=$2, revision=revision+1 WHERE tenant_id=$1",
         [tenant, JSON.stringify(s)],

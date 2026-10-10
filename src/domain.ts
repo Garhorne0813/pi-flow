@@ -168,6 +168,7 @@ export type Audit = {
   result: string;
 };
 export type State = {
+  usage?: import("./usage.js").UsageState;
   agents: Record<string, AgentVersion>;
   workspaces: Record<string, Workspace>;
   sessions: Record<string, Session>;
