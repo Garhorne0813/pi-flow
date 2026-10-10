@@ -38,7 +38,7 @@ per-Run 路径 P95 30ms，总耗时 1178ms/441ms。未采样生产 WAL/锁等待
 失租 fencing。普通跨实体事务仍持有租户级元数据锁，runTx 仍取得共享元数据锁；
 这是当前扩展边界，不能描述为所有租户写竞争已消除，也无需在此改写锁协议。
 上述 P95 只针对给定数据集的局部心跳对比，不代表管理事务吞吐或整体生产性能。
-生产结论需按 [生产验收 #18](https://github.com/Garhorne0813/pi-flow/issues/18) 门槛，用代表性数据集采集
+生产结论需按 [acceptance.md](acceptance.md) 的 #18 门槛，用代表性数据集采集
 锁等待、WAL、吞吐及 P95/P99；不同场景和 commit 的数值不能直接拼成整体提升比例。
 
 ## 第三轮：历史数据读取验收
@@ -61,3 +61,16 @@ HTTP 响应审计使用原子追加，不再为了审计加载所有 Run/Event�
 解压成本，审计原子追加仍改写 JSONB。长期数据治理独立跟踪 [#39](https://github.com/Garhorne0813/pi-flow/issues/39)。
 003 增加租户到期租约索引并完整校验 Session/Event 数据和 Run/Event 数量；重复运行
 可补建索引，但检测到回滚后的非空旧聚合时会拒绝盲目再升级。
+
+## 可执行离线回滚与演练边界
+
+全停 API/Worker、备份并审核后，可执行 [rollback-normalized.sql](../scripts/rollback-normalized.sql)。
+脚本锁住实体表，在同一事务将当前 Session/Run/Event/序列与容量代次还原到旧 JSONB，
+保留 unknown、当前检查点及旧 event ID，并把 schema readiness 降到 1；新运行时因此
+拒绝接流量。保留新表和 marker 供审核，不自动重新导入回滚后的旧写入。
+
+`test/migration-roundtrip.test.ts` 用隔离 PG schema 验证 001–004 升级、重复运行、
+失败时全部 DDL/JSON/marker 回滚，以及切流后变动状态的全字段还原。再次直接 migrate
+会拒绝旧聚合：需要备份、逐字段/数量核验并在独立迁移中处理旧写入与保留表的代次，
+不能删除 marker 后盲目覆盖。尚未在目标部署执行全停、备份恢复或真实 Volume 回滚，
+这部分仍属于 #18 的发布门禁。

@@ -26,7 +26,16 @@ export type CapacityEntry = {
   operation?: string;
   updatedAt: number;
 };
-export type CapacityState = { entries: Record<string, CapacityEntry> };
+export type CapacityState = {
+  entries: Record<string, CapacityEntry>;
+  counts?: { global: number; user: number; paused: number };
+};
+export type CapacityScope = {
+  tenant: string;
+  workspaceId?: string;
+  userId?: string;
+  usage?: boolean;
+};
 const key = (tenant: string, wid: string) => JSON.stringify([tenant, wid]);
 const charged = (entry: CapacityEntry) =>
   ["reserved", "active", "unknown"].includes(entry.state);
@@ -44,18 +53,21 @@ export class SandboxCapacity {
     sandboxId: string,
     userId: string,
   ) {
-    await this.store.capacityTx((s) => {
-      const orphanId = `${wid}:orphan:${operation}`;
-      s.entries[key(a.tenantId, orphanId)] = {
-        tenantId: a.tenantId,
-        workspaceId: orphanId,
-        userId,
-        operation,
-        sandboxId,
-        state: "unknown",
-        updatedAt: Date.now(),
-      };
-    });
+    await this.store.capacityTx(
+      (s) => {
+        const orphanId = `${wid}:orphan:${operation}`;
+        s.entries[key(a.tenantId, orphanId)] = {
+          tenantId: a.tenantId,
+          workspaceId: orphanId,
+          userId,
+          operation,
+          sandboxId,
+          state: "unknown",
+          updatedAt: Date.now(),
+        };
+      },
+      { tenant: a.tenantId, workspaceId: `${wid}:orphan:${operation}` },
+    );
   }
   adoptLegacy() {
     return (this.adoption ??= (async () => {
@@ -86,35 +98,42 @@ export class SandboxCapacity {
     expected: CapacityEntry | undefined,
   ) {
     await this.adoptLegacy();
-    await this.store.capacityTx((s) => {
-      const k = key(tenant, w.id),
-        old = s.entries[k];
-      if (!this.matches(old, expected))
-        throw new Fault(409, "CAPACITY_LEASE_LOST");
-      if (old && old.state !== "released" && old.sandboxId !== w.sandboxId)
-        throw new Fault(409, "CAPACITY_LEASE_LOST");
-      if (old && ["reserved", "unknown"].includes(old.state))
-        throw new Fault(409, "SANDBOX_OUTCOME_UNKNOWN");
-      if (!old || !charged(old)) {
-        const entries = Object.values(s.entries).filter(charged);
-        if (
-          entries.filter((e) => e.tenantId === tenant && e.userId === w.ownerId)
-            .length >= this.policy.maxActivePerUser
-        )
-          throw new Fault(429, "USER_SANDBOX_LIMIT");
-        if (entries.length >= this.policy.maxActiveTotal)
-          throw new Fault(429, "GLOBAL_SANDBOX_LIMIT");
-      }
-      s.entries[k] = {
-        tenantId: tenant,
-        workspaceId: w.id,
-        userId: w.ownerId,
-        state: "reserved",
-        sandboxId: w.sandboxId,
-        operation,
-        updatedAt: Date.now(),
-      };
-    });
+    await this.store.capacityTx(
+      (s) => {
+        const k = key(tenant, w.id),
+          old = s.entries[k];
+        if (!this.matches(old, expected))
+          throw new Fault(409, "CAPACITY_LEASE_LOST");
+        if (old && old.state !== "released" && old.sandboxId !== w.sandboxId)
+          throw new Fault(409, "CAPACITY_LEASE_LOST");
+        if (old && ["reserved", "unknown"].includes(old.state))
+          throw new Fault(409, "SANDBOX_OUTCOME_UNKNOWN");
+        if (!old || !charged(old)) {
+          const entries = Object.values(s.entries).filter(charged);
+          if (
+            (s.counts?.user ??
+              entries.filter(
+                (e) => e.tenantId === tenant && e.userId === w.ownerId,
+              ).length) >= this.policy.maxActivePerUser
+          )
+            throw new Fault(429, "USER_SANDBOX_LIMIT");
+          if (
+            (s.counts?.global ?? entries.length) >= this.policy.maxActiveTotal
+          )
+            throw new Fault(429, "GLOBAL_SANDBOX_LIMIT");
+        }
+        s.entries[k] = {
+          tenantId: tenant,
+          workspaceId: w.id,
+          userId: w.ownerId,
+          state: "reserved",
+          sandboxId: w.sandboxId,
+          operation,
+          updatedAt: Date.now(),
+        };
+      },
+      { tenant, workspaceId: w.id, userId: w.ownerId },
+    );
   }
   async active(
     tenant: string,
@@ -122,14 +141,17 @@ export class SandboxCapacity {
     operation: string,
     sandboxId: string,
   ) {
-    await this.store.capacityTx((s) => {
-      const e = s.entries[key(tenant, wid)];
-      if (!e || e.operation !== operation || e.state === "released")
-        throw new Fault(409, "CAPACITY_LEASE_LOST");
-      e.state = "active";
-      e.sandboxId = sandboxId;
-      e.updatedAt = Date.now();
-    });
+    await this.store.capacityTx(
+      (s) => {
+        const e = s.entries[key(tenant, wid)];
+        if (!e || e.operation !== operation || e.state === "released")
+          throw new Fault(409, "CAPACITY_LEASE_LOST");
+        e.state = "active";
+        e.sandboxId = sandboxId;
+        e.updatedAt = Date.now();
+      },
+      { tenant, workspaceId: wid },
+    );
   }
   async pending(
     tenant: string,
@@ -137,14 +159,17 @@ export class SandboxCapacity {
     operation: string,
     sandboxId?: string,
   ) {
-    await this.store.capacityTx((s) => {
-      const e = s.entries[key(tenant, wid)];
-      if (!e || e.operation !== operation || e.state === "released")
-        throw new Fault(409, "CAPACITY_LEASE_LOST");
-      e.state = "reserved";
-      if (sandboxId) e.sandboxId = sandboxId;
-      else delete e.sandboxId;
-    });
+    await this.store.capacityTx(
+      (s) => {
+        const e = s.entries[key(tenant, wid)];
+        if (!e || e.operation !== operation || e.state === "released")
+          throw new Fault(409, "CAPACITY_LEASE_LOST");
+        e.state = "reserved";
+        if (sandboxId) e.sandboxId = sandboxId;
+        else delete e.sandboxId;
+      },
+      { tenant, workspaceId: wid },
+    );
   }
   async unknown(
     tenant: string,
@@ -152,39 +177,48 @@ export class SandboxCapacity {
     operation: string,
     sandboxId?: string,
   ) {
-    return this.store.capacityTx((s) => {
-      const e = s.entries[key(tenant, wid)];
-      if (e && e.operation === operation && e.state !== "released") {
-        e.state = "unknown";
-        e.sandboxId = sandboxId ?? e.sandboxId;
-        e.updatedAt = Date.now();
-        return true;
-      }
-      return false;
-    });
+    return this.store.capacityTx(
+      (s) => {
+        const e = s.entries[key(tenant, wid)];
+        if (e && e.operation === operation && e.state !== "released") {
+          e.state = "unknown";
+          e.sandboxId = sandboxId ?? e.sandboxId;
+          e.updatedAt = Date.now();
+          return true;
+        }
+        return false;
+      },
+      { tenant, workspaceId: wid },
+    );
   }
   async paused(tenant: string, wid: string, operation: string) {
-    return this.store.capacityTx((s) => {
-      const e = s.entries[key(tenant, wid)];
-      if (e && e.operation === operation && e.state !== "released") {
-        e.state = "paused";
-        e.updatedAt = Date.now();
-        return true;
-      }
-      return false;
-    });
+    return this.store.capacityTx(
+      (s) => {
+        const e = s.entries[key(tenant, wid)];
+        if (e && e.operation === operation && e.state !== "released") {
+          e.state = "paused";
+          e.updatedAt = Date.now();
+          return true;
+        }
+        return false;
+      },
+      { tenant, workspaceId: wid },
+    );
   }
   async released(tenant: string, wid: string, operation: string) {
-    return this.store.capacityTx((s) => {
-      const e = s.entries[key(tenant, wid)];
-      if (e && e.operation === operation && e.state !== "released") {
-        e.state = "released";
-        delete e.sandboxId;
-        e.updatedAt = Date.now();
-        return true;
-      }
-      return false;
-    });
+    return this.store.capacityTx(
+      (s) => {
+        const e = s.entries[key(tenant, wid)];
+        if (e && e.operation === operation && e.state !== "released") {
+          e.state = "released";
+          delete e.sandboxId;
+          e.updatedAt = Date.now();
+          return true;
+        }
+        return false;
+      },
+      { tenant, workspaceId: wid },
+    );
   }
   private matches(
     current: CapacityEntry | undefined,
@@ -204,21 +238,27 @@ export class SandboxCapacity {
     expected: CapacityEntry,
     operation: string,
   ) {
-    await this.store.capacityTx((s) => {
-      const entry = s.entries[key(tenant, wid)];
-      if (
-        !this.matches(entry, expected) ||
-        !entry ||
-        entry.state === "released"
-      )
-        throw new Fault(409, "CAPACITY_LEASE_LOST");
-      entry.operation = operation;
-      entry.state = "reserved";
-      entry.updatedAt = Date.now();
-    });
+    await this.store.capacityTx(
+      (s) => {
+        const entry = s.entries[key(tenant, wid)];
+        if (
+          !this.matches(entry, expected) ||
+          !entry ||
+          entry.state === "released"
+        )
+          throw new Fault(409, "CAPACITY_LEASE_LOST");
+        entry.operation = operation;
+        entry.state = "reserved";
+        entry.updatedAt = Date.now();
+      },
+      { tenant, workspaceId: wid },
+    );
   }
   async inspect(tenant: string, wid: string) {
-    return this.store.capacityRead((s) => s.entries[key(tenant, wid)]);
+    return this.store.capacityRead((s) => s.entries[key(tenant, wid)], {
+      tenant,
+      workspaceId: wid,
+    });
   }
   async get(tenant: string, wid: string) {
     const entry = await this.inspect(tenant, wid);
@@ -226,31 +266,42 @@ export class SandboxCapacity {
   }
   async usage(a: Actor) {
     await this.adoptLegacy();
-    return this.store.capacityRead((s) => {
-      const entries = Object.values(s.entries);
-      return {
-        policy: this.policy,
-        user: {
-          active: entries.filter(
-            (e) =>
-              charged(e) && e.tenantId === a.tenantId && e.userId === a.userId,
-          ).length,
-          paused: entries.filter(
-            (e) =>
-              e.state === "paused" &&
-              e.tenantId === a.tenantId &&
-              e.userId === a.userId,
-          ).length,
-        },
-        global: { active: entries.filter(charged).length },
-        uncertain: a.admin
-          ? entries.filter(
-              (e) =>
-                e.tenantId === a.tenantId &&
-                ["reserved", "unknown"].includes(e.state),
-            )
-          : undefined,
-      };
-    });
+    return this.store.capacityRead(
+      (s) => {
+        const entries = Object.values(s.entries);
+        return {
+          policy: this.policy,
+          user: {
+            active:
+              s.counts?.user ??
+              entries.filter(
+                (e) =>
+                  charged(e) &&
+                  e.tenantId === a.tenantId &&
+                  e.userId === a.userId,
+              ).length,
+            paused:
+              s.counts?.paused ??
+              entries.filter(
+                (e) =>
+                  e.state === "paused" &&
+                  e.tenantId === a.tenantId &&
+                  e.userId === a.userId,
+              ).length,
+          },
+          global: {
+            active: s.counts?.global ?? entries.filter(charged).length,
+          },
+          uncertain: a.admin
+            ? entries.filter(
+                (e) =>
+                  e.tenantId === a.tenantId &&
+                  ["reserved", "unknown"].includes(e.state),
+              )
+            : undefined,
+        };
+      },
+      { tenant: a.tenantId, userId: a.userId, usage: true },
+    );
   }
 }

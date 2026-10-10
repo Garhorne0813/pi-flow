@@ -19,6 +19,7 @@ test(
     try {
       await s1.pool.query(
         (await readFile("migrations/001_initial.sql", "utf8")) +
+          (await readFile("migrations/002_sandbox_leases.sql", "utf8")) +
           (await readFile("migrations/003_runs_sessions_events.sql", "utf8")),
       );
       const service = new HarnessService(s1, [], ["default"]);
@@ -95,6 +96,7 @@ test(
     try {
       await stores[0]!.pool.query(
         (await readFile("migrations/001_initial.sql", "utf8")) +
+          (await readFile("migrations/002_sandbox_leases.sql", "utf8")) +
           (await readFile("migrations/003_runs_sessions_events.sql", "utf8")),
       );
       const results = await Promise.allSettled(
@@ -210,6 +212,7 @@ test(
     try {
       await store.pool.query(
         (await readFile("migrations/001_initial.sql", "utf8")) +
+          (await readFile("migrations/002_sandbox_leases.sql", "utf8")) +
           (await readFile("migrations/003_runs_sessions_events.sql", "utf8")),
       );
       await store.tx(tenant, (s) => {
@@ -315,6 +318,7 @@ test(
     try {
       await stores[0]!.pool.query(
         (await readFile("migrations/001_initial.sql", "utf8")) +
+          (await readFile("migrations/002_sandbox_leases.sql", "utf8")) +
           (await readFile("migrations/003_runs_sessions_events.sql", "utf8")),
       );
       const agent = await services[0]!.publish(
@@ -388,6 +392,7 @@ test(
     try {
       await stores[0]!.pool.query(
         (await readFile("migrations/001_initial.sql", "utf8")) +
+          (await readFile("migrations/002_sandbox_leases.sql", "utf8")) +
           (await readFile("migrations/003_runs_sessions_events.sql", "utf8")),
       );
       await managers[0]!.reserve(tenant, w, "A", undefined);
@@ -449,6 +454,7 @@ test(
     try {
       await stores[0]!.pool.query(
         (await readFile("migrations/001_initial.sql", "utf8")) +
+          (await readFile("migrations/002_sandbox_leases.sql", "utf8")) +
           (await readFile("migrations/003_runs_sessions_events.sql", "utf8")),
       );
       const service = new HarnessService(stores[0]!, [], ["default"]);
@@ -487,7 +493,7 @@ test(
         s.runs[runs[0]!.id]!.lease!.expires = Date.now() + 90000;
       });
       for (let i = 0; i < 100 && !entered; i++)
-        await new Promise<void>((r) => setTimeout(r,5));
+        await new Promise<void>((r) => setTimeout(r, 5));
       assert.ok(entered);
       await stores[1]!.runTx(actor.tenantId, runs[1]!.id, (s) => {
         s.runs[runs[1]!.id]!.lease!.expires = Date.now() + 90000;
@@ -587,6 +593,89 @@ test(
       await store.close();
       await control.pool.query(`DROP SCHEMA ${schema} CASCADE`);
       await control.close();
+    }
+  },
+);
+
+test(
+  "PostgreSQL capacity migration verifies every state and does not resurrect released generations",
+  { skip: !url },
+  async () => {
+    const adminStore = new PostgresStore(url!);
+    const schema = "capacity_migrate_" + id().replaceAll("-", "");
+    await adminStore.pool.query(`CREATE SCHEMA ${schema}`);
+    const scoped = new URL(url!);
+    scoped.searchParams.set("options", `-c search_path=${schema}`);
+    const store = new PostgresStore(scoped.toString());
+    try {
+      await store.pool.query(
+        await readFile("migrations/001_initial.sql", "utf8"),
+      );
+      const entries = Object.fromEntries(
+        ["reserved", "active", "paused", "unknown", "released"].map(
+          (state, i) => [
+            JSON.stringify(["tenant", "w" + i]),
+            {
+              tenantId: "tenant",
+              workspaceId: "w" + i,
+              userId: "user",
+              state,
+              operation: "op" + i,
+              updatedAt: 10,
+              sandboxId: "box" + i,
+            },
+          ],
+        ),
+      );
+      await store.pool.query(
+        "INSERT INTO harness_sandbox_capacity VALUES(1,$1)",
+        [JSON.stringify({ entries })],
+      );
+      const migration = await readFile(
+        "migrations/002_sandbox_leases.sql",
+        "utf8",
+      );
+      await store.pool.query(migration);
+      assert.deepEqual(await store.capacityRead((s) => s.entries), entries);
+      const capacity = new SandboxCapacity(
+        store,
+        SandboxPolicySchema.parse({ maxActiveTotal: 3, maxActivePerUser: 3 }),
+      );
+      assert.equal(
+        (
+          await capacity.usage({
+            tenantId: "tenant",
+            userId: "user",
+            admin: true,
+          })
+        ).global.active,
+        3,
+      );
+      await capacity.released("tenant", "w0", "op0");
+      await store.pool.query(migration);
+      assert.equal((await capacity.inspect("tenant", "w0"))?.state, "released");
+      await assert.rejects(capacity.active("tenant", "w0", "stale", "new"), {
+        code: "CAPACITY_LEASE_LOST",
+      });
+      const changed = await store.pool.query(
+        "SELECT xmin::text FROM harness_sandbox_leases WHERE workspace_id=$1",
+        ["w1"],
+      );
+      await capacity.unknown("tenant", "w3", "op3");
+      assert.equal(
+        (
+          await store.pool.query(
+            "SELECT xmin::text FROM harness_sandbox_leases WHERE workspace_id=$1",
+            ["w1"],
+          )
+        ).rows[0].xmin,
+        changed.rows[0].xmin,
+        "unrelated capacity rows must not be rewritten",
+      );
+    } finally {
+      await store.close();
+      await adminStore.pool.query(`DROP SCHEMA ${schema} CASCADE`);
+      await adminStore.close();
     }
   },
 );

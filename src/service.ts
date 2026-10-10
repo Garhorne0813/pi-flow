@@ -189,9 +189,10 @@ export class HarnessService {
     prompt: string,
     key?: string,
     requestId?: string,
+    traceparent?: string,
   ) {
     return this.store.tx(a.tenantId, (s) =>
-      createRun(s, a, sid, prompt, key, { requestId }),
+      createRun(s, a, sid, prompt, key, { requestId, traceparent }),
     );
   }
   async cancel(a: Actor, rid: string) {

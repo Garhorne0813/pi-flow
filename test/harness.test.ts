@@ -548,3 +548,132 @@ test("SSE polls are read-only, replay ordered pages via Last-Event-ID, and reche
     await app.close();
   }
 });
+
+test("SSE expires its connection identity and renewed credentials replay missed events", async () => {
+  const { event } = await import("../src/domain.js");
+  const f = await fixture();
+  const r = await f.service.submit(alice, f.ses.id, "expiry");
+  await f.store.tx("one", (s) => {
+    s.runs[r.id]!.state = "RUNNING";
+  });
+  const expiresAt = Date.now() + 150;
+  const app = buildAPI(
+    f.service,
+    async (header) => ({
+      ...alice,
+      expiresAt: header === "Bearer renewed" ? Date.now() + 60000 : expiresAt,
+    }),
+    f.sandbox,
+  );
+  try {
+    const first = await app.inject({
+      method: "GET",
+      url: `/api/v1/runs/${r.id}/events`,
+      headers: { authorization: "Bearer short" },
+    });
+    assert.match(first.body, /AUTHENTICATION_EXPIRED/);
+    const ids = [...first.body.matchAll(/^id: (\d+)$/gm)].map((m) =>
+      Number(m[1]),
+    );
+    assert.deepEqual(ids, [1]);
+    await f.store.tx("one", (s) => {
+      event(s, s.runs[r.id]!, "test.after-expiry");
+      s.runs[r.id]!.state = "COMPLETED";
+    });
+    const denied = await app.inject({
+      method: "GET",
+      url: `/api/v1/runs/${r.id}/events`,
+      headers: { authorization: "Bearer short" },
+    });
+    assert.equal(denied.statusCode, 401);
+    const replay = await app.inject({
+      method: "GET",
+      url: `/api/v1/runs/${r.id}/events`,
+      headers: { authorization: "Bearer renewed", "last-event-id": "1" },
+    });
+    assert.match(replay.body, /id: 2/);
+    assert.match(replay.body, /test.after-expiry/);
+    assert.doesNotMatch(replay.body, /id: 1/);
+  } finally {
+    await app.close();
+  }
+});
+
+test("SSE does not send a batch when a pending database read crosses token expiry", async () => {
+  const f = await fixture();
+  const r = await f.service.submit(alice, f.ses.id, "delayed read");
+  const read = f.store.read.bind(f.store);
+  let reads = 0;
+  f.store.read = async (...args) => {
+    if (++reads === 2) await new Promise((resolve) => setTimeout(resolve, 150));
+    return read(...args);
+  };
+  const app = buildAPI(
+    f.service,
+    async () => ({ ...alice, expiresAt: Date.now() + 50 }),
+    f.sandbox,
+  );
+  try {
+    const response = await app.inject({
+      method: "GET",
+      url: `/api/v1/runs/${r.id}/events`,
+    });
+    assert.match(response.body, /AUTHENTICATION_EXPIRED/);
+    assert.doesNotMatch(response.body, /^id:/m);
+  } finally {
+    await app.close();
+  }
+});
+test("SSE token expiry closes a backpressured connection even when the client stops reading", async () => {
+  const { get } = await import("node:http");
+  const { event } = await import("../src/domain.js");
+  const f = await fixture(),
+    r = await f.service.submit(alice, f.ses.id, "blocked stream");
+  await f.store.tx(alice.tenantId, (s) => {
+    for (let i = 0; i < 100; i++)
+      event(s, s.runs[r.id]!, "message.delta", {
+        delta: "x".repeat(256 * 1024),
+      });
+  });
+  const app = buildAPI(
+    f.service,
+    async () => ({ ...alice, expiresAt: Date.now() + 500 }),
+    f.sandbox,
+  );
+  let closed = false,
+    backpressured = false;
+  let probe: ReturnType<typeof setTimeout> | undefined;
+  app.addHook("onRequest", async (_req, reply) => {
+    reply.raw.once("close", () => {
+      closed = true;
+    });
+    probe = setTimeout(() => {
+      backpressured = reply.raw.writableNeedDrain;
+    }, 350);
+  });
+  const base = await app.listen({ host: "127.0.0.1", port: 0 });
+  const request = get(`${base}/api/v1/runs/${r.id}/events`, (response) => {
+    response.pause();
+    response.on("error", () => {});
+  });
+  request.on("error", () => {});
+  try {
+    const end = Date.now() + 2000;
+    while (!closed && Date.now() < end)
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(
+      backpressured,
+      true,
+      "test must reach stalled response backpressure",
+    );
+    assert.equal(
+      closed,
+      true,
+      "expiry must release the server connection despite an unread response",
+    );
+  } finally {
+    clearTimeout(probe);
+    request.destroy();
+    await app.close();
+  }
+});

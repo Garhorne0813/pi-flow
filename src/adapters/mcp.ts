@@ -318,6 +318,7 @@ export class MCPManager {
                           callId: context.callId,
                           runId: context.runId,
                           requestId: context.requestId,
+                          traceparent: currentTraceparent(),
                         },
                       }
                     : {}),
@@ -346,3 +347,4 @@ export class MCPManager {
     };
   }
 }
+import { currentTraceparent } from "../telemetry.js";
