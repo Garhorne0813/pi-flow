@@ -10,10 +10,14 @@ import { SandboxManager, DemoSandbox } from "../dist/adapters/sandbox.js";
 import { MCPManager } from "../dist/adapters/mcp.js";
 import { Worker } from "../dist/worker.js";
 import { buildAPI } from "../dist/api.js";
-const endpoint = "https://api.deepseek.com";
+// DeepSeek by default; these settings also support other OpenAI-compatible
+// gateways for the same live smoke flow.
+const provider = process.env.SMOKE_PROVIDER ?? "deepseek";
+const model = process.env.SMOKE_MODEL ?? "deepseek-flash";
+const endpoint = process.env.SMOKE_BASE_URL ?? "https://api.deepseek.com";
 const report = {
-  provider: "deepseek",
-  model: "deepseek-flash",
+  provider,
+  model,
   endpoint,
   status: "running",
   realModelRequested: true,
@@ -57,13 +61,14 @@ try {
     });
   } else
     key =
-      process.env.DEEPSEEK_API_KEY ??
-      (process.env.LLM_PROVIDER === "deepseek"
+      process.env.SMOKE_API_KEY ??
+      (provider === "deepseek" ? process.env.DEEPSEEK_API_KEY : undefined) ??
+      (process.env.LLM_PROVIDER === provider
         ? process.env.LLM_API_KEY
         : undefined);
   if (!key) throw new Error("API_KEY_REQUIRED");
-  process.env.LLM_PROVIDER = "deepseek";
-  process.env.LLM_MODEL_ID = "deepseek-flash";
+  process.env.LLM_PROVIDER = provider;
+  process.env.LLM_MODEL_ID = model;
   process.env.LLM_BASE_URL = endpoint;
   process.env.LLM_API_KEY = key;
   process.env.LOG_LEVEL = "silent";
@@ -75,7 +80,7 @@ try {
     store,
     [],
     ["default"],
-    [{ provider: "deepseek", modelId: "deepseek-flash" }],
+    [{ provider, modelId: model }],
   );
   const sandbox = new SandboxManager(store, new DemoSandbox());
   worker = new Worker(service, runtime, sandbox, new MCPManager(store, {}), 1);
@@ -108,7 +113,7 @@ try {
     name: "DeepSeek live test",
     systemPrompt:
       "You are a concise test agent. Follow the user. Use remote_read when requested. Never guess unread file contents.",
-    model: { provider: "deepseek", modelId: "deepseek-flash" },
+    model: { provider, modelId: model },
     tools: ["read"],
     skillBundle: "default",
     maxTokens: 20000,

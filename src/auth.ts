@@ -11,6 +11,28 @@ export function authFromEnv(): Auth {
       return { tenantId: "demo", userId: "demo-admin", admin: true };
     };
   }
+  const devToken = process.env.DEV_TOKEN;
+  if (devToken) {
+    // Explicit fixed-token mode supports isolated deployments without UCS.
+    // It grants admin access and must not be exposed to untrusted clients.
+    if (devToken.length < 16)
+      throw new Error("DEV_TOKEN must have at least 16 characters");
+    const tenantId = process.env.DEV_TENANT_ID ?? "local";
+    const userId = process.env.DEV_USER_ID ?? "local-admin";
+    console.warn(
+      JSON.stringify({
+        level: "warn",
+        time: new Date().toISOString(),
+        operation: "auth_fixed_token_enabled",
+        tenantId,
+      }),
+    );
+    return async (header) => {
+      if (header !== `Bearer ${devToken}`)
+        throw new Fault(401, "UNAUTHENTICATED");
+      return { tenantId, userId, admin: true };
+    };
+  }
   const { UCS_JWKS_URL, UCS_ISSUER, UCS_AUDIENCE } = process.env;
   if (!UCS_JWKS_URL || !UCS_ISSUER || !UCS_AUDIENCE)
     throw new Error("UCS OIDC configuration required");

@@ -145,6 +145,13 @@ NODE_USE_ENV_PROXY=1 npm run test:deepseek:capabilities
 
 容量 `operation` 是每次操作生成的唯一持久标识，激活后也保留；预留与接管原子比较前一条记录，暂停/释放/未知结果只更新匹配的标识。过期请求不能覆盖新请求的配额，普通 Agent 实例、文件实例和生命周期操作使用同一规则。取消在创建/连接/激活各阶段检查：已知实例确认 Kill 后退还配额；无 ID 的创建未知结果或 Kill 未确认继续占用，Workspace Volume 保留。升级时须同时更新并重启 API 与所有 Worker，避免与旧版不校验 fencing 的写入者混跑；现有 JSONB 状态兼容，无额外迁移。
 
+## 封闭环境联调配置
+
+封闭联调环境没有 UCS 时，可显式设置至少 16 字符的 `DEV_TOKEN`，并用 `DEV_TENANT_ID` / `DEV_USER_ID` 指定固定身份。固定 Token 始终授予管理员权限，启动时会写入 `auth_fixed_token_enabled` 告警；只用于可信隔离环境，对外开放前应移除并配置 UCS OIDC。模型网关默认必须使用 HTTPS；没有 TLS 的隔离内网可显式设置 `LLM_ALLOW_HTTP=true`，上线前应改用 HTTPS。
+
+同一 live 测试也支持 OpenAI 兼容网关。通过 `SMOKE_PROVIDER`、`SMOKE_MODEL`、`SMOKE_BASE_URL` 选择网关和模型，密钥可用 `SMOKE_API_KEY` 提供；若 `LLM_PROVIDER` 与 `SMOKE_PROVIDER` 相同，也可复用 `LLM_API_KEY`。纯 HTTP 内网网关还需显式设置 `LLM_ALLOW_HTTP=true`。
+
+真实环境反馈与尚未关闭的部署验收项见 [联调记录](docs/local-deployment.md)。该记录描述集成分支的修复，相关 Sandbox 修复在 PR #25。
 ## Cube 实例授权与快照限制
 
 Cube 创建时的 trafficAccessToken 随实例记录持久化，执行时复用，实例清除时删除。缺少 Token 的旧实例在租约内重建并保留工作区卷。快照恢复使用模板记录的挂载；Cube 快照继承源卷，当前拒绝跨 Workspace 克隆（SNAPSHOT_CLONE_UNSUPPORTED），避免共享源工作区数据。Demo 克隆仍使用独立卷。
@@ -154,3 +161,4 @@ Cube 创建时的 trafficAccessToken 随实例记录持久化，执行时复用�
 ## CI quality checks
 
 See [docs/ci.md](docs/ci.md) for required checks, mandatory PostgreSQL regressions, fault/load scenarios and retained reports.
+
