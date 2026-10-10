@@ -3,14 +3,14 @@
 The individual PRs target `work`, except the main baseline PR. The
 `integration/issue-fixes` branch assembles them on the main baseline and resolves
 shared Store/API/Worker/Sandbox conflicts. It is a reviewable combined candidate;
-PRs #26, #23, #24 and #27 have now been merged into work. Main remains
+PRs #26, #23, #24, #27, #25, #32, #28, #30 and #31 have now been merged into work. Main remains
 unmerged and no deployment has been performed.
 
 | Issue | Review PR | Scope |
 | --- | --- | --- |
 | #10 | [#22](https://github.com/Garhorne0813/pi-flow/pull/22) | main baseline + mandatory PostgreSQL CI; repository branch protection still requires administrator configuration |
 | #11 | [#30](https://github.com/Garhorne0813/pi-flow/pull/30) | normalized runs/sessions/leases and per-Run writes; ordinary cross-entity transactions retain tenant metadata locks |
-| #12 | [#31](https://github.com/Garhorne0813/pi-flow/pull/31) | batched deltas, indexed event replay and notification hints; stacked on #30 |
+| #12 | [#31](https://github.com/Garhorne0813/pi-flow/pull/31) | batched deltas, indexed event replay and notification hints; merged into work after #30 |
 | #13 | [#28](https://github.com/Garhorne0813/pi-flow/pull/28) | remove global JSONB full rewrites, retain atomic quota/fencing and a global advisory lock |
 | #14 | [#29](https://github.com/Garhorne0813/pi-flow/pull/29) | conservative inventory reconciliation; real Cube metadata/cleanup gate remains pending |
 | #15 | [#27](https://github.com/Garhorne0813/pi-flow/pull/27) | safe structured faults, trace context, counters and executable severity rules |
@@ -57,7 +57,7 @@ contention or establish a production SLO.
 - [x] #12：SSE 满页立即追赶并让步，5,000 条历史 HTTP 中途断线回放。
 - [x] 本地隔离 PG：001–004 升级、重复迁移、失败回滚、当前状态还原；目标部署演练仍待 #18。
 - [x] 整合代码本地完整回归、构建/smoke；远程三项 CI 结果在 PR #34 按提交核对。
-- [ ] main 分支保护：配置已准备，API GET/PUT Forbidden，尚未远程启用。
+- [ ] main 分支保护：配置已准备；最新读取返回 Branch not protected，尚未远程启用。
 - [x] #18 保持开放且为生产发布阻塞项，#14/#35 Open、Reconciler 默认关闭。
 
 长期 Usage/Event/Audit 增长治理另见 #39，不作为本轮已完成内容。
@@ -75,3 +75,16 @@ Issue bodies record exact validated heads, merge commits and CI links. These
 closures do not complete #10 or #18: main release, branch protection and real
 production-service acceptance remain pending. Alert notification routing remains
 a deployment configuration task.
+
+Issues #20, #19, #13, #11 and #12 are also closed as completed after merging
+PRs #25, #32, #28, #30 and #31 into work in that order. Every final PR head passed
+`quality`, `vendor` and `postgres-fault-load`; issue bodies record the exact
+validated heads, merge commits and check links. Dependency merges preserve
+budget hooks, health/telemetry, quota fencing and SSE authorization/backpressure.
+
+The completed checks include isolated PostgreSQL migration/rollback roundtrips,
+an idle Worker with 20,001 Runs / 100,001 Events, and actual HTTP disconnect/replay
+of 5,000 synthetic Unicode events. These are implementation and synthetic
+acceptance evidence. Actual Cube/MCP/gateway and production mixed-load acceptance
+remain open under #18 and #35–#37; invoice reconciliation and archival growth
+remain tracked by #38 and #39.
