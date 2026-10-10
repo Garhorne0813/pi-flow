@@ -1,4 +1,5 @@
 import Fastify from "fastify";
+import { bounded } from "./health.js";
 import { z } from "zod";
 import {
   Fault,
@@ -74,7 +75,12 @@ export function buildAPI(
   });
   app.addHook("onRequest", async (req, reply) => {
     reply.header("X-Request-ID", req.id);
-    if (req.url.split("?")[0] === "/health") return;
+    if (
+      ["/health", "/health/live", "/health/ready"].includes(
+        req.url.split("?")[0]!,
+      )
+    )
+      return;
     actors.set(req, await auth(req.headers.authorization));
   });
   app.addHook("onResponse", async (req, reply) => {
@@ -91,6 +97,35 @@ export function buildAPI(
       );
   });
   app.get("/health", async () => ({ status: "ok" }));
+  app.get("/health/live", async () => ({ status: "ok" }));
+  app.get("/health/ready", async (_req, reply) => {
+    try {
+      await bounded(service.store.ready());
+      return { status: "ready" };
+    } catch {
+      return reply.code(503).send({ status: "not_ready" });
+    }
+  });
+  app.get("/api/v1/admin/health/workers", async (req, reply) => {
+    admin(actor(req));
+    const workers = await bounded(service.store.workerHealth());
+    const healthy = workers.filter(
+      (w) =>
+        !w.stopping &&
+        Date.now() - w.heartbeatAt < 15000 &&
+        w.lastSuccessfulTick !== undefined &&
+        Date.now() - w.lastSuccessfulTick < 15000,
+    );
+    return reply
+      .code(healthy.length ? 200 : 503)
+      .send({
+        status: healthy.length ? "ok" : "no_healthy_worker",
+        workers: workers.map((w) => ({
+          ...w,
+          stale: Date.now() - w.heartbeatAt >= 15000,
+        })),
+      });
+  });
   app.get("/api/v1/agents", async (req) => {
     const a = actor(req),
       p = page.parse(req.query);
