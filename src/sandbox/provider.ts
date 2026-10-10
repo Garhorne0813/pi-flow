@@ -1,5 +1,6 @@
 import type { Skill } from "../domain.js";
 export interface SandboxProvider {
+  inventory?(): Promise<SandboxAsset[]>;
   scope(bundle: string, skills: readonly Skill[]): string;
   createVolume(name: string): Promise<string>;
   create(
@@ -21,3 +22,8 @@ export interface SandboxProvider {
   deleteSnapshot(snapshotId: string): Promise<void>;
   destroyVolume(volumeId: string): Promise<void>;
 }
+export type SandboxAsset = {
+  sandboxId: string;
+  operation: string;
+  volumeId: string;
+};

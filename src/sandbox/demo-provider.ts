@@ -1,9 +1,10 @@
 import { createHash } from "node:crypto";
 import { Fault, type Skill } from "../domain.js";
 import { skillScope } from "../adapters/skill-mounts.js";
-import type { SandboxProvider } from "./provider.js";
+import type { SandboxProvider, SandboxAsset } from "./provider.js";
 // Test/demo adapter stores files in memory and never executes a local command.
 export class DemoSandbox implements SandboxProvider {
+  operations = new Map<string, string>();
   volumes = new Map<string, Map<string, string>>();
   boxes = new Map<string, string>();
   skillSelections = new Map<string, readonly Skill[]>();
@@ -21,6 +22,7 @@ export class DemoSandbox implements SandboxProvider {
     b: string,
     skills: readonly Skill[] = [],
     snapshotId?: string,
+    operation?: string,
   ) {
     if (snapshotId && !this.snapshots.has(snapshotId))
       throw new Fault(404, "SNAPSHOT_NOT_FOUND");
@@ -28,6 +30,7 @@ export class DemoSandbox implements SandboxProvider {
     if (!this.volumes.has(v)) this.volumes.set(v, new Map());
     const sid = crypto.randomUUID();
     this.boxes.set(sid, v);
+    if (operation) this.operations.set(sid, operation);
     this.skillSelections.set(sid, structuredClone(skills));
     return sid;
   }
@@ -62,6 +65,7 @@ export class DemoSandbox implements SandboxProvider {
     throw new Fault(501, "DEMO_TOOL_UNSUPPORTED");
   }
   async kill(s: string) {
+    this.operations.delete(s);
     this.boxes.delete(s);
     this.skillSelections.delete(s);
     this.paused.delete(s);
@@ -83,5 +87,11 @@ export class DemoSandbox implements SandboxProvider {
   }
   async destroyVolume(v: string) {
     this.volumes.delete(v);
+  }
+  async inventory(): Promise<SandboxAsset[]> {
+    return [...this.boxes].flatMap(([sandboxId, volumeId]) => {
+      const operation = this.operations.get(sandboxId);
+      return operation ? [{ sandboxId, volumeId, operation }] : [];
+    });
   }
 }

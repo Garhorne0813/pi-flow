@@ -15,7 +15,7 @@ import {
   type SkillVolume,
 } from "../adapters/skill-mounts.js";
 import { remoteScript } from "../adapters/remote-script.js";
-import type { SandboxProvider } from "./provider.js";
+import type { SandboxProvider, SandboxAsset } from "./provider.js";
 export class CubeProvider implements SandboxProvider {
   private config = new Config();
   constructor(
@@ -44,6 +44,23 @@ export class CubeProvider implements SandboxProvider {
         return (await Volume.connect(name, { config: this.config })).volumeId;
       throw e;
     }
+  }
+  async inventory(): Promise<SandboxAsset[]> {
+    const rows = await Sandbox.list(this.config);
+    if (!Array.isArray(rows))
+      throw new Fault(502, "SANDBOX_INVENTORY_UNSUPPORTED");
+    return rows.flatMap((row) => {
+      const sandboxId = row.sandboxID ?? row.sandboxId;
+      const operation = row.metadata?.harnessOperation;
+      const volumeId = row.metadata?.harnessWorkspaceVolume;
+      if (
+        typeof sandboxId !== "string" ||
+        typeof operation !== "string" ||
+        typeof volumeId !== "string"
+      )
+        return [];
+      return [{ sandboxId, operation, volumeId }];
+    });
   }
   scope(bundle: string, skills: readonly Skill[]) {
     const metadata = skillScope(bundle, skills);

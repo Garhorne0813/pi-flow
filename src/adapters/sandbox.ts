@@ -13,21 +13,100 @@ import {
   SandboxCapacity,
   SandboxPolicySchema,
   type SandboxPolicy,
+  type CapacityEntry,
 } from "./sandbox-policy.js";
 import type { Store } from "../store.js";
-import type { SandboxProvider } from "../sandbox/provider.js";
+import type { SandboxProvider, SandboxAsset } from "../sandbox/provider.js";
 import { remote } from "../sandbox/remote.js";
 import {
   assertLifecycleAvailable,
   assertLease,
 } from "../sandbox/lease-manager.js";
-export type { SandboxProvider } from "../sandbox/provider.js";
+export type { SandboxProvider, SandboxAsset } from "../sandbox/provider.js";
 export { CubeProvider } from "../sandbox/cube-provider.js";
 export { DemoSandbox } from "../sandbox/demo-provider.js";
 export class SandboxManager {
   readonly policy: SandboxPolicy;
   readonly capacity: SandboxCapacity;
   private nextSweepAt = 0;
+  async inventory() {
+    if (!this.provider.inventory)
+      throw new Fault(503, "SANDBOX_INVENTORY_UNSUPPORTED");
+    return this.provider.inventory();
+  }
+  async reconcileOrphan(expected: CapacityEntry, asset: SandboxAsset) {
+    const wid = expected.workspaceId.replace(/:files$/, "");
+    const actor = {
+      tenantId: expected.tenantId,
+      userId: expected.userId,
+      admin: false,
+    };
+    return this.managed(
+      actor,
+      wid,
+      "sandbox.reconcile",
+      async (w, owner) => {
+        if (
+          w.volumeId !== asset.volumeId ||
+          !expected.operation ||
+          (!expected.sandboxId && expected.operation !== asset.operation) ||
+          (expected.sandboxId && expected.sandboxId !== asset.sandboxId)
+        )
+          throw new Fault(409, "RECONCILE_IDENTITY_UNCONFIRMED");
+        if (w.sandboxId === asset.sandboxId && w.sandboxState !== "unknown")
+          throw new Fault(409, "RECONCILE_ACTIVE_INSTANCE");
+        const references = await this.store.capacityRead((s) =>
+          Object.values(s.entries).some(
+            (e) =>
+              e.sandboxId === asset.sandboxId &&
+              (e.tenantId !== expected.tenantId ||
+                e.workspaceId !== expected.workspaceId) &&
+              e.state !== "released",
+          ),
+        );
+        if (references) throw new Fault(409, "RECONCILE_IDENTITY_UNCONFIRMED");
+        await this.record(actor, wid, owner, () => {});
+        // CAS is the final fence. Another reconciler or newer operation wins
+        // before any remote deletion; the loser never calls kill.
+        await this.capacity.claim(
+          actor.tenantId,
+          expected.workspaceId,
+          expected,
+          owner,
+        );
+        await this.capacity.pending(
+          actor.tenantId,
+          expected.workspaceId,
+          owner,
+          asset.sandboxId,
+        );
+        try {
+          await this.kill(actor, expected.workspaceId, owner, asset.sandboxId);
+          await this.record(actor, wid, owner, (current) => {
+            if (current.sandboxId === asset.sandboxId) {
+              delete current.sandboxId;
+              delete current.sandboxState;
+              delete current.sandboxSkillScope;
+            }
+          });
+          await this.capacity.released(
+            actor.tenantId,
+            expected.workspaceId,
+            owner,
+          );
+        } catch (e) {
+          await this.capacity.unknown(
+            actor.tenantId,
+            expected.workspaceId,
+            owner,
+            asset.sandboxId,
+          );
+          throw e;
+        }
+      },
+      { allRuns: true },
+    );
+  }
   constructor(
     private store: Store,
     private provider: SandboxProvider,
