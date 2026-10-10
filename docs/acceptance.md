@@ -100,3 +100,21 @@ observed Sandbox durations do not establish an invoice or paid charges.
 隔离 schema 的 001–004 升级/离线回滚回归见 `test/migration-roundtrip.test.ts`；
 目标部署全停、备份/Volume 恢复与签署仍待完成。main protection API 返回 Forbidden，
 可执行规则配置已准备，远程启用仍未完成。开发基线合并审查与生产部署门禁分开记录。
+## Database connection fault stage (#18)
+
+Run `node --import tsx scripts/acceptance/database-faults.ts` against a dedicated
+ disposable PostgreSQL database. The test role must be able to terminate its
+own tagged backends and briefly lock harness_schema; do not use production.
+CI retains the commit-bound JSON report alongside existing load/crash reports.
+
+This stage saturates the ten-client application pool, verifies independent HTTP
+readiness/liveness and queued-read recovery, blocks a real readiness query then
+checks bounded 503/recovery, and terminates tx/runTx connections before commit.
+It checks rollback, one callback invocation, idle connection replacement,
+LISTEN reconnection and durable event replay after losing notification transport.
+Idle socket errors are observed safely; connection loss never retries a mutation.
+
+This is connection loss/query blocking on real PostgreSQL with synthetic state.
+It does not stop the server, exhaust all server connection slots, validate a
+backup/Volume restoration or establish a production SLO. Those #18 gates remain
+open along with actual providers and representative mixed load.

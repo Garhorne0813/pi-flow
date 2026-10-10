@@ -48,6 +48,8 @@ jobs:
         shell: bash
       - run: node --import tsx scripts/acceptance/sse-history.ts | tee work/acceptance/sse-history.jsonl
         shell: bash
+      - run: node --import tsx scripts/acceptance/database-faults.ts | tee work/acceptance/database-faults.jsonl
+        shell: bash
       - uses: actions/upload-artifact@v4
         if: always()
         with:

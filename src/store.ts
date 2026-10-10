@@ -1,4 +1,5 @@
 import pg from "pg";
+import { telemetry } from "./telemetry.js";
 import { EventEmitter } from "node:events";
 import type { Audit, Event, RunState } from "./domain.js";
 import {
@@ -357,6 +358,16 @@ export class PostgresStore implements Store {
       connectionTimeoutMillis: 1000,
       query_timeout: 1000,
     });
+    for (const pool of [this.pool, this.healthPool]) {
+      // pg emits errors for terminated idle sockets separately from query
+      // rejections. Keep them observable without crashing the process.
+      pool.on("error", (error) => telemetry.error("postgres_pool", error));
+      pool.on("connect", (client) => {
+        // Checked-out transaction clients can fail between queries. Subsequent
+        // queries reject; the transaction path rolls back and discards them.
+        client.on("error", () => {});
+      });
+    }
   }
   async ready() {
     const result = await this.healthPool.query(
@@ -405,7 +416,12 @@ export class PostgresStore implements Store {
       await c.query("COMMIT");
       return structuredClone(result);
     } catch (e) {
-      await c.query("ROLLBACK");
+      try {
+        await c.query("ROLLBACK");
+      } catch {
+        // A lost connection already aborted the server transaction. Preserve
+        // the original failure; pg discards its unqueryable client on release.
+      }
       throw e;
     } finally {
       c.release();
@@ -427,7 +443,12 @@ export class PostgresStore implements Store {
       await c.query("COMMIT");
       return structuredClone(result);
     } catch (e) {
-      await c.query("ROLLBACK");
+      try {
+        await c.query("ROLLBACK");
+      } catch {
+        // A lost connection already aborted the server transaction. Preserve
+        // the original failure; pg discards its unqueryable client on release.
+      }
       throw e;
     } finally {
       c.release();
@@ -467,7 +488,12 @@ export class PostgresStore implements Store {
       await c.query("COMMIT");
       return structuredClone(result);
     } catch (e) {
-      await c.query("ROLLBACK");
+      try {
+        await c.query("ROLLBACK");
+      } catch {
+        // A lost connection already aborted the server transaction. Preserve
+        // the original failure; pg discards its unqueryable client on release.
+      }
       throw e;
     } finally {
       c.release();
@@ -481,7 +507,12 @@ export class PostgresStore implements Store {
       await c.query("COMMIT");
       return structuredClone(result);
     } catch (e) {
-      await c.query("ROLLBACK");
+      try {
+        await c.query("ROLLBACK");
+      } catch {
+        // A lost connection already aborted the server transaction. Preserve
+        // the original failure; pg discards its unqueryable client on release.
+      }
       throw e;
     } finally {
       c.release();
