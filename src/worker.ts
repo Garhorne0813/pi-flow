@@ -15,6 +15,7 @@ import type { MCPManager, McpCallContext } from "./adapters/mcp.js";
 import { argumentsSchemas, specs } from "./tool-specs.js";
 import { DeltaBatcher } from "./delta-batcher.js";
 import { SandboxReconciler } from "./sandbox-reconciler.js";
+import { bounded, type WorkerHealth } from "./health.js";
 export class Worker {
   readonly owner = id();
   private stopping = false;
@@ -23,6 +24,22 @@ export class Worker {
   private maintenance?: Promise<unknown>;
   private lastTenant?: string;
   private tickTail: Promise<void> = Promise.resolve();
+  private health: WorkerHealth = {
+    workerId: this.owner,
+    heartbeatAt: 0,
+    activeTasks: 0,
+    stopping: false,
+    maintenance: "pending",
+  };
+  private lastHealthWrite = 0;
+  private async publishHealth(force = false) {
+    if (!force && Date.now() - this.lastHealthWrite < 5000) return;
+    this.health.heartbeatAt = Date.now();
+    this.health.activeTasks = this.active.size;
+    this.health.stopping = this.stopping;
+    await bounded(this.service.store.workerHeartbeat(this.health));
+    this.lastHealthWrite = Date.now();
+  }
   constructor(
     private service: HarnessService,
     private runtime: Runtime,
@@ -35,7 +52,14 @@ export class Worker {
       throw new Error("Invalid Worker shutdown timeout");
   }
   tick() {
-    const task = this.tickTail.then(() => this.tickOnce());
+    const task = this.tickTail.then(async () => {
+      try {
+        await this.tickOnce();
+        this.health.lastSuccessfulTick = Date.now();
+      } finally {
+        await this.publishHealth();
+      }
+    });
     this.tickTail = task.catch(() => {});
     return task;
   }
@@ -51,7 +75,7 @@ export class Worker {
               this.sandbox,
             ).scan();
         })
-        .catch(() => {});
+        .then(() => { this.health.maintenance = "ok"; }, () => { this.health.maintenance = "failed"; });
       this.maintenance = task;
       void task.finally(() => {
         if (this.maintenance === task) this.maintenance = undefined;
@@ -114,6 +138,7 @@ export class Worker {
         if (r) break;
       }
       if (r) {
+        this.health.lastClaimAt = Date.now();
         const p = this.execute(tenant, r).catch(() => {});
         this.active.add(p);
         void p.finally(() => this.active.delete(p));
@@ -150,6 +175,7 @@ export class Worker {
       ]);
     } finally {
       clearTimeout(timer);
+      await this.publishHealth(true);
     }
   }
   private owned(s: State, rid: string) {

@@ -14,6 +14,7 @@ import type {
   CapacityScope,
   CapacityState,
 } from "./adapters/sandbox-policy.js";
+import { SCHEMA_VERSION, type WorkerHealth } from "./health.js";
 export interface Store {
   eventPage(
     tenant: string,
@@ -28,6 +29,9 @@ export interface Store {
     timeoutMs: number,
     signal?: AbortSignal,
   ): Promise<void>;
+  ready(): Promise<void>;
+  workerHeartbeat(health: WorkerHealth): Promise<void>;
+  workerHealth(): Promise<WorkerHealth[]>;
   read<T>(tenant: string, fn: (state: State) => T | Promise<T>): Promise<T>;
   tx<T>(tenant: string, fn: (state: State) => T | Promise<T>): Promise<T>;
   runTx<T>(
@@ -77,6 +81,14 @@ export class MemoryStore implements Store {
       signal?.addEventListener("abort", done, { once: true });
       if (signal?.aborted) done();
     });
+  }
+  private workers = new Map<string, WorkerHealth>();
+  async ready() {}
+  async workerHeartbeat(health: WorkerHealth) {
+    this.workers.set(health.workerId, structuredClone(health));
+  }
+  async workerHealth() {
+    return structuredClone([...this.workers.values()]);
   }
   private states = new Map<string, State>();
   private tail: Promise<unknown> = Promise.resolve();
@@ -210,8 +222,39 @@ export class PostgresStore implements Store {
     }
   }
   pool: pg.Pool;
+  private healthPool: pg.Pool;
   constructor(url: string) {
     this.pool = new pg.Pool({ connectionString: url, max: 10 });
+    this.healthPool = new pg.Pool({
+      connectionString: url,
+      max: 2,
+      connectionTimeoutMillis: 1000,
+      query_timeout: 1000,
+    });
+  }
+  async ready() {
+    const result = await this.healthPool.query(
+      "SELECT version FROM harness_schema WHERE id=1",
+    );
+    if (result.rows[0]?.version !== SCHEMA_VERSION)
+      throw new Error("SCHEMA_MISMATCH");
+    const tables = await this.healthPool.query(
+      "SELECT to_regclass('harness_tenants') AS tenants, to_regclass('harness_sandbox_capacity') AS capacity, to_regclass('harness_worker_health') AS workers",
+    );
+    if (Object.values(tables.rows[0]).some((v) => v === null))
+      throw new Error("SCHEMA_INCOMPLETE");
+  }
+  async workerHeartbeat(health: WorkerHealth) {
+    await this.healthPool.query(
+      "INSERT INTO harness_worker_health(worker_id,health,updated_at) VALUES($1,$2,now()) ON CONFLICT(worker_id) DO UPDATE SET health=excluded.health,updated_at=excluded.updated_at",
+      [health.workerId, JSON.stringify(health)],
+    );
+  }
+  async workerHealth() {
+    const result = await this.healthPool.query(
+      "SELECT health FROM harness_worker_health WHERE updated_at > now() - interval '1 day'",
+    );
+    return result.rows.map((row) => row.health as WorkerHealth);
   }
   async capacityRead<T>(
     fn: (state: CapacityState) => T | Promise<T>,
@@ -332,6 +375,6 @@ export class PostgresStore implements Store {
       this.listener.release(true);
       this.listener = undefined;
     }
-    await this.pool.end();
+    await Promise.all([this.pool.end(), this.healthPool.end()]);
   }
 }
