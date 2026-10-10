@@ -91,3 +91,22 @@ implemented automatic check of GitHub issue state.
 provider-invoice reconciliation is independently tracked in
 [#38](https://github.com/Garhorne0813/pi-flow/issues/38); usage confirmation and
 observed Sandbox durations do not establish an invoice or paid charges.
+
+## Database connection fault stage (#18)
+
+Run `node --import tsx scripts/acceptance/database-faults.ts` against a dedicated
+ disposable PostgreSQL database. The test role must be able to terminate its
+own tagged backends and briefly lock harness_schema; do not use production.
+CI retains the commit-bound JSON report alongside existing load/crash reports.
+
+This stage saturates the ten-client application pool, verifies independent HTTP
+readiness/liveness and queued-read recovery, blocks a real readiness query then
+checks bounded 503/recovery, and terminates tx/runTx connections before commit.
+It checks rollback, one callback invocation, idle connection replacement,
+LISTEN reconnection and durable event replay after losing notification transport.
+Idle socket errors are observed safely; connection loss never retries a mutation.
+
+This is connection loss/query blocking on real PostgreSQL with synthetic state.
+It does not stop the server, exhaust all server connection slots, validate a
+backup/Volume restoration or establish a production SLO. Those #18 gates remain
+open along with actual providers and representative mixed load.
