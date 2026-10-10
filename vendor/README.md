@@ -26,3 +26,32 @@ upstream nested shrinkwrap; checking only the root lock reported a clean audit
 while actually installing 5.0.9. This repack makes installed and recorded
 versions agree. Always check the installed version and rerun contract tests
 when refreshing the SDK package.
+
+Automated release checks (#21):
+
+  npm run verify:vendor             # archive/lock + actual installed tree + SBOM
+  npm run verify:vendor:upstream    # also compare Pi and rebuild pinned Cube source
+
+vendor/provenance.json pins archive SHA-512, versions/licenses and the Cube source
+archive at the immutable commit. CI compares every Pi file byte-for-byte except
+npm-shrinkwrap.json, whose sole permitted change is the documented brace entry;
+Cube is rebuilt with the upstream lock and compared by unpacked file contents
+(tar timestamps do not affect comparison). npm ci --ignore-scripts is used for
+upstream install, followed only by the documented build/pack commands.
+Installed dependency versions are checked against the full lock, including the
+nested Pi brace-expansion, rather than trusting root audit output.
+
+CI saves a CycloneDX dependency inventory, commit, provenance and license files as
+an artifact named for the exact release commit. License UNKNOWN entries require
+release review; this inventory is not a legal license determination. Runtime startup
+does not invoke any verification/download/build command, and TLS stays enabled.
+
+Upgrade: update trusted upstream metadata and immutable source commit, reproduce
+archives, inspect the allowed diff, update lock/provenance, then run upstream
+verification and Pi/MCP/Remote/Sandbox isolation/lifecycle regressions. The
+supply-chain PR check runs these contract tests even when application CI is separate.
+If a security fix or SDK contract fails, block release and retain the previous
+verified artifacts. Roll back to the previous release image after stopping new
+Runs; never install a fallback SDK during production startup or automatically
+replay uncertain tools. A rollback that reintroduces a security defect requires
+an explicit deployment risk decision rather than silently disabling the check.
