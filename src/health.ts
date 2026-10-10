@@ -1,4 +1,4 @@
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 4;
 export type WorkerHealth = {
   workerId: string;
   heartbeatAt: number;

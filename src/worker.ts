@@ -107,41 +107,42 @@ export class Worker {
       const tenant = tenants[(start + i) % tenants.length]!;
       if (this.stopping || this.active.size >= this.concurrency) break;
       this.lastTenant = tenant;
-      // Idle scans are snapshots; claiming/recovering still rechecks under tx.
-      const pending = await this.service.store.read(tenant, (s) =>
-        Object.values(s.runs).some(
-          (r) =>
-            r.state === "QUEUED" || (r.lease && r.lease.expires < Date.now()),
-        ),
+      // One bounded indexed scan; claims/recovery recheck under the Run lock.
+      const candidates = await this.service.store.listClaimableRuns(
+        tenant,
+        Date.now(),
+        64,
       );
-      if (!pending) continue;
-      const r = await this.service.store.tx(tenant, (s) => {
-        for (const old of Object.values(s.runs)) {
-          if (old.lease && old.lease.expires < Date.now()) {
-            delete old.lease;
-            if (old.state === "RUNNING") {
-              old.state = "FAILED";
-              old.error = "WORKER_LOST_UNKNOWN_TOOL_OUTCOME";
-              event(s, old, "run.failed", { code: old.error });
+      let r: Run | undefined;
+      for (const rid of candidates) {
+        r = await this.service.store.runTx(tenant, rid, (s) => {
+          const current = s.runs[rid];
+          if (!current) return;
+          if (current.lease && current.lease.expires < Date.now()) {
+            delete current.lease;
+            if (current.state === "RUNNING") {
+              current.state = "FAILED";
+              current.error = "WORKER_LOST_UNKNOWN_TOOL_OUTCOME";
+              event(s, current, "run.failed", { code: current.error });
             }
           }
-        }
-        const r = Object.values(s.runs).find((r) => r.state === "QUEUED");
-        if (!r) return;
-        try {
-          const { config } = authorizedRun(s, r);
-          r.deadline ??= Date.now() + config.timeoutSeconds * 1000;
-          r.state = "RUNNING";
-          r.lease = { owner: this.owner, expires: Date.now() + 30000 };
-          event(s, r, "run.started");
-          return r;
-        } catch (e) {
-          r.state = "FAILED";
-          r.error = e instanceof Fault ? e.code : "AUTHORIZATION_FAILED";
-          event(s, r, "run.failed", { code: r.error });
-          return;
-        }
-      });
+          if (current.state !== "QUEUED") return;
+          try {
+            const { config } = authorizedRun(s, current);
+            current.deadline ??= Date.now() + config.timeoutSeconds * 1000;
+            current.state = "RUNNING";
+            current.lease = { owner: this.owner, expires: Date.now() + 30000 };
+            event(s, current, "run.started");
+            return current;
+          } catch (e) {
+            current.state = "FAILED";
+            current.error =
+              e instanceof Fault ? e.code : "AUTHORIZATION_FAILED";
+            event(s, current, "run.failed", { code: current.error });
+          }
+        });
+        if (r) break;
+      }
       if (r) {
         this.health.lastClaimAt = Date.now();
         telemetry.duration("run_queue", Date.now() - Date.parse(r.createdAt));
@@ -224,7 +225,7 @@ export class Worker {
     );
     const heartbeat = setInterval(() => {
       void this.service.store
-        .tx(tenant, (s) => {
+        .runTx(tenant, initial.id, (s) => {
           const r = this.owned(s, initial.id);
           authorizedRun(s, r);
           if ((r.deadline ?? 0) < Date.now())
@@ -247,18 +248,23 @@ export class Worker {
         event(s, r, type, data);
       });
     const get = () =>
-      this.service.store.read(tenant, (s) => {
-        const r = this.owned(s, initial.id);
-        const { ses, config } = authorizedRun(s, r);
-        if (!this.service.hasBundle(config.skillBundle, r.actor.tenantId))
-          throw new Fault(403, "BUNDLE_NOT_GRANTED");
-        return {
-          r,
-          ses,
-          config,
-          skills: config.skills.map((k) => s.skills[k]!),
-        };
-      });
+      this.service.store.readRun(
+        tenant,
+        initial.id,
+        (s) => {
+          const r = this.owned(s, initial.id);
+          const { ses, config } = authorizedRun(s, r);
+          if (!this.service.hasBundle(config.skillBundle, r.actor.tenantId))
+            throw new Fault(403, "BUNDLE_NOT_GRANTED");
+          return {
+            r,
+            ses,
+            config,
+            skills: config.skills.map((k) => s.skills[k]!),
+          };
+        },
+        true,
+      );
     const defer = async (kind: "question" | "approval", payload: unknown) => {
       if (initial.parentRunId)
         throw new Fault(409, "SUBAGENT_INTERACTION_UNSUPPORTED");
@@ -415,8 +421,9 @@ export class Worker {
       );
       let prompt = ctx.r.prompt;
       if (initial.resumedFrom) {
-        const i = await this.service.store.read(
+        const i = await this.service.store.readMetadata(
           tenant,
+          ["interactions"],
           (s) => s.interactions[initial.resumedFrom!],
         );
         if (i?.kind === "approval" && i.response === "approve") {
@@ -510,7 +517,7 @@ export class Worker {
       }
       if (!waiting) {
         controller.signal.throwIfAborted();
-        await this.service.store.tx(tenant, (s) => {
+        await this.service.store.runTx(tenant, initial.id, (s) => {
           const r = this.owned(s, initial.id);
           authorizedRun(s, r);
           r.state = "COMPLETED";
@@ -551,7 +558,7 @@ export class Worker {
       this.controllers.delete(controller);
       clearInterval(heartbeat);
       clearTimeout(timeout);
-      await this.service.store.tx(tenant, (s) => {
+      await this.service.store.runTx(tenant, initial.id, (s) => {
         const r = s.runs[initial.id];
         if (r?.lease?.owner === this.owner) delete r.lease;
       });

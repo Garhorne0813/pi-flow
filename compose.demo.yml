@@ -9,6 +9,8 @@ services:
       - harness-db:/var/lib/postgresql/data
       - ./migrations/001_initial.sql:/docker-entrypoint-initdb.d/001.sql:ro
       - ./migrations/002_sandbox_leases.sql:/docker-entrypoint-initdb.d/002.sql:ro
+      - ./migrations/003_runs_sessions_events.sql:/docker-entrypoint-initdb.d/003.sql:ro
+      - ./migrations/004_schema_readiness.sql:/docker-entrypoint-initdb.d/004.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U harness -d harness"]
       interval: 2s

@@ -44,6 +44,8 @@ jobs:
             SSE_CLIENTS=$n node --import tsx scripts/acceptance/sse-load.ts | tee work/acceptance/sse-$n.jsonl
           done
         shell: bash
+      - run: node --import tsx scripts/acceptance/worker-history.ts | tee work/acceptance/worker-history.jsonl
+        shell: bash
       - uses: actions/upload-artifact@v4
         if: always()
         with:

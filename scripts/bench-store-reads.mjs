@@ -143,11 +143,13 @@ async function benchmark(mode) {
     }
     const elapsedMs = performance.now() - started;
     const tenantUpdates = (await revision()) - before;
+    // Runs/Sessions/Events are split tables; run heartbeats update harness_runs
+    // directly and no longer rewrite the tenant row.
     if (mode === "snapshot-read")
       assert.equal(
         tenantUpdates,
-        heartbeatCount,
-        "only heartbeat writes may change revisions",
+        0,
+        "read polls and run heartbeats must not rewrite the tenant row",
       );
     return {
       mode,
@@ -164,7 +166,9 @@ async function benchmark(mode) {
       heartbeatP95Ms: Number(percentile(heartbeatTimes).toFixed(1)),
       heartbeatUpdates: heartbeatCount,
       tenantUpdates,
-      pollUpdates: tenantUpdates - heartbeatCount,
+      // Heartbeats no longer reach the tenant row, so its updates come from
+      // the read path itself.
+      pollUpdates: tenantUpdates,
       lockSamples,
       lockSamplesWithWaiters,
       maxWaitingBackends,
