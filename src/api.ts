@@ -556,7 +556,13 @@ export function buildAPI(
         .int()
         .min(0)
         .parse(req.headers["last-event-id"] ?? 0);
-    await service.store.read(a.tenantId, (s) => run(s, a, rid));
+    await service.store.eventPage(
+      a.tenantId,
+      rid,
+      cursor,
+      0,
+      (s) => run(s, a, rid).state,
+    );
     if (a.expiresAt !== undefined && Date.now() >= a.expiresAt)
       throw new Fault(401, "AUTHENTICATION_EXPIRED");
     reply.hijack();
@@ -569,12 +575,14 @@ export function buildAPI(
       "X-Request-ID": req.id,
     });
     let closed = false;
+    const disconnected = new AbortController();
     let expiryTimer: ReturnType<typeof setTimeout> | undefined;
     const expired = () =>
       a.expiresAt !== undefined && Date.now() >= a.expiresAt;
     const expire = () => {
       if (closed) return;
       closed = true;
+      disconnected.abort();
       // A stalled reader may prevent end() from flushing and emitting close.
       // Destroy a backpressured response so expiry also releases the waiter.
       if (reply.raw.writableNeedDrain) reply.raw.destroy();
@@ -597,8 +605,9 @@ export function buildAPI(
     };
     reply.raw.on("close", () => {
       closed = true;
-      telemetry.count("sse_active", -1);
       clearTimeout(expiryTimer);
+      disconnected.abort();
+      telemetry.count("sse_active", -1);
     });
     armExpiry();
     let lastBeat = Date.now();
@@ -608,15 +617,13 @@ export function buildAPI(
           expire();
           break;
         }
-        const batch = await service.store.read(a.tenantId, (s) => {
-          const r = run(s, a, rid);
-          return {
-            state: r.state,
-            events: s.events
-              .filter((e) => e.runId === rid && e.eventId > cursor)
-              .slice(0, 100),
-          };
-        });
+        const batch = await service.store.eventPage(
+          a.tenantId,
+          rid,
+          cursor,
+          100,
+          (s) => run(s, a, rid).state,
+        );
         if (expired()) expire();
         if (closed) break;
         for (const e of batch.events) {
@@ -652,7 +659,18 @@ export function buildAPI(
           reply.raw.write(": heartbeat\n\n");
           lastBeat = Date.now();
         }
-        await new Promise((r) => setTimeout(r, 250));
+        if (closed) break;
+        if (batch.events.length === 100) {
+          // Catch up immediately, while yielding between pages for other clients.
+          await new Promise<void>((resolve) => setImmediate(resolve));
+          continue;
+        }
+        await service.store.waitForEvents(
+          a.tenantId,
+          rid,
+          250,
+          disconnected.signal,
+        );
       }
     } catch {
       if (!closed)

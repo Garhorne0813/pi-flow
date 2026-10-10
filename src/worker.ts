@@ -14,6 +14,7 @@ import type { SandboxManager } from "./adapters/sandbox.js";
 import type { MCPManager, McpCallContext } from "./adapters/mcp.js";
 import { UsageLedger, policyFromEnv } from "./usage.js";
 import { argumentsSchemas, specs } from "./tool-specs.js";
+import { DeltaBatcher } from "./delta-batcher.js";
 import { telemetry, traceContext, withContext } from "./telemetry.js";
 import { bounded, type WorkerHealth } from "./health.js";
 export class Worker {
@@ -242,11 +243,18 @@ export class Worker {
           controller.abort();
         });
     }, 1000);
-    const emit = (type: string, data: unknown) =>
-      this.service.store.tx(tenant, (s) => {
-        const r = this.owned(s, initial.id);
-        event(s, r, type, data);
-      });
+    const batcher = new DeltaBatcher(
+      (type, data) =>
+        this.service.store.runTx(tenant, initial.id, (s) => {
+          const r = this.owned(s, initial.id);
+          event(s, r, type, data);
+        }),
+      (e) => {
+        fault = "STREAM_PERSISTENCE_FAILED";
+        controller.abort(e);
+      },
+    );
+    const emit = (type: string, data: unknown) => batcher.emit(type, data);
     const get = () =>
       this.service.store.readRun(
         tenant,
@@ -513,6 +521,7 @@ export class Worker {
             }),
         });
       } finally {
+        await batcher.flush();
         telemetry.duration("model", Date.now() - modelStarted);
       }
       if (!waiting) {

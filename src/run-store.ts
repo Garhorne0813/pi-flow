@@ -112,6 +112,10 @@ export async function saveEvents(
     );
   }
   after.sequence = Math.max(after.sequence, cursor);
+  for (const runId of new Set(newEvents.map((e) => e.runId)))
+    await c.query("SELECT pg_notify('harness_run_event',$1)", [
+      JSON.stringify([tenant, runId]),
+    ]);
 }
 export async function saveState(
   c: pg.PoolClient,

@@ -1,4 +1,6 @@
 import pg from "pg";
+import { EventEmitter } from "node:events";
+import type { Event, RunState } from "./domain.js";
 import type { Audit } from "./domain.js";
 import {
   loadState,
@@ -19,6 +21,19 @@ import type {
 } from "./adapters/sandbox-policy.js";
 import { SCHEMA_VERSION, type WorkerHealth } from "./health.js";
 export interface Store {
+  eventPage(
+    tenant: string,
+    runId: string,
+    after: number,
+    limit: number,
+    authorize: (s: State) => RunState,
+  ): Promise<{ state: RunState; events: Event[] }>;
+  waitForEvents(
+    tenant: string,
+    runId: string,
+    timeoutMs: number,
+    signal?: AbortSignal,
+  ): Promise<void>;
   appendAudit(tenant: string, entry: Audit): Promise<void>;
   listClaimableRuns(
     tenant: string,
@@ -63,6 +78,37 @@ function candidateLimit(limit: number) {
     throw new Error("Invalid candidate limit");
 }
 export class MemoryStore implements Store {
+  async eventPage(
+    tenant: string,
+    runId: string,
+    after: number,
+    limit: number,
+    authorize: (s: State) => RunState,
+  ) {
+    return this.read(tenant, (s) => ({
+      state: authorize(s),
+      events: s.events
+        .filter((e) => e.runId === runId && e.eventId > after)
+        .slice(0, limit),
+    }));
+  }
+  async waitForEvents(
+    _tenant: string,
+    _runId: string,
+    timeoutMs: number,
+    signal?: AbortSignal,
+  ) {
+    await new Promise<void>((resolve) => {
+      const done = () => {
+        clearTimeout(timer);
+        signal?.removeEventListener("abort", done);
+        resolve();
+      };
+      const timer = setTimeout(done, timeoutMs);
+      signal?.addEventListener("abort", done, { once: true });
+      if (signal?.aborted) done();
+    });
+  }
   async appendAudit(tenant: string, entry: Audit) {
     await this.tx(tenant, (s) => {
       s.audit.push(structuredClone(entry));
@@ -168,6 +214,87 @@ export class MemoryStore implements Store {
   async close() {}
 }
 export class PostgresStore implements Store {
+  private notifications = new EventEmitter().setMaxListeners(0);
+  private closed = false;
+  private listener?: pg.PoolClient;
+  private listening?: Promise<void>;
+  private async listen() {
+    if (this.closed) return;
+    if (!this.listening)
+      this.listening = (async () => {
+        const c = await this.pool.connect();
+        try {
+          if (this.closed) {
+            c.release(true);
+            return;
+          }
+          await c.query("LISTEN harness_run_event");
+          if (this.closed) {
+            c.release(true);
+            return;
+          }
+          this.listener = c;
+          c.on("notification", (m) => {
+            if (m.payload) this.notifications.emit(m.payload);
+          });
+          c.on("error", () => {
+            this.listener = undefined;
+            this.listening = undefined;
+            this.notifications.emit("disconnected");
+            c.release(true);
+          });
+        } catch (e) {
+          c.release(true);
+          throw e;
+        }
+      })().catch(() => {
+        this.listening = undefined;
+      });
+    await this.listening;
+  }
+  async waitForEvents(
+    tenant: string,
+    runId: string,
+    timeoutMs: number,
+    signal?: AbortSignal,
+  ) {
+    const key = JSON.stringify([tenant, runId]);
+    await new Promise<void>((resolve) => {
+      const done = () => {
+        clearTimeout(timer);
+        this.notifications.off(key, done);
+        this.notifications.off("disconnected", done);
+        signal?.removeEventListener("abort", done);
+        resolve();
+      };
+      const timer = setTimeout(done, timeoutMs);
+      this.notifications.once(key, done);
+      this.notifications.once("disconnected", done);
+      signal?.addEventListener("abort", done, { once: true });
+      if (signal?.aborted || this.closed) done();
+      else void this.listen();
+    });
+  }
+  async eventPage(
+    tenant: string,
+    runId: string,
+    after: number,
+    limit: number,
+    authorize: (s: State) => RunState,
+  ) {
+    const result = await this.pool.query(runSnapshotQuery, [
+      tenant,
+      runId,
+      after,
+      limit,
+      false,
+      false,
+    ]);
+    return {
+      state: authorize(snapshotState(result.rows[0])),
+      events: (result.rows[0]?.events ?? []) as Event[],
+    };
+  }
   async appendAudit(tenant: string, entry: Audit) {
     // Atomic row update serializes with metadata transactions without loading
     // Runs, Sessions, Events or the existing audit array into the application.
@@ -371,6 +498,13 @@ export class PostgresStore implements Store {
     ).rows.map((x) => x.tenant_id as string);
   }
   async close() {
+    this.closed = true;
+    this.notifications.emit("disconnected");
+    await this.listening;
+    if (this.listener) {
+      this.listener.release(true);
+      this.listener = undefined;
+    }
     await Promise.all([this.pool.end(), this.healthPool.end()]);
   }
 }
