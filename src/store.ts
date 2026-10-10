@@ -12,8 +12,14 @@ import {
   snapshotState,
   claimableRunsQuery,
 } from "./run-store.js";
+import { resourceTransitions } from "./usage.js";
 import { emptyState, type State } from "./domain.js";
-import type { CapacityState } from "./adapters/sandbox-policy.js";
+import { readCapacity, writeCapacity } from "./capacity-store.js";
+import type {
+  CapacityScope,
+  CapacityState,
+} from "./adapters/sandbox-policy.js";
+import { SCHEMA_VERSION, type WorkerHealth } from "./health.js";
 export interface Store {
   eventPage(
     tenant: string,
@@ -46,6 +52,9 @@ export interface Store {
     fn: (state: State) => T | Promise<T>,
   ): Promise<T>;
 
+  ready(): Promise<void>;
+  workerHeartbeat(health: WorkerHealth): Promise<void>;
+  workerHealth(): Promise<WorkerHealth[]>;
   read<T>(tenant: string, fn: (state: State) => T | Promise<T>): Promise<T>;
   tx<T>(tenant: string, fn: (state: State) => T | Promise<T>): Promise<T>;
   runTx<T>(
@@ -54,8 +63,14 @@ export interface Store {
     fn: (state: State) => T | Promise<T>,
   ): Promise<T>;
   tenants(): Promise<string[]>;
-  capacityRead<T>(fn: (state: CapacityState) => T | Promise<T>): Promise<T>;
-  capacityTx<T>(fn: (state: CapacityState) => T | Promise<T>): Promise<T>;
+  capacityRead<T>(
+    fn: (state: CapacityState) => T | Promise<T>,
+    scope?: CapacityScope,
+  ): Promise<T>;
+  capacityTx<T>(
+    fn: (state: CapacityState) => T | Promise<T>,
+    scope?: CapacityScope,
+  ): Promise<T>;
   close(): Promise<void>;
 }
 function candidateLimit(limit: number) {
@@ -138,16 +153,28 @@ export class MemoryStore implements Store {
     );
   }
 
+  private workers = new Map<string, WorkerHealth>();
+  async ready() {}
+  async workerHeartbeat(health: WorkerHealth) {
+    this.workers.set(health.workerId, structuredClone(health));
+  }
+  async workerHealth() {
+    return structuredClone([...this.workers.values()]);
+  }
   private states = new Map<string, State>();
   private tail: Promise<unknown> = Promise.resolve();
   private capacity: CapacityState = { entries: {} };
   async capacityRead<T>(
     fn: (state: CapacityState) => T | Promise<T>,
+    scope?: CapacityScope,
   ): Promise<T> {
     await this.tail;
     return structuredClone(await fn(structuredClone(this.capacity)));
   }
-  capacityTx<T>(fn: (state: CapacityState) => T | Promise<T>): Promise<T> {
+  capacityTx<T>(
+    fn: (state: CapacityState) => T | Promise<T>,
+    scope?: CapacityScope,
+  ): Promise<T> {
     const task = this.tail.then(async () => {
       const s = structuredClone(this.capacity),
         result = await fn(s);
@@ -160,7 +187,9 @@ export class MemoryStore implements Store {
   tx<T>(tenant: string, fn: (s: State) => T | Promise<T>): Promise<T> {
     const task = this.tail.then(async () => {
       const s = structuredClone(this.states.get(tenant) ?? emptyState());
+      const before = structuredClone(s);
       const result = await fn(s);
+      resourceTransitions(before, s);
       this.states.set(tenant, s);
       return structuredClone(result);
     });
@@ -322,35 +351,60 @@ export class PostgresStore implements Store {
   }
 
   pool: pg.Pool;
+  private healthPool: pg.Pool;
   constructor(url: string) {
     this.pool = new pg.Pool({ connectionString: url, max: 10 });
+    this.healthPool = new pg.Pool({
+      connectionString: url,
+      max: 2,
+      connectionTimeoutMillis: 1000,
+      query_timeout: 1000,
+    });
+  }
+  async ready() {
+    const result = await this.healthPool.query(
+      "SELECT version FROM harness_schema WHERE id=1",
+    );
+    if (result.rows[0]?.version !== SCHEMA_VERSION)
+      throw new Error("SCHEMA_MISMATCH");
+    const tables = await this.healthPool.query(
+      "SELECT to_regclass('harness_tenants') AS tenants, to_regclass('harness_sandbox_capacity') AS capacity, to_regclass('harness_sandbox_leases') AS leases, to_regclass('harness_worker_health') AS workers, to_regclass('harness_runs') AS runs, to_regclass('harness_sessions') AS sessions, to_regclass('harness_run_events') AS events, to_regclass('harness_event_sequences') AS sequences",
+    );
+    if (Object.values(tables.rows[0]).some((v) => v === null))
+      throw new Error("SCHEMA_INCOMPLETE");
+  }
+  async workerHeartbeat(health: WorkerHealth) {
+    await this.healthPool.query(
+      "INSERT INTO harness_worker_health(worker_id,health,updated_at) VALUES($1,$2,now()) ON CONFLICT(worker_id) DO UPDATE SET health=excluded.health,updated_at=excluded.updated_at",
+      [health.workerId, JSON.stringify(health)],
+    );
+  }
+  async workerHealth() {
+    const result = await this.healthPool.query(
+      "SELECT health FROM harness_worker_health WHERE updated_at > now() - interval '1 day'",
+    );
+    return result.rows.map((row) => row.health as WorkerHealth);
   }
   async capacityRead<T>(
     fn: (state: CapacityState) => T | Promise<T>,
+    scope?: CapacityScope,
   ): Promise<T> {
-    const row = await this.pool.query(
-      "SELECT state FROM harness_sandbox_capacity WHERE id=1",
-    );
-    return structuredClone(await fn(row.rows[0]?.state ?? { entries: {} }));
+    return structuredClone(await fn(await readCapacity(this.pool, scope)));
   }
   async capacityTx<T>(
     fn: (state: CapacityState) => T | Promise<T>,
+    scope?: CapacityScope,
   ): Promise<T> {
     const c = await this.pool.connect();
     try {
       await c.query("BEGIN");
-      await c.query(
-        "INSERT INTO harness_sandbox_capacity (id,state) VALUES (1,$1) ON CONFLICT DO NOTHING",
-        [JSON.stringify({ entries: {} })],
-      );
-      const row = await c.query(
-        "SELECT state FROM harness_sandbox_capacity WHERE id=1 FOR UPDATE",
-      );
-      const state = row.rows[0].state as CapacityState,
-        result = await fn(state);
-      await c.query("UPDATE harness_sandbox_capacity SET state=$1 WHERE id=1", [
-        JSON.stringify(state),
-      ]);
+      // Global quota admits reservations serially. A lock contains no JSON and
+      // every transition uses it, so count+reserve cannot race a release/adoption.
+      await c.query("SELECT pg_advisory_xact_lock(134697,13)");
+      const before = await readCapacity(c, scope),
+        state = structuredClone(before);
+      const result = await fn(state);
+      await writeCapacity(c, before, state, scope);
       await c.query("COMMIT");
       return structuredClone(result);
     } catch (e) {
@@ -371,6 +425,7 @@ export class PostgresStore implements Store {
       const before = await loadState(c, tenant, true),
         s = structuredClone(before);
       const result = await fn(s);
+      resourceTransitions(before, s);
       await saveState(c, tenant, before, s);
       await c.query("COMMIT");
       return structuredClone(result);
@@ -450,6 +505,6 @@ export class PostgresStore implements Store {
       this.listener.release(true);
       this.listener = undefined;
     }
-    await this.pool.end();
+    await Promise.all([this.pool.end(), this.healthPool.end()]);
   }
 }

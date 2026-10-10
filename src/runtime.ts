@@ -12,6 +12,14 @@ import { Type } from "typebox";
 import type { AgentConfig, Skill } from "./domain.js";
 import type { ToolSpec } from "./adapters/mcp.js";
 export interface RuntimeContext {
+  beforeModelRequest?: (
+    inputEstimate: number,
+  ) => Promise<{ id: string; maxOutputTokens: number }>;
+  recordModelUsage?: (
+    requestId: string,
+    usage: import("./usage.js").ModelUsage | undefined,
+    durationMs: number,
+  ) => Promise<void>;
   config: AgentConfig;
   entries: unknown[];
   prompt: string;
@@ -184,6 +192,50 @@ export class PiRuntime implements Runtime {
       tools: customTools.map((t) => t.name),
       customTools,
     });
+    const settlements: Promise<void>[] = [];
+    if (ctx.beforeModelRequest) {
+      const original = session.agent.streamFunction;
+      session.agent.streamFunction = async (model, context, options) => {
+        await Promise.all(settlements);
+        const ticket = await ctx.beforeModelRequest!(
+          Math.ceil(Buffer.byteLength(JSON.stringify(context)) / 3),
+        );
+        const started = Date.now();
+        try {
+          const stream = await original(model, context, {
+            ...options,
+            maxTokens: ticket.maxOutputTokens,
+          });
+          const settled = stream
+            .result()
+            .then(
+              (message) =>
+                ctx.recordModelUsage?.(
+                  ticket.id,
+                  message.usage,
+                  Date.now() - started,
+                ),
+              () =>
+                ctx.recordModelUsage?.(
+                  ticket.id,
+                  undefined,
+                  Date.now() - started,
+                ),
+            )
+            .then(() => {});
+          settlements.push(settled);
+          void settled.catch(() => {});
+          return stream;
+        } catch (e) {
+          await ctx.recordModelUsage?.(
+            ticket.id,
+            undefined,
+            Date.now() - started,
+          );
+          throw e;
+        }
+      };
+    }
     let pending = Promise.resolve();
     let streamError: unknown;
     const save = () =>
@@ -228,11 +280,15 @@ export class PiRuntime implements Runtime {
       )
         throw new Error("MODEL_RESPONSE_FAILED");
     } finally {
-      await pending;
-      await save();
-      ctx.signal.removeEventListener("abort", abort);
-      unsub();
-      session.dispose();
+      try {
+        await pending;
+        await Promise.all(settlements);
+        await save();
+      } finally {
+        ctx.signal.removeEventListener("abort", abort);
+        unsub();
+        session.dispose();
+      }
     }
   }
 }

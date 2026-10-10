@@ -1,0 +1,52 @@
+name: supply-chain
+on:
+  pull_request:
+  push:
+    branches: [main, work]
+  merge_group:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+jobs:
+  vendor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - name: Reject a modified vendor archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm run verify:vendor
+          mkdir -p work/ci
+          archive=vendor/cubesandbox-sdk-0.3.0.tgz
+          backup=$(mktemp)
+          cp "$archive" "$backup"
+          trap 'cp "$backup" "$archive"; rm -f "$backup"' EXIT
+          printf 'ci-integrity-negative-check' >> "$archive"
+          if npm run verify:vendor > work/ci/vendor-tamper.log 2>&1; then
+            echo 'Vendor verification accepted a modified archive' >&2
+            exit 1
+          fi
+          grep -q 'Vendor integrity/version mismatch: @cubesandbox/sdk' work/ci/vendor-tamper.log
+      - run: npm run verify:vendor:upstream
+      - run: npx tsx --test test/pi-contract.test.ts test/skill-isolation.test.ts test/sandbox-lifecycle.test.ts test/sandbox-timeout.test.ts test/remote-script.test.ts test/mcp-cancellation.test.ts test/mcp-outcome.test.ts
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: dependency-sbom-${{ github.sha }}
+          path: |
+            work/sbom.cdx.json
+            vendor/provenance.json
+            vendor/*LICENSE
+            work/ci/vendor-tamper.log
+          if-no-files-found: warn
+          retention-days: 14

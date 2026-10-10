@@ -1,4 +1,8 @@
+import { alerts } from "./alerts.js";
 import Fastify from "fastify";
+import { usageReport, policyFromEnv } from "./usage.js";
+import { telemetry, traceContext } from "./telemetry.js";
+import { bounded } from "./health.js";
 import { z } from "zod";
 import {
   Fault,
@@ -75,7 +79,12 @@ export function buildAPI(
   });
   app.addHook("onRequest", async (req, reply) => {
     reply.header("X-Request-ID", req.id);
-    if (req.url.split("?")[0] === "/health") return;
+    if (
+      ["/health", "/health/live", "/health/ready"].includes(
+        req.url.split("?")[0]!,
+      )
+    )
+      return;
     actors.set(req, await auth(req.headers.authorization));
   });
   app.addHook("onResponse", async (req, reply) => {
@@ -91,6 +100,68 @@ export function buildAPI(
       });
   });
   app.get("/health", async () => ({ status: "ok" }));
+  app.get("/api/v1/admin/usage", async (req) => {
+    const a = actor(req);
+    admin(a);
+    return service.store.read(a.tenantId, (s) =>
+      usageReport(s, policyFromEnv()),
+    );
+  });
+  app.get("/api/v1/usage", async (req) => {
+    const a = actor(req);
+    return service.store.read(a.tenantId, (s) =>
+      usageReport(s, policyFromEnv(), a.userId),
+    );
+  });
+  app.get("/api/v1/runs/:id/usage", async (req) => {
+    const a = actor(req),
+      rid = uuid.parse(params(req.params).id);
+    return service.store.read(a.tenantId, (s) => {
+      run(s, a, rid);
+      return usageReport(s, policyFromEnv(), undefined, rid);
+    });
+  });
+  app.get("/api/v1/admin/metrics", async (req) => {
+    admin(actor(req));
+    const capacity = await service.store.capacityRead((s) =>
+      Object.values(s.entries).reduce<Record<string, number>>((counts, e) => {
+        counts[e.state] = (counts[e.state] ?? 0) + 1;
+        return counts;
+      }, {}),
+    );
+    return {
+      counters: telemetry.snapshot(),
+      sandbox: capacity,
+      alerts: alerts({}, {}, capacity.unknown ?? 0),
+    };
+  });
+  app.get("/health/live", async () => ({ status: "ok" }));
+  app.get("/health/ready", async (_req, reply) => {
+    try {
+      await bounded(service.store.ready());
+      return { status: "ready" };
+    } catch {
+      return reply.code(503).send({ status: "not_ready" });
+    }
+  });
+  app.get("/api/v1/admin/health/workers", async (req, reply) => {
+    admin(actor(req));
+    const workers = await bounded(service.store.workerHealth());
+    const healthy = workers.filter(
+      (w) =>
+        !w.stopping &&
+        Date.now() - w.heartbeatAt < 15000 &&
+        w.lastSuccessfulTick !== undefined &&
+        Date.now() - w.lastSuccessfulTick < 15000,
+    );
+    return reply.code(healthy.length ? 200 : 503).send({
+      status: healthy.length ? "ok" : "no_healthy_worker",
+      workers: workers.map((w) => ({
+        ...w,
+        stale: Date.now() - w.heartbeatAt >= 15000,
+      })),
+    });
+  });
   app.get("/api/v1/agents", async (req) => {
     const a = actor(req),
       p = page.parse(req.query);
@@ -428,17 +499,23 @@ export function buildAPI(
     const k = req.headers["idempotency-key"];
     const key =
       k === undefined ? undefined : z.string().min(1).max(128).parse(k);
-    return reply
-      .code(202)
-      .send(
-        await service.submit(
-          actor(req),
-          uuid.parse(params(req.params).id),
-          b.message,
-          key,
-          req.id,
-        ),
-      );
+    return reply.code(202).send(
+      await service.submit(
+        actor(req),
+        uuid.parse(params(req.params).id),
+        b.message,
+        key,
+        req.id,
+        (() => {
+          const trace = traceContext(
+            typeof req.headers.traceparent === "string"
+              ? req.headers.traceparent
+              : undefined,
+          );
+          return `00-${trace.traceId}-${trace.spanId}-01`;
+        })(),
+      ),
+    );
   });
   app.get("/api/v1/runs/:id", async (req) => {
     const a = actor(req),
@@ -486,7 +563,10 @@ export function buildAPI(
       0,
       (s) => run(s, a, rid).state,
     );
+    if (a.expiresAt !== undefined && Date.now() >= a.expiresAt)
+      throw new Fault(401, "AUTHENTICATION_EXPIRED");
     reply.hijack();
+    telemetry.count("sse_active", 1);
     reply.raw.writeHead(200, {
       "Content-Type": "text/event-stream",
       "Cache-Control": "no-cache",
@@ -496,13 +576,47 @@ export function buildAPI(
     });
     let closed = false;
     const disconnected = new AbortController();
-    reply.raw.on("close", () => {
+    let expiryTimer: ReturnType<typeof setTimeout> | undefined;
+    const expired = () =>
+      a.expiresAt !== undefined && Date.now() >= a.expiresAt;
+    const expire = () => {
+      if (closed) return;
       closed = true;
       disconnected.abort();
+      // A stalled reader may prevent end() from flushing and emitting close.
+      // Destroy a backpressured response so expiry also releases the waiter.
+      if (reply.raw.writableNeedDrain) reply.raw.destroy();
+      else
+        reply.raw.end(
+          'event: stream.error\ndata: {"code":"AUTHENTICATION_EXPIRED"}\n\n',
+        );
+    };
+    const armExpiry = () => {
+      if (a.expiresAt === undefined || closed) return;
+      const remaining = a.expiresAt - Date.now();
+      if (remaining <= 0) return expire();
+      expiryTimer = setTimeout(
+        () => {
+          if (expired()) expire();
+          else armExpiry();
+        },
+        Math.min(remaining, 2147483647),
+      );
+    };
+    reply.raw.on("close", () => {
+      closed = true;
+      clearTimeout(expiryTimer);
+      disconnected.abort();
+      telemetry.count("sse_active", -1);
     });
+    armExpiry();
     let lastBeat = Date.now();
     try {
       while (!closed) {
+        if (expired()) {
+          expire();
+          break;
+        }
         const batch = await service.store.eventPage(
           a.tenantId,
           rid,
@@ -510,7 +624,12 @@ export function buildAPI(
           100,
           (s) => run(s, a, rid).state,
         );
+        if (expired()) expire();
+        if (closed) break;
         for (const e of batch.events) {
+          // A database read or backpressure wait may cross the JWT deadline.
+          if (expired()) expire();
+          if (closed) break;
           cursor = e.eventId;
           if (
             !reply.raw.write(
@@ -542,6 +661,7 @@ export function buildAPI(
         }
         if (closed) break;
         if (batch.events.length === 100) {
+          // Catch up immediately, while yielding between pages for other clients.
           await new Promise<void>((resolve) => setImmediate(resolve));
           continue;
         }
@@ -558,6 +678,7 @@ export function buildAPI(
           'event: stream.error\ndata: {"code":"ACCESS_REVOKED_OR_UNAVAILABLE"}\n\n',
         );
     } finally {
+      clearTimeout(expiryTimer);
       reply.raw.end();
     }
   });

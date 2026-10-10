@@ -1,0 +1,23 @@
+{
+  "cubeSource": {
+    "commit": "2bbaf74ba7565992ec2a3dbc9928ed5b720639a2",
+    "url": "https://codeload.github.com/TencentCloud/CubeSandbox/tar.gz/2bbaf74ba7565992ec2a3dbc9928ed5b720639a2",
+    "integrity": "sha512-O/rrMMuASZ2DUfSE6OuxTi50CVuK8WAaZQE9c+ubQvTMrolcMWozuBq/hHymrXCx5W9xU3hEGk8D3h841ZylrQ=="
+  },
+  "packages": [
+    {
+      "name": "@cubesandbox/sdk",
+      "version": "0.3.0",
+      "archive": "vendor/cubesandbox-sdk-0.3.0.tgz",
+      "integrity": "sha512-KfnMa7EQ8Joptka18Ybv2wE6sBGSAs1qICWukOg/Og4wpgbJWpSojzb1hMW4MGDiwRtpCAT6ealXrX7tqxuohA==",
+      "license": "Apache-2.0"
+    },
+    {
+      "name": "@earendil-works/pi-coding-agent",
+      "version": "0.99.2",
+      "archive": "vendor/pi-coding-agent-0.99.2-harness.tgz",
+      "integrity": "sha512-qgrajdjBBnLBSWuXRU2qnDDtOHFvjbcCLpfcKfZj2ZgrOTyoZM307zYtdOhxebrwHuIz/wrf1458gmJLNWWn4Q==",
+      "license": "MIT"
+    }
+  ]
+}

@@ -12,16 +12,37 @@ import { HarnessService, authorizedRun } from "./service.js";
 import type { Runtime } from "./runtime.js";
 import type { SandboxManager } from "./adapters/sandbox.js";
 import type { MCPManager, McpCallContext } from "./adapters/mcp.js";
+import { UsageLedger, policyFromEnv } from "./usage.js";
 import { argumentsSchemas, specs } from "./tool-specs.js";
 import { DeltaBatcher } from "./delta-batcher.js";
+import { telemetry, traceContext, withContext } from "./telemetry.js";
+import { bounded, type WorkerHealth } from "./health.js";
 export class Worker {
   readonly owner = id();
   private stopping = false;
+  private ledger: UsageLedger;
   private active = new Set<Promise<void>>();
   private controllers = new Set<AbortController>();
   private maintenance?: Promise<unknown>;
   private lastTenant?: string;
   private tickTail: Promise<void> = Promise.resolve();
+  private lastMetricPublish = 0;
+  private health: WorkerHealth = {
+    workerId: this.owner,
+    heartbeatAt: 0,
+    activeTasks: 0,
+    stopping: false,
+    maintenance: "pending",
+  };
+  private lastHealthWrite = 0;
+  private async publishHealth(force = false) {
+    if (!force && Date.now() - this.lastHealthWrite < 5000) return;
+    this.health.heartbeatAt = Date.now();
+    this.health.activeTasks = this.active.size;
+    this.health.stopping = this.stopping;
+    await bounded(this.service.store.workerHeartbeat(this.health));
+    this.lastHealthWrite = Date.now();
+  }
   constructor(
     private service: HarnessService,
     private runtime: Runtime,
@@ -30,18 +51,48 @@ export class Worker {
     private concurrency = 4,
     private shutdownTimeoutMs = 5000,
   ) {
+    this.ledger = new UsageLedger(service.store, policyFromEnv());
     if (!Number.isFinite(shutdownTimeoutMs) || shutdownTimeoutMs <= 0)
       throw new Error("Invalid Worker shutdown timeout");
   }
   tick() {
-    const task = this.tickTail.then(() => this.tickOnce());
-    this.tickTail = task.catch(() => {});
+    const task = this.tickTail.then(async () => {
+      try {
+        await this.tickOnce();
+        this.health.lastSuccessfulTick = Date.now();
+      } finally {
+        await this.publishHealth();
+      }
+    });
+    this.tickTail = task.catch((e) => {
+      telemetry.error("worker_tick", e, { workerId: this.owner });
+    });
     return task;
   }
   private async tickOnce() {
     if (this.stopping) return;
+    if (Date.now() - this.lastMetricPublish >= 5000) {
+      telemetry.publish(this.owner);
+      this.lastMetricPublish = Date.now();
+    }
     if (!this.maintenance) {
-      const task = this.sandbox.sweepIfDue().catch(() => {});
+      const task = this.sandbox
+        .sweepIfDue()
+        .then((result) => {
+          this.health.maintenance = result?.failed ? "failed" : "ok";
+          if (result?.failed) {
+            telemetry.count("sandbox_reclaim_failed_total", result.failed);
+            telemetry.error(
+              "maintenance",
+              new Fault(503, "SANDBOX_RECLAIM_FAILED"),
+              { workerId: this.owner },
+            );
+          }
+        })
+        .catch((e) => {
+          this.health.maintenance = "failed";
+          telemetry.error("maintenance", e, { workerId: this.owner });
+        });
       this.maintenance = task;
       void task.finally(() => {
         if (this.maintenance === task) this.maintenance = undefined;
@@ -94,7 +145,25 @@ export class Worker {
         if (r) break;
       }
       if (r) {
-        const p = this.execute(tenant, r).catch(() => {});
+        this.health.lastClaimAt = Date.now();
+        telemetry.duration("run_queue", Date.now() - Date.parse(r.createdAt));
+        const p = withContext(
+          {
+            tenantId: tenant,
+            runId: r.id,
+            workerId: this.owner,
+            requestId: r.requestId,
+            ...traceContext(r.traceparent),
+          },
+          () => this.execute(tenant, r),
+        ).catch((e) => {
+          telemetry.error("execute_unhandled", e, {
+            tenantId: tenant,
+            runId: r.id,
+            workerId: this.owner,
+            requestId: r.requestId,
+          });
+        });
         this.active.add(p);
         void p.finally(() => this.active.delete(p));
       }
@@ -102,7 +171,7 @@ export class Worker {
   }
   async start() {
     while (!this.stopping) {
-      await this.tick();
+      await this.tick().catch(() => this.tickTail);
       await new Promise((r) => setTimeout(r, 250));
     }
     await this.stop();
@@ -128,8 +197,12 @@ export class Worker {
           );
         }),
       ]);
+    } catch (e) {
+      telemetry.error("shutdown", e, { workerId: this.owner });
+      throw e;
     } finally {
       clearTimeout(timer);
+      await this.publishHealth(true);
     }
   }
   private owned(s: State, rid: string) {
@@ -139,6 +212,7 @@ export class Worker {
     return r;
   }
   async execute(tenant: string, initial: Run): Promise<void> {
+    const started = Date.now();
     const controller = new AbortController();
     this.controllers.add(controller);
     let waiting = false;
@@ -160,6 +234,11 @@ export class Worker {
           r.lease!.expires = Date.now() + 30000;
         })
         .catch((e) => {
+          telemetry.error("heartbeat", e, {
+            tenantId: tenant,
+            runId: initial.id,
+            workerId: this.owner,
+          });
           fault = e instanceof Fault ? e.code : "HEARTBEAT_FAILED";
           controller.abort();
         });
@@ -324,6 +403,7 @@ export class Worker {
         await emit("tool.completed", { name, callId, result });
         return result;
       } catch (e) {
+        telemetry.error("tool", e, { callId });
         if (
           e instanceof Fault &&
           ["REMOTE_CANCEL_UNCONFIRMED", "MCP_OUTCOME_UNKNOWN"].includes(e.code)
@@ -372,8 +452,25 @@ export class Worker {
         }
       }
       ctx = await get();
+      const modelStarted = Date.now();
       try {
         await this.runtime.execute({
+          beforeModelRequest: async (estimate) => {
+            try {
+              return await this.ledger.reserve(
+                tenant,
+                initial.id,
+                estimate,
+                this.owner,
+              );
+            } catch (e) {
+              fault = e instanceof Fault ? e.code : "MODEL_BUDGET_CHECK_FAILED";
+              controller.abort(e);
+              throw e;
+            }
+          },
+          recordModelUsage: (requestId, usage, duration) =>
+            this.ledger.settle(tenant, requestId, usage, duration),
           config: ctx.config,
           entries: ctx.ses.entries,
           prompt,
@@ -425,6 +522,7 @@ export class Worker {
         });
       } finally {
         await batcher.flush();
+        telemetry.duration("model", Date.now() - modelStarted);
       }
       if (!waiting) {
         controller.signal.throwIfAborted();
@@ -436,6 +534,12 @@ export class Worker {
         });
       }
     } catch (e) {
+      telemetry.error("run_execute", e, {
+        tenantId: tenant,
+        runId: initial.id,
+        workerId: this.owner,
+        requestId: initial.requestId,
+      });
       if (!waiting)
         await this.service.store.tx(tenant, (s) => {
           const r = s.runs[initial.id];
@@ -459,6 +563,7 @@ export class Worker {
           );
         });
     } finally {
+      telemetry.duration("run", Date.now() - started);
       this.controllers.delete(controller);
       clearInterval(heartbeat);
       clearTimeout(timeout);
