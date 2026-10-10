@@ -21,3 +21,13 @@ socket drain/close，不发无界数据。JWT 到期处理由独立 #16 修复�
 分页/跨客户端通知/取消订阅/跨租户隔离，以及原有 SSE ACL 回放。生产压测应记录
 长会话写入、10/100/500 订阅、Run 心跳 P95/P99、WAL、锁等待、内存，不能把本地
 通过当作 500 连接容量承诺；压测入口和结果口径见 #18。
+
+## 已完成阶段与生产结论
+
+[PR #33](https://github.com/Garhorne0813/pi-flow/pull/33) 的 10/100/500 客户端测试
+使用真实 HTTP 和 PostgreSQL、一个热 Run 及 20 个合成事件，证明该场景下有序回放
+与重连正确，并记录环境相关延迟/CPU/RSS。它不验证实际模型 delta 速率、长会话、
+多 Run 混合负载或生产 SLO。事件页数量有界不等于所有授权元数据和管理 read() 都
+已归一化或开销恒定；#11 普通跨实体事务的租户锁仍存在。生产负载证据独立由
+[#18](https://github.com/Garhorne0813/pi-flow/issues/18) 和
+[真实网关 #37](https://github.com/Garhorne0813/pi-flow/issues/37) 跟踪。

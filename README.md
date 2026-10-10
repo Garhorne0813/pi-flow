@@ -55,7 +55,7 @@ node --env-file=.env dist/worker-main.js
 
 API 和 Worker 必须使用同一数据库、模型批准列表、Skills Bundle 映射和 MCP Endpoint 配置。生产模式还必须配置 `TENANT_CAPABILITIES_JSON`，明确每个租户可用的 Bundle / Endpoint 引用；不同租户的机密技能和服务凭证应配置为不同引用。生产模式缺少关键配置时直接拒绝启动，不会退回 Demo。UCS 令牌需包含 `sub`、`tenant_id`、`exp`；管理员 `roles` 包含 `harness-admin`。Ticket 协议尚未实现，可替换 `Auth` 适配函数。
 
-LLM Gateway 当前采用 OpenAI Chat Completions 兼容协议，部署配置中的 `LLM_PROVIDER` / `LLM_MODEL_ID` 构成模型白名单；模型单次输出上限 4096。Token 预算按返回 usage 累计，是响应后检查的预算；单次响应可能超额，不是精确的预付费额度。
+LLM Gateway 当前采用 OpenAI Chat Completions 兼容协议，部署配置中的 `LLM_PROVIDER` / `LLM_MODEL_ID` 构成模型白名单；模型单次输出上限 4096。模型请求派发前使用共享账本预留额度并设置输出上限，可信 usage 返回后按服务端价格快照核算。验收范围是可执行预算控制与可审计成本估算；输入估算和最终供应商账单仍可能不同，不能保证单次绝不超支。详见 [用量与预算口径](docs/usage-budgets.md)。
 
 Cube Template 必须预装 Python 3 / Bash，存在无 sudo 的执行用户，对其授予 Workspace 写权限；模板不得预置共享技能或额外技能挂载，`/skills` 应为空。持久 Volume 后端、非特权配置、磁盘/CPU/内存和网络出口限制由 Cube 集群配置。Harness 不向 Sandbox 注入 UCS、模型或 MCP 凭证。Skills 发布者负责不可变 Volume；每次远程工具执行前校验已挂载 SKILL.md 的规范路径和 SHA-256；read/grep 返回 manifest 内容前再次校验，路径别名使用同一策略。Skill Volume 必须保持不可变，bash 的执行前校验不能替代存储不可变性。
 
@@ -93,7 +93,7 @@ JWT/MCP 测试使用本地 HTTPS 测试服务，需要 `openssl`；远程工具�
 - 文件 API 当前支持 UTF-8 小文件（最多 256 KiB）；不支持二进制、归档导入和对象存储 Artifact 下载。创建 Session 后才能使用文件 API。
 - 本地 Workspace/Agent/MCP/Skill 撤销在后续操作中检查；UCS JWT 的中心化即时撤销/用户组映射需接 introspection 或企业事件。Run 会检查令牌过期。
 - MCP 目前使用部署配置的服务凭证；用户委托 OAuth、Vault/KMS 与短期凭证尚未实现。
-- 不含生产备份恢复、完整孤儿 Sandbox 对账、分布式追踪、费用结算和租户总容量配额。已实现按用户与全局限制活跃 Sandbox 和自动空闲回收；这些配额不等于真实集群容量验收。Session 分支/显式迁移 API 尚未提供。
+- 已实现按用户与全局限制活跃 Sandbox、自动空闲回收、安全 trace context，以及默认关闭的孤儿对账器；真实 Cube 对账验收、外部 trace/告警采集、生产备份恢复、财务级费用结算和租户总 Sandbox 容量配额仍未完成。这些配额不等于真实集群容量验收。Session 分支/显式迁移 API 尚未提供。
 
 API 协议和配置示例见 [docs/api.md](docs/api.md)。
 
@@ -109,7 +109,7 @@ SSE 在连接 JWT 的 exp 到期时关闭，并返回无 event ID 的 `stream.er
 
 默认空闲 900 秒暂停，累计空闲 86400 秒释放实例并保留 Workspace Volume、Session 和快照记录；每 60 秒由运行中的 Worker 扫描，实际执行时间可能延后一轮或远程调用耗时。空闲从最后一次成功激活/工具调用结束计算；有 QUEUED/RUNNING Run 或工具租约的工作区会跳过，WAITING_INPUT 不阻止空闲回收。下一次工具访问自动恢复或重建，并重新检查配额。仅部署 API 而不运行 Worker 时不会自动扫描。没有历史访问时间的旧实例从首次扫描开始计时。
 
-配置项：`SANDBOX_MAX_ACTIVE_PER_USER`、`SANDBOX_MAX_ACTIVE_TOTAL`、`SANDBOX_IDLE_PAUSE_SECONDS`、`SANDBOX_IDLE_RELEASE_SECONDS`、`SANDBOX_SWEEP_INTERVAL_SECONDS`、`SANDBOX_MAX_SNAPSHOTS_PER_WORKSPACE`（默认 20）。均为正整数；释放阈值不能小于暂停阈值。变更已有部署前，执行 `npm run migrate` 创建新的 `harness_sandbox_capacity` 表，并停掉旧版 Worker 后统一升级。启动时登记旧实例，已存在的超额实例不强制销毁，但停止新增/恢复，直到有容量。
+配置项：`SANDBOX_MAX_ACTIVE_PER_USER`、`SANDBOX_MAX_ACTIVE_TOTAL`、`SANDBOX_IDLE_PAUSE_SECONDS`、`SANDBOX_IDLE_RELEASE_SECONDS`、`SANDBOX_SWEEP_INTERVAL_SECONDS`、`SANDBOX_MAX_SNAPSHOTS_PER_WORKSPACE`（默认 20）。均为正整数；释放阈值不能小于暂停阈值。变更已有部署前，先停止全部旧 API/Worker、备份，再执行 `npm run migrate` 应用 001–004 并统一升级。当前容量记录位于 `harness_sandbox_leases`，旧 `harness_sandbox_capacity` 仅保留迁移审核；禁止新旧 JSONB/关系表写入者混跑。启动时登记旧实例，已存在的超额实例不强制销毁，但停止新增/恢复，直到有容量。
 
 REST 提供容量/状态查询、暂停/恢复/释放，以及快照创建/列表/删除/恢复/克隆。快照管理要求 Workspace editor/owner，并拒绝有未结束 Run 的工作区；viewer 可查看自身可访问工作区的状态和快照目录。恢复按快照创建时的技能范围检查当前注册状态与部署映射，在销毁旧实例后通过快照模板创建新实例，显式覆盖技能/Workspace 挂载和网络限制。技能撤销或映射变更时拒绝恢复；禁止任意传入外部 Snapshot ID。克隆创建当前用户拥有的新 Workspace，使用独立的新 Volume，也受配额限制。
 
@@ -143,6 +143,22 @@ NODE_USE_ENV_PROXY=1 npm run test:deepseek:capabilities
 
 `npm run bench:store:reads` 在已迁移的 `TEST_DATABASE_URL` 测试库上，对比旧 SSE 写事务路径与新只读路径。创建并清理专用租户，模拟 100 个 250 ms 事件轮询与 4 个 1 s Run 心跳；不连接模型或 Sandbox。参数与实测结果见 [docs/read-benchmark.md](docs/read-benchmark.md)。SSE/列表查询不锁定或写回租户行；每个请求结束时仍保留一次审计写入。
 
-容量 `operation` 是每次操作生成的唯一持久标识，激活后也保留；预留与接管原子比较前一条记录，暂停/释放/未知结果只更新匹配的标识。过期请求不能覆盖新请求的配额，普通 Agent 实例、文件实例和生命周期操作使用同一规则。取消在创建/连接/激活各阶段检查：已知实例确认 Kill 后退还配额；无 ID 的创建未知结果或 Kill 未确认继续占用，Workspace Volume 保留。升级时须同时更新并重启 API 与所有 Worker，避免与旧版不校验 fencing 的写入者混跑；现有 JSONB 状态兼容，无额外迁移。
+容量 `operation` 是每次操作生成的唯一持久标识，激活后也保留；预留与接管原子比较前一条记录，暂停/释放/未知结果只更新匹配的标识。过期请求不能覆盖新请求的配额，普通 Agent 实例、文件实例和生命周期操作使用同一规则。取消在创建/连接/激活各阶段检查：已知实例确认 Kill 后退还配额；无 ID 的创建未知结果或 Kill 未确认继续占用，Workspace Volume 保留。升级时须同时更新并重启 API 与所有 Worker，避免与旧版不校验 fencing 的写入者混跑；当前版本需在停止 API 与所有 Worker 后按顺序执行 001–004 迁移，再同时升级所有写入者；迁移步骤见下文及容量迁移文档。
 
 健康检查、Worker 心跳和 Kubernetes probes 见 [docs/health.md](docs/health.md)。
+
+## 性能与生产验收口径
+
+Run/Session/Event 和容量记录已拆表，减少对应路径的整租户/全局 JSONB 写放大。
+普通跨实体事务仍保留租户级元数据锁；容量准入及转换仍用全局 advisory lock 保证
+原子配额。局部心跳/容量转换基准与 SSE 合成负载不能证明所有锁竞争已消除，
+也不能换算为生产容量 SLO。真实锁等待证据确认瓶颈后再评估独立容量计数器。
+
+[#18](https://github.com/Garhorne0813/pi-flow/issues/18) 是生产发布阻塞项，
+已完成的多进程 Worker/真实 PostgreSQL 和 10/100/500 SSE 合成测试作为阶段成果保留。
+真实服务分别由 [Cube #35](https://github.com/Garhorne0813/pi-flow/issues/35)、
+[MCP #36](https://github.com/Garhorne0813/pi-flow/issues/36)、
+[模型网关 #37](https://github.com/Garhorne0813/pi-flow/issues/37) 跟踪。
+Cube 验证先搁置；#14 保持 open，Reconciler 默认关闭，列表缺失不释放未确认容量。
+分层证据和发布条件见 [验收手册](docs/acceptance.md)。供应商账单对账由
+[#38](https://github.com/Garhorne0813/pi-flow/issues/38) 独立跟踪。

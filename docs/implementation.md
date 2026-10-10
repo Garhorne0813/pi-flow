@@ -62,15 +62,15 @@ MCP 发现只遍历当前 Agent 的 Server 列表；调用与审批前再次检�
 
 ## 数据与运维
 
-Sandbox 容量保存在单独的 `harness_sandbox_capacity` JSONB 行，PostgreSQL 行锁将各租户、各 API/Worker 的容量预留串行化。用户配额计入 Workspace owner（Tenant + subject），global 配额包含所有共享此数据库的已管理实例。reserved/unknown 持续占用，只有确认暂停或释放后退还；released 标记阻止旧实例启动登记与删除之间的竞态。远程未知结果不自动重放或按时间释放，完整孤儿对账仍需运维接入。
+当前 Sandbox 容量独立保存在 `harness_sandbox_leases` 关系表，旧 `harness_sandbox_capacity` JSONB 仅供迁移审核。预留和转换仍以 transaction-scoped 全局 advisory lock 串行保护索引计数与状态变更，消除的是全局 JSONB 全量写入，不是全局容量竞争。用户配额计入 Workspace owner（Tenant + subject），global 配额包含所有共享此数据库的已管理实例。reserved/unknown 持续占用，只有确认暂停或释放后退还；released 标记阻止旧实例启动登记与删除之间的竞态。远程未知结果不自动重放或按时间释放，完整孤儿对账仍需运维接入。
 
 Worker 定期扫描空闲工作区，并通过同一 Workspace 工具租约再次检查最后访问时间与 QUEUED/RUNNING Run。暂停保留实例；释放只 Kill 实例，不删除 Volume/Session/登记快照。快照创建/列表/删除/恢复/克隆加入 Workspace ACL 和审计。恢复/克隆用 SDK 快照模板显式重建网络与挂载，检查快照的技能范围与当前注册/部署映射；克隆不复用原 Workspace Volume。快照不是外置 Volume 或 PostgreSQL 的备份。真实 Cube 暂停/恢复、快照语义与跨节点行为仍需集群验收。
 
-`migrations/001_initial.sql` 可重复执行。首版有一张 `harness_tenants` 表，整个租户状态作为事务聚合。所有 API/Worker 操作从可信身份选择 Tenant，使用参数化 SQL；写事务使用租户行锁保证多实例一致性；只读接口执行单条普通 SELECT，返回分离快照，不创建缺失租户、不获取 FOR UPDATE 锁、不更新 revision。SSE、列表、统计、MCP 授权检查及 Worker 空闲扫描/执行上下文查询采用只读接口，业务变更、心跳、事件和每请求完成审计仍写事务。容量 get/usage 同样采用 capacityRead。这是明确的容量折中，不宣称等价于附件中的完整关系表设计。
+迁移 001–004 按顺序运行，组合运行时 readiness 要求 schema version 4。`harness_tenants` 保留租户元数据，Session、Run/租约和 Event 已迁到独立关系表。普通跨实体事务仍持有租户级元数据锁并 diff 写入变化实体，runTx 使用共享元数据锁与目标 Run 行锁；心跳和单 Run 终态不重写整租户 JSONB。所有 API/Worker 操作从可信身份选择 Tenant，使用参数化 SQL；事务按上述锁协议保证多实例一致性；只读接口使用已提交快照，不创建缺失租户、不获取 FOR UPDATE 锁、不更新 revision，SSE 鉴权与索引事件页在同一个 SELECT 快照中读取。SSE、列表、统计、MCP 授权检查及 Worker 空闲扫描/执行上下文查询采用只读接口，业务变更、心跳、事件和每请求完成审计仍写事务，但使用不同的专用写路径。容量 get/usage 同样采用 capacityRead。这是明确的容量折中，不宣称等价于附件中的完整关系表设计。
 
-事件序号在租户内单调递增；SSE `Last-Event-ID` / `after` 仅回放该 Run 的事件。当前保留期为无限，生产必须设置归档/删除政策并拆分大日志表。SSE 暂停于 WAITING_INPUT；回答返回新 Run ID 后，前端订阅新 Run。
+事件序号在租户内单调递增；SSE `Last-Event-ID` / `after` 仅回放该 Run 的事件。当前保留期为无限，生产必须设置归档/删除政策；事件已经独立建表，归档实施仍待完成。SSE 暂停于 WAITING_INPUT；回答返回新 Run ID 后，前端订阅新 Run。
 
-Volume 名为 `ws-{workspace UUID}`，创建前查询同名 Volume，允许恢复“创建后未保存引用”的情况。Sandbox 附有 Workspace Volume / Bundle 的 metadata 供外部资产对账。创建 Sandbox 后、记录 ID 前进程崩溃仍可能留下孤儿实例；首版无完整资产扫描任务，需按 metadata 与数据库引用对账。禁止删除仍有 Run 或工具租约的工作区；先取消并等终态，再删除。清理依次 Kill Sandbox → 删除 Volume → 删除 Workspace 元数据；Session/Run 日志保留但资源不再可访问，适用于审计归档策略定稿前。
+Volume 名为 `ws-{workspace UUID}`，创建前查询同名 Volume，允许恢复“创建后未保存引用”的情况。Sandbox 附有 Workspace Volume / Bundle 的 metadata 供外部资产对账。创建 Sandbox 后、记录 ID 前进程崩溃仍可能留下孤儿实例；已提供默认关闭的 SandboxReconciler，尚未通过真实 Cube 验收。Sandbox.list 仅列运行实例，列表缺失不能证明暂停/创建中资源不存在；#14 / #35 关闭条件包含真实崩溃恢复、身份/代次/Volume 一致与 Kill 重试不误清理新代。禁止删除仍有 Run 或工具租约的工作区；先取消并等终态，再删除。清理依次 Kill Sandbox → 删除 Volume → 删除 Workspace 元数据；Session/Run 日志保留但资源不再可访问，适用于审计归档策略定稿前。
 
 部署服务应使用独立的数据库账号、容器非 root 身份、仅必要网络出口。生产 `TENANT_CAPABILITIES_JSON` 限定每个租户可引用的 Skill Bundle 和 MCP Endpoint，租户管理员也不能扩大这个上限。MCP URL 和模型网关 URL 只来自部署配置，后台不能填写任意 URL 或可执行代码。Endpoint 网络 allowlist、TLS CA 与凭证授权必须由基础设施提供。
 
@@ -92,16 +92,32 @@ MCP discovery 继承 Run 信号，完整预算最多 30 秒且不超过剩余 de
 
 确定性回归编排 A 文件租约过期、B 接管并激活、A 迟到成功/未知 Kill，两种情况都保持 B 记录与配额；Agent 迟到取消同样不 Kill B 复用的实例。真实 PostgreSQL 的两个客户端竞争同一观察值，仅一方接管，旧 active/paused/released/unknown 无法覆盖新记录。取消覆盖创建前、阻塞创建、连接、激活/listener 边界、已知清理成功、Kill 未确认和无 ID 创建未知。MCP 覆盖多 Server、多页、connect/listTools 永久卡住、关闭抛错/卡住、总预算、预先取消/过期 deadline/Server 上限、Worker 释放槽位并调度下一条，以及真实本地 HTTPS 卡住 tools/list 时断开传输。原有白名单、Endpoint/grant 与撤销测试继续保留。
 
-部署升级须同时更新 API 和所有 Worker，不混跑旧版无 fencing 的容量写入者。JSONB 中旧 active/paused 条目可能缺少 operation，新的 reserve/claim 在比较原记录后为本次操作建立标识；无数据库结构迁移。真实 Cube 集群的取消和存储挂载语义仍需验收。
+部署升级须同时更新 API 和所有 Worker，不混跑旧版无 fencing 的容量写入者。上述 #5–#7 为旧 work 基线的 fencing 修复；组合分支另有 001–004 结构迁移及回填，必须按容量/Run 迁移手册切流，不能继续按旧版“无结构迁移”部署。真实 Cube 集群的取消和存储挂载语义仍需验收。
 
 ## work 分支 Issue #8–#9 回归
 
 Sandbox 控制请求的本地等待最多 30 秒，工具执行最多 130 秒；Agent provisioning/执行同时接受 Run 的 AbortSignal，因此剩余 deadline 更短时按 Run deadline 停止等待。SDK 忽略取消也不占住 Worker 槽位。清理 Kill 最多等待 1 秒；未确认、无 ID 的创建以及仍在连接的实例保留 unknown/charged，Run 失败为 `REMOTE_CANCEL_UNCONFIRMED`。连接尚未返回时不能先释放配额：迟到的连接可能恢复实例，必须等结果返回后再清理。
 
-创建前记录 operation 与 Volume 引用，Cube Sandbox metadata 增加 `harnessOperation`。迟到 Volume 记录 `sandbox.volume.late`；Volume 名仍为 `ws-{workspace UUID}`，不会因请求取消而删除共享 Workspace 卷。迟到实例记录 `sandbox.creation.late`，仅原 generation 可以清理并释放容量；已被后继接管时，不 Kill 后继的 ID，独立孤儿 ID 登记到 `{workspace}:orphan:{operation}` 并继续计入原 Workspace owner 的配额。清理完成记录 `sandbox.creation.reconciled` / `sandbox.kill.reconciled`。这些记录供运维对账；本实现没有跨进程恢复后的 Cube 资产扫描器，进程丢失的 SDK 响应仍需按 metadata 人工对账。Worker stop/start 的收尾最多等待 5 秒，未完成时明确抛出 `WORKER_SHUTDOWN_UNSETTLED`，不能将它当作成功关闭。
+创建前记录 operation 与 Volume 引用，Cube Sandbox metadata 增加 `harnessOperation`。迟到 Volume 记录 `sandbox.volume.late`；Volume 名仍为 `ws-{workspace UUID}`，不会因请求取消而删除共享 Workspace 卷。迟到实例记录 `sandbox.creation.late`，仅原 generation 可以清理并释放容量；已被后继接管时，不 Kill 后继的 ID，独立孤儿 ID 登记到 `{workspace}:orphan:{operation}` 并继续计入原 Workspace owner 的配额。清理完成记录 `sandbox.creation.reconciled` / `sandbox.kill.reconciled`。这些记录供运维对账；当前另有默认关闭的跨进程 SandboxReconciler，但真实集群枚举/metadata/Kill 尚待 #14 / #35 验收；未确认资源仍保守占额，不按年龄自动释放。Worker stop/start 的收尾最多等待 5 秒，未完成时明确抛出 `WORKER_SHUTDOWN_UNSETTLED`，不能将它当作成功关闭。
 
 所有获批 MCP 工具都按可能有外部副作用处理。调用先持久化 `tool.dispatching` 意图，实际启动 tools/call 的 fetch 后记录 `tool.dispatched`；收到 SDK 校验后的工具响应记录 `tool.confirmed`，并保留 `tool.completed` 结果。发出请求后的取消、超时、响应丢失或传输错误记录 `tool.unknown`，抛出 `MCP_OUTCOME_UNKNOWN`，强制 Run 为 FAILED，即使用户已经请求取消也不改为 CANCELLED。Worker 立即中止模型，不自动重试或重放已批准的调用。发送前取消仍可正常取消；已确认响应不会仅因同时收到取消而改为未知。
 
 事件含 callId、runId 和可选 requestId；tools/call 的 JSON-RPC `_meta` 包含同样的关联信息，HTTP `x-harness-call-id` / `x-harness-run-id` 可供服务端日志对账。关联信息不构成服务端幂等保证，也不证明远端回滚。白名单、审批与实时撤销继续生效。
 
 新增回归覆盖四种 Sandbox 请求永久挂起、迟到 Volume/create/connect/kill、后继复用与独立孤儿、同 Worker 超时后调度下一 Run、有界停机错误；真实本地 HTTPS MCP 在副作用完成后阻塞响应，通过正常审批与继续流程取消，确认 FAILED/未知、关联 ID 一致且调用不重放。另验证发送前取消、确认结果后取消、Run deadline 超时和没有取消的响应丢失。
+
+## Review 后的验收分界
+
+#11 的普通跨实体租户元数据锁和 #13 的全局 advisory lock 是扩展边界。局部合成
+基准仅支持特定存储路径的对比；保留原子配额、租约 fencing 和不重放正确性，
+实际压测确认瓶颈后才讨论新计数协议，不宣称消除所有竞争或达到生产 SLO。
+
+#18 是生产验收总任务及发布阻塞项；多进程 Worker、真实 PostgreSQL、SSE 合成负载、
+本地 MCP 协议和 Pi SDK 合约测试分别作为已完成阶段成果。真实 Cube/MCP/网关由
+#35/#36/#37 单独跟踪，数据库恢复及代表性混合负载仍在总任务验收内。Cube 部分
+先搁置，#14 不关闭且 Reconciler 默认关闭；详见 [acceptance.md](acceptance.md)。
+
+#19 验收可执行预算控制与可审计成本估算。请求前预留、可信 usage 和服务端价格
+快照不保证 tokenizer 精确、单次绝不超支或供应商账单准确；unknown 保守占额，
+Sandbox 时间仅为观察区间。财务级账单对账由 #38 独立跟踪，详见
+[usage-budgets.md](usage-budgets.md)。

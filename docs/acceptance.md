@@ -1,4 +1,17 @@
-# Fault and load acceptance
+# Layered acceptance and production release gate
+
+[#18](https://github.com/Garhorne0813/pi-flow/issues/18) is the production
+acceptance umbrella and a **production release blocker**. Track each layer's
+completed evidence and remaining work separately. A missing real-provider test
+environment does not invalidate the completed stages or count as a passed gate.
+
+## Completed stages
+
+| Layer | Evidence | Boundary |
+| --- | --- | --- |
+| Runtime/store and protocol regressions | PostgreSQL integration, local HTTPS MCP fault tests and Pi SDK with a local HTTP gateway | Local protocol servers and test adapters do not prove deployment endpoint behavior |
+| Multiprocess crash recovery | Two actual Worker processes, real PostgreSQL, SIGKILL, durable checkpoint and no duplicate/replayed execution | Runtime is deliberately stalled, sandbox is Demo, persisted lease expiry is accelerated |
+| SSE replay/load | Real HTTP API and PostgreSQL, 10/100/500 clients, ordered replay and Last-Event-ID reconnect | One hot Run and 20 synthetic events; no actual model delta workload or production SLO |
 
 Use a dedicated disposable PostgreSQL 17 database. Scripts apply all migrations
 and remove their own randomly named tenant; never point them at production.
@@ -11,31 +24,45 @@ for n in 10 100 500; do
 done
 ```
 
-The crash scenario launches two actual Worker processes, checks that only one
-executes a Run, persists a checkpoint, kills its owner with SIGKILL, accelerates
-its persisted lease expiry, and lets the surviving Worker recover it. It asserts
-one terminal failure, no lease, unchanged checkpoint and no replay. The runtime
-is deliberately stalled and the sandbox is a demo adapter: this does not prove
-remote tool outcomes or real Cube cleanup.
+The crash scenario checks that only one process executes a Run, persists a
+checkpoint, kills its owner, accelerates the stored expiry, and lets the
+surviving Worker recover it. It asserts one terminal failure, no lease,
+unchanged checkpoint and no replay. Remote tool outcomes and Cube cleanup are
+outside this scenario.
 
-The load scenario opens actual HTTP SSE connections against the real API and
-PostgreSQL, writes 20 timed events, checks every client sees the exact ordered
-history once, and reconnects with Last-Event-ID. JSON reports include delivery
-P95/P99, process CPU, peak RSS and elapsed time. It measures one hot Run and uses
-synthetic events, not model tokens or production latency. CI retains reports for
-10/100/500 connections. No environment-independent latency SLO is claimed.
+SSE JSON reports retain delivery P95/P99, process CPU, peak RSS and elapsed time.
+CI saves reports for each concurrency. Measurements describe that commit,
+dataset and environment; they do not establish a production connection limit
+or overall performance improvement. Run/store heartbeats still share tenant
+metadata locks with ordinary cross-entity transactions (#11). Capacity admission
+and transitions retain a global PostgreSQL advisory lock (#13). Their local
+benchmarks measure specific storage paths, not elimination of lock contention.
+An independent capacity counter should be considered only after representative
+load and lock-wait evidence identifies the advisory lock as a bottleneck.
 
-## Required real-provider gate (not yet executed)
+## Separate real integration gaps
 
-Issue #18 remains open until this gate passes on the deployment's actual Cube,
-MCP and gateway. No credentials or real-provider results are bundled here.
-Record commit, SDK/provenance hashes, database version, worker/API replica count,
-provider versions, UTC timestamps, sanitized request IDs, resource inventory
-before/after and P95/P99 metrics. Never record tokens, credentials or tool text.
+| Tracking task | Remaining deployment evidence | Status |
+| --- | --- | --- |
+| [#35 CubeSandbox](https://github.com/Garhorne0813/pi-flow/issues/35), with #14 | Non-root/readonly skills, Volume and snapshot semantics, inventory metadata, crash after create, generation-safe Kill/retry | Cube work deferred while its test environment is unavailable; Reconciler stays off by default and #14 stays open |
+| [#36 enterprise MCP](https://github.com/Garhorne0813/pi-flow/issues/36) | Actual endpoint/CA/grants/delegated credentials, approval/revocation, dispatched writes with lost responses and no replay | Not production-accepted |
+| [#37 model gateway](https://github.com/Garhorne0813/pi-flow/issues/37) | Trusted usage semantics, output cap, shared budgets, gateway failures, actual deltas under mixed load | Not production-accepted |
 
-Run a dedicated test tenant with restricted grants and quotas. Verify normal
-remote file persistence, writable /workspace, read-only /skills, and MCP success.
-Then repeat with two workers and these controlled faults:
+For Cube, `Sandbox.list` enumerates running instances only. Absence cannot
+prove nonexistence for paused, creating or otherwise uncertain resources.
+Before closing #14, demonstrate create-success/worker-crash/restart recovery;
+match metadata, instance identity, operation generation and Volume; prove
+successful Kill and failed-Kill retries cannot clean up a newer generation.
+Unconfirmed resources stay charged; no age-based or list-absence release.
+Deferring Cube work does not waive the production gate.
+
+## Remaining production gate
+
+Complete the separate real integration tasks and the umbrella's PostgreSQL
+outage, connection exhaustion, backup/recovery and representative mixed-load
+scenarios. Long sessions, 100+ concurrent Runs and 10/100/500 SSE subscribers
+must be measured on the intended deployment. Define SLOs from this evidence.
+Keep the following fault matrix in the signed-off release report:
 
 | Fault | Required evidence |
 | --- | --- |
@@ -43,14 +70,24 @@ Then repeat with two workers and these controlled faults:
 | Kill worker during remote tool execution | Run fails with unknown outcome; remote side effects are not retried |
 | MCP disconnect after dispatch or missing response | Attempt marked unknown; approval and idempotency evidence retained; no automatic replay |
 | Cube create/kill timeout and pause/resume failure | Ambiguous capacity is not freed by age; late cleanup and retry do not touch a newer generation |
-| API/PostgreSQL outage during SSE | Health fails within its deadline; reconnect preserves event order and ACL checks |
+| API/PostgreSQL outage or pool exhaustion during SSE | Health fails within its deadline; recovery/reconnect preserves event order and ACL checks |
 | Parent cancellation, user/agent revocation and token expiry | Subagent/tool dispatch stops; stream closes; foreign tenant sees no resource |
-| Rolling worker shutdown under 10/100/500 subscribers | No duplicate claim; queued work resumes; active unknown work does not replay; cleanup confirmed |
+| Rolling worker shutdown under mixed Run/SSE load | No duplicate claim; queued work resumes; unknown active work does not replay; cleanup confirmed |
 
-Repeat reconnect and fault scenarios at each concurrency level, with actual
-model deltas and MCP/Cube operations. Confirm provider-side inventory returns to
-baseline, global/user capacity is correct, session entries are recoverable and
-usage reservations survive failures. Compare CPU/RSS, database pool waits,
-statement latency, delivery latency and resource leaks against a recorded
-baseline and deployment SLO. Store raw sanitized evidence and a signed-off
-pass/fail table; mock/synthetic successes must not satisfy this gate.
+Record release commit, SDK/provenance hashes, database/provider versions,
+worker/API replicas, dataset, deployment resources, UTC timestamps, sanitized
+request IDs, resource inventory before/after, throughput, query/write counts,
+P95/P99, CPU/RSS, pool/lock waits and WAL. Never record credentials or tool text.
+Verify quotas, checkpoints, reservations, tenant isolation and resource leaks.
+Keep actual deployed provider results separate from synthetic and local-server
+results. Store raw sanitized evidence and a signed-off pass/fail table.
+
+#18 stays open and blocks production release until its criteria pass on the
+intended deployment. Green synthetic CI permits further review and testing; it
+is not production sign-off. This is the release process requirement, not an
+implemented automatic check of GitHub issue state.
+
+#19 accepts executable budget control and auditable cost estimates. Financial
+provider-invoice reconciliation is independently tracked in
+[#38](https://github.com/Garhorne0813/pi-flow/issues/38); usage confirmation and
+observed Sandbox durations do not establish an invoice or paid charges.
