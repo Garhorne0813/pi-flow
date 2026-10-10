@@ -61,3 +61,16 @@ request output limits and refusal before dispatch. This is a protocol fixture,
 not an enterprise deployment capture. test/usage.test.ts covers missing/zero/invalid
 usage, repeated settlement and shared PostgreSQL budgets. Actual deployment
 usage, cache semantics and fault evidence remain release gates in #37/#18.
+
+## Historical resource statistics (#39)
+
+Sandbox interval statistics traverse append-order observations once, tracking
+one last transition per Workspace and previously seen Sandbox IDs. Work is O(n)
+in the number of selected transitions; auxiliary memory is O(w + d), for
+Workspaces and distinct Workspace/Sandbox pairs. A single report timestamp closes
+all final intervals. Clock-skewed negative intervals remain clamped to zero;
+unknown observations remain separate from active time and provider billing.
+
+This removes repeated array scans only. Usage/Audit JSONB growth, bounded
+billing-period queries, Event/Audit archival and TOAST/lock measurements remain
+open in #39. The report still materializes the selected history.
