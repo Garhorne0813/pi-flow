@@ -534,6 +534,8 @@ export function buildAPI(
               .slice(0, 100),
           };
         });
+        if (expired()) expire();
+        if (closed) break;
         for (const e of batch.events) {
           // A database read or backpressure wait may cross the JWT deadline.
           if (expired()) expire();
