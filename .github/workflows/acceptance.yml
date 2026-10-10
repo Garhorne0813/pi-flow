@@ -1,10 +1,15 @@
 name: Acceptance harness
 on:
-  workflow_dispatch:
   pull_request:
+  push:
     branches: [main, work]
+  merge_group:
+  workflow_dispatch:
 permissions:
   contents: read
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
   postgres-fault-load:
     runs-on: ubuntu-latest
@@ -13,6 +18,7 @@ jobs:
       postgres:
         image: postgres:17
         env:
+      REQUIRE_POSTGRES_TESTS: 'true'
           POSTGRES_USER: harness
           POSTGRES_PASSWORD: test-only
           POSTGRES_DB: harness_test
@@ -33,6 +39,7 @@ jobs:
       - run: node --import tsx scripts/acceptance/worker-crash.ts | tee work/acceptance/crash.jsonl
         shell: bash
       - run: |
+          set -euo pipefail
           for n in 10 100 500; do
             SSE_CLIENTS=$n node --import tsx scripts/acceptance/sse-load.ts | tee work/acceptance/sse-$n.jsonl
           done
@@ -44,5 +51,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: acceptance-reports
+          name: acceptance-reports-${{ github.sha }}
           path: work/acceptance
+          if-no-files-found: warn
+          retention-days: 14

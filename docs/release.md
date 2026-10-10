@@ -48,3 +48,8 @@ gh api --method PUT repos/Garhorne0813/pi-flow/branches/main/protection --input 
 
 本轮对 protection API 的 GET/PUT 均返回 Forbidden，因此**尚未启用**。配置文件与绿色
 CI 不代表远程规则已生效，#10 仍须核验仓库设置并通过评审发布 main；本轮未合并。
+
+## Complete CI workflow
+
+Trigger coverage, mandatory PostgreSQL/no-skip checks, dependency integrity and
+commit-bound report artifacts are documented in [ci.md](ci.md).
