@@ -1,0 +1,30 @@
+name: supply-chain
+on:
+  pull_request:
+    branches: [main, work]
+  push:
+    branches: [main, work]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  vendor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run verify:vendor:upstream
+      - run: npx tsx --test test/pi-contract.test.ts test/skill-isolation.test.ts test/sandbox-lifecycle.test.ts test/sandbox-timeout.test.ts test/remote-script.test.ts test/mcp-cancellation.test.ts test/mcp-outcome.test.ts
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dependency-sbom-${{ github.sha }}
+          path: |
+            work/sbom.cdx.json
+            vendor/provenance.json
+            vendor/*LICENSE
+          if-no-files-found: error
