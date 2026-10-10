@@ -25,13 +25,15 @@ async function fixture() {
     "create-operation",
     undefined,
   );
-  const sid = await provider.create(
-    "volume",
-    "default",
-    [],
-    undefined,
-    "create-operation",
-  );
+  const sid = (
+    await provider.create(
+      "volume",
+      "default",
+      [],
+      undefined,
+      "create-operation",
+    )
+  ).sandboxId;
   return { store, provider, manager, w, sid };
 }
 test("restart discovers a created instance whose ID was not persisted, and repeated scans are idempotent", async () => {

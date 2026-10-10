@@ -32,7 +32,7 @@ export class DemoSandbox implements SandboxProvider {
     this.boxes.set(sid, v);
     if (operation) this.operations.set(sid, operation);
     this.skillSelections.set(sid, structuredClone(skills));
-    return sid;
+    return { sandboxId: sid };
   }
   async connect(s: string) {
     if (!this.boxes.has(s)) throw new Fault(410, "SANDBOX_GONE");
