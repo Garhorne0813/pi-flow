@@ -1,4 +1,5 @@
 import { posix } from "node:path";
+import { telemetry } from "../telemetry.js";
 import {
   Sandbox,
   Volume,
@@ -373,7 +374,10 @@ export class SandboxManager {
         .then(
           (value) => {
             if (abandoned) {
-              if (late) void late(value).catch(() => {});
+              if (late)
+                void late(value).catch((e) =>
+                  telemetry.error("sandbox_late_cleanup", e),
+                );
               return;
             }
             settled = true;
@@ -1229,8 +1233,10 @@ export class SandboxManager {
                 "WORKSPACE_NOT_FOUND",
               ].includes(e.code)
             )
-          )
+          ) {
             result.failed++;
+            telemetry.error("sandbox_reclaim", e, { tenantId });
+          }
         }
       }
     }
