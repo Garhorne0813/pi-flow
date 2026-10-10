@@ -17,11 +17,6 @@ export async function loadState(
     [tenant],
   );
   const s = { ...emptyState(), ...row.rows[0]?.state } as State;
-  const sessions = await c.query(
-    "SELECT data FROM harness_sessions WHERE tenant_id=$1" +
-      (lock ? " ORDER BY session_id FOR UPDATE" : ""),
-    [tenant],
-  );
   const runs = await c.query(
     "SELECT data FROM harness_runs WHERE tenant_id=$1" +
       (runId
@@ -30,9 +25,6 @@ export async function loadState(
           ? " ORDER BY run_id FOR UPDATE"
           : ""),
     runId ? [tenant, runId] : [tenant],
-  );
-  s.sessions = Object.fromEntries(
-    sessions.rows.map((row) => [row.data.id, row.data]),
   );
   s.runs = Object.fromEntries(runs.rows.map((row) => [row.data.id, row.data]));
   if (runId && s.runs[runId]) {
@@ -47,6 +39,14 @@ export async function loadState(
     for (const row of parents.rows)
       if (row.data.id !== runId) s.runs[row.data.id] = row.data;
   }
+  const sessionIds = [...new Set(Object.values(s.runs).map(r => r.sessionId))];
+  const sessions = await c.query(
+    "SELECT " + (runId && !targetLock ? "data - 'entries' AS data" : "data") +
+      " FROM harness_sessions WHERE tenant_id=$1" +
+      (runId ? " AND session_id=ANY($2::text[])" : lock ? " ORDER BY session_id FOR UPDATE" : ""),
+    runId ? [tenant, sessionIds] : [tenant],
+  );
+  s.sessions = Object.fromEntries(sessions.rows.map(row => [row.data.id, row.data]));
   s.events = runId
     ? []
     : (
