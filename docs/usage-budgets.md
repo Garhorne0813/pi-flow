@@ -54,3 +54,25 @@ Pi SDK + 本地 HTTP 网关的合约与失真测试是阶段成果；部署端�
 
 长期请求账本拆表/按账期聚合、Sandbox 区间一次遍历及 Event/Audit 归档独立由
 [#39](https://github.com/Garhorne0813/pi-flow/issues/39) 跟踪；当前未完成该增长治理。
+## Reproducible protocol usage example
+
+The real local HTTP gateway in test/pi-contract.test.ts returns an OpenAI-compatible
+SSE usage frame: {"prompt_tokens":3,"completion_tokens":4,"total_tokens":7}.
+Pi normalizes this response into trusted request usage; the contract verifies
+request output limits and refusal before dispatch. This is a protocol fixture,
+not an enterprise deployment capture. test/usage.test.ts covers missing/zero/invalid
+usage, repeated settlement and shared PostgreSQL budgets. Actual deployment
+usage, cache semantics and fault evidence remain release gates in #37/#18.
+
+## Historical resource statistics (#39)
+
+Sandbox interval statistics traverse append-order observations once, tracking
+one last transition per Workspace and previously seen Sandbox IDs. Work is O(n)
+in the number of selected transitions; auxiliary memory is O(w + d), for
+Workspaces and distinct Workspace/Sandbox pairs. A single report timestamp closes
+all final intervals. Clock-skewed negative intervals remain clamped to zero;
+unknown observations remain separate from active time and provider billing.
+
+This removes repeated array scans only. Usage/Audit JSONB growth, bounded
+billing-period queries, Event/Audit archival and TOAST/lock measurements remain
+open in #39. The report still materializes the selected history.

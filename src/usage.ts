@@ -307,25 +307,28 @@ export function usageReport(
     unknownMs: 0,
     observedCreates: 0,
   };
-  for (let i = 0; i < resources.length; i++) {
-    const r = resources[i]!,
-      next = resources
-        .slice(i + 1)
-        .find((x) => x.workspaceId === r.workspaceId);
-    const duration = Math.max(0, (next?.at ?? Date.now()) - r.at);
+  // Transitions are persisted in append order. Keep that order (including
+  // clock skew) and charge each interval to its preceding observation.
+  const last = new Map<string, ResourceTransition>();
+  const seen = new Map<string, Set<string | undefined>>();
+  const now = Date.now();
+  const charge = (r: ResourceTransition, end: number) => {
+    const duration = Math.max(0, end - r.at);
     if (r.state === "active") sandbox.activeMs += duration;
     if (r.state === "paused") sandbox.pausedMs += duration;
     if (r.state === "unknown") sandbox.unknownMs += duration;
-    if (
-      r.state === "active" &&
-      !resources
-        .slice(0, i)
-        .some(
-          (x) => x.workspaceId === r.workspaceId && x.sandboxId === r.sandboxId,
-        )
-    )
+  };
+  for (const r of resources) {
+    const previous = last.get(r.workspaceId);
+    if (previous) charge(previous, r.at);
+    last.set(r.workspaceId, r);
+    let ids = seen.get(r.workspaceId);
+    if (!ids) seen.set(r.workspaceId, (ids = new Set()));
+    if (r.state === "active" && !ids.has(r.sandboxId))
       sandbox.observedCreates++;
+    ids.add(r.sandboxId);
   }
+  for (const r of last.values()) charge(r, now);
   const budgetWarnings: {
     scope: "tenant" | "user";
     userId?: string;
