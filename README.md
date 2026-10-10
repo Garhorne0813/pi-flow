@@ -144,3 +144,7 @@ NODE_USE_ENV_PROXY=1 npm run test:deepseek:capabilities
 容量 `operation` 是每次操作生成的唯一持久标识，激活后也保留；预留与接管原子比较前一条记录，暂停/释放/未知结果只更新匹配的标识。过期请求不能覆盖新请求的配额，普通 Agent 实例、文件实例和生命周期操作使用同一规则。取消在创建/连接/激活各阶段检查：已知实例确认 Kill 后退还配额；无 ID 的创建未知结果或 Kill 未确认继续占用，Workspace Volume 保留。升级时须同时更新并重启 API 与所有 Worker，避免与旧版不校验 fencing 的写入者混跑；现有 JSONB 状态兼容，无额外迁移。
 
 健康检查、Worker 心跳和 Kubernetes probes 见 [docs/health.md](docs/health.md)。
+
+## CI quality checks
+
+See [docs/ci.md](docs/ci.md) for required checks, mandatory PostgreSQL regressions, fault/load scenarios and retained reports.
