@@ -13,6 +13,7 @@ import type { Runtime } from "./runtime.js";
 import type { SandboxManager } from "./adapters/sandbox.js";
 import type { MCPManager, McpCallContext } from "./adapters/mcp.js";
 import { argumentsSchemas, specs } from "./tool-specs.js";
+import { SandboxReconciler } from "./sandbox-reconciler.js";
 export class Worker {
   readonly owner = id();
   private stopping = false;
@@ -40,7 +41,16 @@ export class Worker {
   private async tickOnce() {
     if (this.stopping) return;
     if (!this.maintenance) {
-      const task = this.sandbox.sweepIfDue().catch(() => {});
+      const task = this.sandbox
+        .sweepIfDue()
+        .then(async (result) => {
+          if (result && process.env.SANDBOX_RECONCILE_ENABLED === "true")
+            await new SandboxReconciler(
+              this.service.store,
+              this.sandbox,
+            ).scan();
+        })
+        .catch(() => {});
       this.maintenance = task;
       void task.finally(() => {
         if (this.maintenance === task) this.maintenance = undefined;
