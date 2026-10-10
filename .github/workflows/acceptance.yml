@@ -18,7 +18,6 @@ jobs:
       postgres:
         image: postgres:17
         env:
-      REQUIRE_POSTGRES_TESTS: 'true'
           POSTGRES_USER: harness
           POSTGRES_PASSWORD: test-only
           POSTGRES_DB: harness_test
@@ -27,6 +26,7 @@ jobs:
           --health-cmd "pg_isready -U harness -d harness_test"
           --health-interval 5s --health-timeout 5s --health-retries 10
     env:
+      REQUIRE_POSTGRES_TESTS: 'true'
       TEST_DATABASE_URL: postgres://harness:test-only@localhost:5432/harness_test
     steps:
       - uses: actions/checkout@v4
