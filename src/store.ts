@@ -148,7 +148,7 @@ export class PostgresStore implements Store {
         throw new Error(
           "runTx may only change the target Run and append events",
         );
-      if (Object.keys(s.runs).some((rid) => rid !== runId))
+      if (Object.keys(s.runs).some((rid) => rid !== runId && JSON.stringify(s.runs[rid])!==JSON.stringify(before.runs[rid])))
         throw new Error("runTx scope violation");
       const r = s.runs[runId];
       if (r && JSON.stringify(r) !== JSON.stringify(before.runs[runId]))

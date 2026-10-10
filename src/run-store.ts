@@ -34,6 +34,19 @@ export async function loadState(
     sessions.rows.map((row) => [row.data.id, row.data]),
   );
   s.runs = Object.fromEntries(runs.rows.map((row) => [row.data.id, row.data]));
+  if (runId && s.runs[runId]) {
+    const parents = await c.query(
+      `WITH RECURSIVE chain AS (
+      SELECT run_id,data FROM harness_runs WHERE tenant_id=$1 AND run_id=$2
+      UNION
+      SELECT p.run_id,p.data FROM harness_runs p JOIN chain child ON child.data->>'parentRunId'=p.run_id WHERE p.tenant_id=$1
+    ) SELECT data FROM chain`,
+      [tenant, runId],
+    );
+    for (const row of parents.rows)
+      if (row.data.id !== runId) s.runs[row.data.id] = row.data;
+  }
+
   s.events = runId
     ? []
     : (
