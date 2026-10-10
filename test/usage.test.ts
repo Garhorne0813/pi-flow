@@ -122,8 +122,22 @@ test("server pricing snapshots, cost caps, malformed usage and resource transiti
   await ledger.settle(
     f.actor.tenantId,
     r.id,
-    { input: 10, output: 10, cacheRead: 0, cacheWrite: 0, totalTokens: 20 },
+    Object.assign(
+      { input: 10, output: 10, cacheRead: 0, cacheWrite: 0, totalTokens: 20 },
+      { cost: { input: 0, output: 0, total: 0 } },
+    ),
     1,
+  );
+  assert.equal(
+    await store.read(f.actor.tenantId, (s) => s.usage!.requests[r.id]!.status),
+    "confirmed",
+  );
+  assert.equal(
+    await store.read(
+      f.actor.tenantId,
+      (s) => (s.usage!.requests[r.id]!.usage as any).cost,
+    ),
+    undefined,
   );
   assert.equal(
     await store.read(

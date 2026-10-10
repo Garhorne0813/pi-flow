@@ -233,14 +233,24 @@ export class UsageLedger {
       r.durationMs = Math.max(0, durationMs);
       const valid =
         usage &&
-        Object.values(usage).every((v) => Number.isSafeInteger(v) && v >= 0) &&
+        (
+          ["input", "output", "cacheRead", "cacheWrite", "totalTokens"] as const
+        ).every((key) => Number.isSafeInteger(usage[key]) && usage[key] >= 0) &&
         usage.totalTokens > 0;
       if (!valid) {
         r.status = "unknown";
         return;
       }
       r.status = "confirmed";
-      r.usage = usage;
+      // Pi usage also carries its own cost object. Only trusted token fields
+      // are persisted; prices always come from the server snapshot.
+      r.usage = {
+        input: usage.input,
+        output: usage.output,
+        cacheRead: usage.cacheRead,
+        cacheWrite: usage.cacheWrite,
+        totalTokens: usage.totalTokens,
+      };
       r.tokens = Math.max(
         usage.totalTokens,
         usage.input + usage.output + usage.cacheRead + usage.cacheWrite,
