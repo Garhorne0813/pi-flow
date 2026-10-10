@@ -489,7 +489,7 @@ test(
         s.runs[runs[0]!.id]!.lease!.expires = Date.now() + 90000;
       });
       for (let i = 0; i < 100 && !entered; i++)
-        await new Promise<void>((r) => setTimeout(r,5));
+        await new Promise<void>((r) => setTimeout(r, 5));
       assert.ok(entered);
       await stores[1]!.runTx(actor.tenantId, runs[1]!.id, (s) => {
         s.runs[runs[1]!.id]!.lease!.expires = Date.now() + 90000;
@@ -589,6 +589,79 @@ test(
       await store.close();
       await control.pool.query(`DROP SCHEMA ${schema} CASCADE`);
       await control.close();
+    }
+  },
+);
+
+test(
+  "PostgreSQL event pages are indexed, notifications are hints, and abort cleans subscription",
+  { skip: !url },
+  async () => {
+    const store = new PostgresStore(url!),
+      other = new PostgresStore(url!);
+    const actor = { tenantId: "stream-" + id(), userId: "u", admin: true };
+    try {
+      await store.pool.query(
+        (await readFile("migrations/001_initial.sql", "utf8")) +
+          (await readFile("migrations/003_runs_sessions_events.sql", "utf8")),
+      );
+      const service = new HarnessService(store, [], ["default"]),
+        av = await service.publish(
+          actor,
+          AgentConfig.parse({
+            name: "events",
+            systemPrompt: "test",
+            model: { provider: "demo", modelId: "demo" },
+            tools: [],
+            skillBundle: "default",
+          }),
+        ),
+        w = await service.createWorkspace(actor, "stream"),
+        ses = await service.createSession(actor, w.id, av.id),
+        r = await service.submit(actor, ses.id, "stream");
+      const { event } = await import("../src/domain.js");
+      const waiting = store.waitForEvents(actor.tenantId, r.id, 1000);
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      await other.runTx(actor.tenantId, r.id, (s) => {
+        for (let i = 0; i < 155; i++)
+          event(s, s.runs[r.id]!, "test.delta", { delta: String(i) });
+      });
+      await waiting;
+      const page = await store.eventPage(
+        actor.tenantId,
+        r.id,
+        1,
+        100,
+        (s) => s.runs[r.id]!.state,
+      );
+      assert.equal(page.events.length, 100);
+      assert.equal(page.events[0]?.eventId, 2);
+      const next = await store.eventPage(
+        actor.tenantId,
+        r.id,
+        101,
+        100,
+        (s) => s.runs[r.id]!.state,
+      );
+      assert.equal(next.events.length, 55);
+      assert.equal(next.events.at(-1)?.eventId, 156);
+      // Polling after a missed notification remains authoritative.
+      const abort = new AbortController(),
+        wait = store.waitForEvents(actor.tenantId, r.id, 10000, abort.signal);
+      abort.abort();
+      await wait;
+      await assert.rejects(
+        store.eventPage("foreign", r.id, 0, 100, (s) => {
+          if (!s.runs[r.id]) throw new Error("hidden");
+          return s.runs[r.id]!.state;
+        }),
+        /hidden/,
+      );
+    } finally {
+      await store.pool.query("DELETE FROM harness_tenants WHERE tenant_id=$1", [
+        actor.tenantId,
+      ]);
+      await Promise.all([store.close(), other.close()]);
     }
   },
 );

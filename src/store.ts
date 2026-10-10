@@ -1,4 +1,6 @@
 import pg from "pg";
+import { EventEmitter } from "node:events";
+import type { Event, RunState } from "./domain.js";
 import {
   loadState,
   saveState,
@@ -9,6 +11,19 @@ import {
 import { emptyState, type State } from "./domain.js";
 import type { CapacityState } from "./adapters/sandbox-policy.js";
 export interface Store {
+  eventPage(
+    tenant: string,
+    runId: string,
+    after: number,
+    limit: number,
+    authorize: (s: State) => RunState,
+  ): Promise<{ state: RunState; events: Event[] }>;
+  waitForEvents(
+    tenant: string,
+    runId: string,
+    timeoutMs: number,
+    signal?: AbortSignal,
+  ): Promise<void>;
   read<T>(tenant: string, fn: (state: State) => T | Promise<T>): Promise<T>;
   tx<T>(tenant: string, fn: (state: State) => T | Promise<T>): Promise<T>;
   runTx<T>(
@@ -22,6 +37,37 @@ export interface Store {
   close(): Promise<void>;
 }
 export class MemoryStore implements Store {
+  async eventPage(
+    tenant: string,
+    runId: string,
+    after: number,
+    limit: number,
+    authorize: (s: State) => RunState,
+  ) {
+    return this.read(tenant, (s) => ({
+      state: authorize(s),
+      events: s.events
+        .filter((e) => e.runId === runId && e.eventId > after)
+        .slice(0, limit),
+    }));
+  }
+  async waitForEvents(
+    _tenant: string,
+    _runId: string,
+    timeoutMs: number,
+    signal?: AbortSignal,
+  ) {
+    await new Promise<void>((resolve) => {
+      const done = () => {
+        clearTimeout(timer);
+        signal?.removeEventListener("abort", done);
+        resolve();
+      };
+      const timer = setTimeout(done, timeoutMs);
+      signal?.addEventListener("abort", done, { once: true });
+      if (signal?.aborted) done();
+    });
+  }
   private states = new Map<string, State>();
   private tail: Promise<unknown> = Promise.resolve();
   private capacity: CapacityState = { entries: {} };
@@ -69,6 +115,82 @@ export class MemoryStore implements Store {
   async close() {}
 }
 export class PostgresStore implements Store {
+  private notifications = new EventEmitter().setMaxListeners(0);
+  private listener?: pg.PoolClient;
+  private listening?: Promise<void>;
+  private async listen() {
+    if (!this.listening)
+      this.listening = (async () => {
+        const c = await this.pool.connect();
+        try {
+          await c.query("LISTEN harness_run_event");
+          this.listener = c;
+          c.on("notification", (m) => {
+            if (m.payload) this.notifications.emit(m.payload);
+          });
+          c.on("error", () => {
+            this.listener = undefined;
+            this.listening = undefined;
+            this.notifications.emit("disconnected");
+            c.release(true);
+          });
+        } catch (e) {
+          c.release(true);
+          throw e;
+        }
+      })().catch(() => {
+        this.listening = undefined;
+      });
+    await this.listening;
+  }
+  async waitForEvents(
+    tenant: string,
+    runId: string,
+    timeoutMs: number,
+    signal?: AbortSignal,
+  ) {
+    const key = JSON.stringify([tenant, runId]);
+    await new Promise<void>((resolve) => {
+      const done = () => {
+        clearTimeout(timer);
+        this.notifications.off(key, done);
+        this.notifications.off("disconnected", done);
+        signal?.removeEventListener("abort", done);
+        resolve();
+      };
+      const timer = setTimeout(done, timeoutMs);
+      this.notifications.once(key, done);
+      this.notifications.once("disconnected", done);
+      signal?.addEventListener("abort", done, { once: true });
+      if (signal?.aborted) done();
+      else void this.listen();
+    });
+  }
+  async eventPage(
+    tenant: string,
+    runId: string,
+    after: number,
+    limit: number,
+    authorize: (s: State) => RunState,
+  ) {
+    const c = await this.pool.connect();
+    try {
+      await c.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+      const s = await loadState(c, tenant, false, runId, false),
+        state = authorize(s);
+      const result = await c.query(
+        "SELECT data FROM harness_run_events WHERE tenant_id=$1 AND run_id=$2 AND event_id>$3 ORDER BY event_id LIMIT $4",
+        [tenant, runId, after, limit],
+      );
+      await c.query("COMMIT");
+      return { state, events: result.rows.map((row) => row.data as Event) };
+    } catch (e) {
+      await c.query("ROLLBACK");
+      throw e;
+    } finally {
+      c.release();
+    }
+  }
   pool: pg.Pool;
   constructor(url: string) {
     this.pool = new pg.Pool({ connectionString: url, max: 10 });
@@ -148,7 +270,13 @@ export class PostgresStore implements Store {
         throw new Error(
           "runTx may only change the target Run and append events",
         );
-      if (Object.keys(s.runs).some((rid) => rid !== runId && JSON.stringify(s.runs[rid])!==JSON.stringify(before.runs[rid])))
+      if (
+        Object.keys(s.runs).some(
+          (rid) =>
+            rid !== runId &&
+            JSON.stringify(s.runs[rid]) !== JSON.stringify(before.runs[rid]),
+        )
+      )
         throw new Error("runTx scope violation");
       const r = s.runs[runId];
       if (r && JSON.stringify(r) !== JSON.stringify(before.runs[runId]))
@@ -185,6 +313,11 @@ export class PostgresStore implements Store {
     ).rows.map((x) => x.tenant_id as string);
   }
   async close() {
+    this.notifications.emit("disconnected");
+    if (this.listener) {
+      this.listener.release(true);
+      this.listener = undefined;
+    }
     await this.pool.end();
   }
 }

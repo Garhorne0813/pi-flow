@@ -13,6 +13,7 @@ import type { Runtime } from "./runtime.js";
 import type { SandboxManager } from "./adapters/sandbox.js";
 import type { MCPManager, McpCallContext } from "./adapters/mcp.js";
 import { argumentsSchemas, specs } from "./tool-specs.js";
+import { DeltaBatcher } from "./delta-batcher.js";
 export class Worker {
   readonly owner = id();
   private stopping = false;
@@ -173,11 +174,18 @@ export class Worker {
           controller.abort();
         });
     }, 1000);
-    const emit = (type: string, data: unknown) =>
-      this.service.store.tx(tenant, (s) => {
-        const r = this.owned(s, initial.id);
-        event(s, r, type, data);
-      });
+    const batcher = new DeltaBatcher(
+      (type, data) =>
+        this.service.store.runTx(tenant, initial.id, (s) => {
+          const r = this.owned(s, initial.id);
+          event(s, r, type, data);
+        }),
+      (e) => {
+        fault = "STREAM_PERSISTENCE_FAILED";
+        controller.abort(e);
+      },
+    );
+    const emit = (type: string, data: unknown) => batcher.emit(type, data);
     const get = () =>
       this.service.store.read(tenant, (s) => {
         const r = this.owned(s, initial.id);
@@ -368,56 +376,60 @@ export class Worker {
         }
       }
       ctx = await get();
-      await this.runtime.execute({
-        config: ctx.config,
-        entries: ctx.ses.entries,
-        prompt,
-        skills: ctx.skills,
-        specs: [...specs(ctx.config.tools), ...mcp.specs],
-        signal: controller.signal,
-        call: async (name, args) => {
-          const fresh = await get();
-          return executeTool(
-            name,
-            args,
-            fresh.config,
-            fresh.ses.workspaceId,
-            mcp.call,
-            mcp.authorize,
-          );
-        },
-        emit,
-        consume: async (tokens, turn) => {
-          const code = await this.service.store.tx(tenant, (s) => {
-            const r = this.owned(s, initial.id);
-            const { config } = authorizedRun(s, r);
-            let root = r;
-            while (root.parentRunId) root = s.runs[root.parentRunId]!;
-            const rc =
-              root.capabilities ??
-              s.agents[s.sessions[root.sessionId]!.agentVersionId]!.config;
-            r.tokens = (r.tokens ?? 0) + tokens;
-            if (root.id !== r.id) root.tokens = (root.tokens ?? 0) + tokens;
-            if (turn) {
-              r.steps++;
-              if (root.id !== r.id) root.steps++;
-            }
-            if (r.steps > config.maxSteps || root.steps > rc.maxSteps)
-              return "STEP_BUDGET_EXCEEDED";
-            if (
-              r.tokens > config.maxTokens ||
-              (root.tokens ?? 0) > rc.maxTokens
-            )
-              return "TOKEN_BUDGET_EXCEEDED";
-          });
-          if (code) throw new Fault(429, code);
-        },
-        checkpoint: (entries) =>
-          this.service.store.tx(tenant, (s) => {
-            const r = this.owned(s, initial.id);
-            s.sessions[r.sessionId]!.entries = entries;
-          }),
-      });
+      try {
+        await this.runtime.execute({
+          config: ctx.config,
+          entries: ctx.ses.entries,
+          prompt,
+          skills: ctx.skills,
+          specs: [...specs(ctx.config.tools), ...mcp.specs],
+          signal: controller.signal,
+          call: async (name, args) => {
+            const fresh = await get();
+            return executeTool(
+              name,
+              args,
+              fresh.config,
+              fresh.ses.workspaceId,
+              mcp.call,
+              mcp.authorize,
+            );
+          },
+          emit,
+          consume: async (tokens, turn) => {
+            const code = await this.service.store.tx(tenant, (s) => {
+              const r = this.owned(s, initial.id);
+              const { config } = authorizedRun(s, r);
+              let root = r;
+              while (root.parentRunId) root = s.runs[root.parentRunId]!;
+              const rc =
+                root.capabilities ??
+                s.agents[s.sessions[root.sessionId]!.agentVersionId]!.config;
+              r.tokens = (r.tokens ?? 0) + tokens;
+              if (root.id !== r.id) root.tokens = (root.tokens ?? 0) + tokens;
+              if (turn) {
+                r.steps++;
+                if (root.id !== r.id) root.steps++;
+              }
+              if (r.steps > config.maxSteps || root.steps > rc.maxSteps)
+                return "STEP_BUDGET_EXCEEDED";
+              if (
+                r.tokens > config.maxTokens ||
+                (root.tokens ?? 0) > rc.maxTokens
+              )
+                return "TOKEN_BUDGET_EXCEEDED";
+            });
+            if (code) throw new Fault(429, code);
+          },
+          checkpoint: (entries) =>
+            this.service.store.tx(tenant, (s) => {
+              const r = this.owned(s, initial.id);
+              s.sessions[r.sessionId]!.entries = entries;
+            }),
+        });
+      } finally {
+        await batcher.flush();
+      }
       if (!waiting) {
         controller.signal.throwIfAborted();
         await this.service.store.runTx(tenant, initial.id, (s) => {
