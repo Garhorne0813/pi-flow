@@ -18,7 +18,7 @@ jobs:
           POSTGRES_DB: harness_test
         ports: ['5432:5432']
         options: >-
-          --health-cmd 'pg_isready -U harness -d harness_test'
+          --health-cmd "pg_isready -U harness -d harness_test"
           --health-interval 5s --health-timeout 5s --health-retries 10
     env:
       TEST_DATABASE_URL: postgres://harness:test-only@localhost:5432/harness_test
