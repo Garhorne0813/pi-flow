@@ -9,7 +9,11 @@ import {
   metadata,
 } from "./run-store.js";
 import { emptyState, type State } from "./domain.js";
-import type { CapacityState } from "./adapters/sandbox-policy.js";
+import { readCapacity, writeCapacity } from "./capacity-store.js";
+import type {
+  CapacityScope,
+  CapacityState,
+} from "./adapters/sandbox-policy.js";
 export interface Store {
   eventPage(
     tenant: string,
@@ -32,8 +36,14 @@ export interface Store {
     fn: (state: State) => T | Promise<T>,
   ): Promise<T>;
   tenants(): Promise<string[]>;
-  capacityRead<T>(fn: (state: CapacityState) => T | Promise<T>): Promise<T>;
-  capacityTx<T>(fn: (state: CapacityState) => T | Promise<T>): Promise<T>;
+  capacityRead<T>(
+    fn: (state: CapacityState) => T | Promise<T>,
+    scope?: CapacityScope,
+  ): Promise<T>;
+  capacityTx<T>(
+    fn: (state: CapacityState) => T | Promise<T>,
+    scope?: CapacityScope,
+  ): Promise<T>;
   close(): Promise<void>;
 }
 export class MemoryStore implements Store {
@@ -73,11 +83,15 @@ export class MemoryStore implements Store {
   private capacity: CapacityState = { entries: {} };
   async capacityRead<T>(
     fn: (state: CapacityState) => T | Promise<T>,
+    scope?: CapacityScope,
   ): Promise<T> {
     await this.tail;
     return structuredClone(await fn(structuredClone(this.capacity)));
   }
-  capacityTx<T>(fn: (state: CapacityState) => T | Promise<T>): Promise<T> {
+  capacityTx<T>(
+    fn: (state: CapacityState) => T | Promise<T>,
+    scope?: CapacityScope,
+  ): Promise<T> {
     const task = this.tail.then(async () => {
       const s = structuredClone(this.capacity),
         result = await fn(s);
@@ -197,30 +211,24 @@ export class PostgresStore implements Store {
   }
   async capacityRead<T>(
     fn: (state: CapacityState) => T | Promise<T>,
+    scope?: CapacityScope,
   ): Promise<T> {
-    const row = await this.pool.query(
-      "SELECT state FROM harness_sandbox_capacity WHERE id=1",
-    );
-    return structuredClone(await fn(row.rows[0]?.state ?? { entries: {} }));
+    return structuredClone(await fn(await readCapacity(this.pool, scope)));
   }
   async capacityTx<T>(
     fn: (state: CapacityState) => T | Promise<T>,
+    scope?: CapacityScope,
   ): Promise<T> {
     const c = await this.pool.connect();
     try {
       await c.query("BEGIN");
-      await c.query(
-        "INSERT INTO harness_sandbox_capacity (id,state) VALUES (1,$1) ON CONFLICT DO NOTHING",
-        [JSON.stringify({ entries: {} })],
-      );
-      const row = await c.query(
-        "SELECT state FROM harness_sandbox_capacity WHERE id=1 FOR UPDATE",
-      );
-      const state = row.rows[0].state as CapacityState,
-        result = await fn(state);
-      await c.query("UPDATE harness_sandbox_capacity SET state=$1 WHERE id=1", [
-        JSON.stringify(state),
-      ]);
+      // Global quota admits reservations serially. A lock contains no JSON and
+      // every transition uses it, so count+reserve cannot race a release/adoption.
+      await c.query("SELECT pg_advisory_xact_lock(134697,13)");
+      const before = await readCapacity(c, scope),
+        state = structuredClone(before);
+      const result = await fn(state);
+      await writeCapacity(c, before, state, scope);
       await c.query("COMMIT");
       return structuredClone(result);
     } catch (e) {
