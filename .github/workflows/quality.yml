@@ -1,0 +1,57 @@
+name: quality
+on:
+  pull_request:
+  push:
+    branches: [main, work]
+  merge_group:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: harness
+          POSTGRES_PASSWORD: ci-only
+          POSTGRES_DB: harness_test
+        ports: [5432:5432]
+        options: >-
+          --health-cmd "pg_isready -U harness -d harness_test"
+          --health-interval 5s --health-timeout 5s --health-retries 12
+    env:
+      TEST_DATABASE_URL: postgres://harness:ci-only@127.0.0.1:5432/harness_test
+      REQUIRE_POSTGRES_TESTS: 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: sudo apt-get update && sudo apt-get install -y openssl python3 bash
+      - run: npm ci
+      - name: TypeScript check
+        run: npm run check
+      - name: Check JavaScript syntax
+        run: find scripts -name '*.mjs' -print0 | xargs -0 -r -n 1 node --check
+      - name: Audit locked dependencies
+        run: npm audit --audit-level=high
+      - run: DATABASE_URL="$TEST_DATABASE_URL" npm run migrate
+      - name: Full tests with mandatory PostgreSQL and no skips
+        run: node scripts/ci-tests.mjs
+      - run: npm run build
+      - run: npm run smoke
+      - name: Upload test reports
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: quality-reports-${{ github.sha }}
+          path: work/ci/
+          if-no-files-found: warn
+          retention-days: 14

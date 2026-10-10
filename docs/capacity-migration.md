@@ -50,3 +50,5 @@ TEST_DATABASE_URL=... node scripts/bench-capacity.mjs，报告 work/capacity-ben
 配额准入/索引计数、跨租户混合负载、网络或 Cube SDK。P95 差异不是全局竞争消失
 的证据，也不能推导生产吞吐或容量 SLO。发布前应同时记录数据集、版本、并发度、
 advisory lock 等待、准入延迟和 WAL；正确性验收与生产规模验收分别报告。
+
+After this cutover readiness requires schema version 2 and harness_sandbox_leases. Rollback to the prior work release also restores harness_schema.version=1 within the offline rollback transaction; retain the new table and migration marker for review. Never run old and new capacity writers together.

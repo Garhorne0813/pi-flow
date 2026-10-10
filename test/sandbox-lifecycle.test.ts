@@ -417,7 +417,7 @@ test("lifecycle API hides other tenants, rejects viewers and arbitrary snapshot 
   }
 });
 
-test("Cube snapshot restore supplies explicit mounts, and pause/kill never auto-resume", async (t) => {
+test("Cube snapshot restore uses snapshot mounts, and pause/kill never auto-resume", async (t) => {
   let connections = 0;
   t.mock.method(Sandbox, "connect", async () => {
     connections++;
@@ -447,7 +447,7 @@ test("Cube snapshot restore supplies explicit mounts, and pause/kill never auto-
   await p.create("workspace", "default", [], "snapshot-id");
   assert.equal(connections, 0);
   assert.equal(options!.templateId, "snapshot-id");
-  assert.deepEqual(Object.keys(options!.volumeMounts!), ["/workspace"]);
+  assert.equal(options!.volumeMounts, undefined);
   assert.equal(options!.network!.allowPublicTraffic, false);
 });
 

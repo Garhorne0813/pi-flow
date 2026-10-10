@@ -31,3 +31,5 @@ BEGIN
   INSERT INTO harness_migration_flags VALUES('capacity-v2');
  END IF;
 END $$;
+
+UPDATE harness_schema SET version=2 WHERE id=1;

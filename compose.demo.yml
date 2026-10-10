@@ -22,6 +22,13 @@ services:
       DEV_TOKEN: ${DEV_TOKEN:?Set a demo token with at least 16 characters}
       DATABASE_URL: postgres://harness:local-demo-only@postgres:5432/harness
     ports: ["127.0.0.1:8080:8080"]
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/health/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 5s
+      timeout: 2s
+      retries: 3
+      start_period: 10s
+    stop_grace_period: 30s
     depends_on:
       postgres: {condition: service_healthy}
 volumes:
