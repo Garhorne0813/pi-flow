@@ -1,3 +1,4 @@
+import { alerts } from "./alerts.js";
 import Fastify from "fastify";
 import { telemetry, traceContext } from "./telemetry.js";
 import { z } from "zod";
@@ -100,7 +101,11 @@ export function buildAPI(
         return counts;
       }, {}),
     );
-    return { counters: telemetry.snapshot(), sandbox: capacity };
+    return {
+      counters: telemetry.snapshot(),
+      sandbox: capacity,
+      alerts: alerts({}, {}, capacity.unknown ?? 0),
+    };
   });
   app.get("/api/v1/agents", async (req) => {
     const a = actor(req),

@@ -1,3 +1,4 @@
+import { alerts } from "./alerts.js";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { randomBytes } from "node:crypto";
 import { Fault } from "./domain.js";
@@ -34,6 +35,7 @@ export const telemetry = {
     process.stdout.write(JSON.stringify(record) + "\n");
   },
   metrics: new Map<string, number>(),
+  previousSnapshot: {} as Record<string, number>,
   count(name: string, amount = 1) {
     this.metrics.set(name, (this.metrics.get(name) ?? 0) + amount);
   },
@@ -80,12 +82,16 @@ export const telemetry = {
     return Object.fromEntries(this.metrics);
   },
   publish(workerId: string) {
+    const counters = this.snapshot();
+    const activeAlerts = alerts(counters, this.previousSnapshot);
+    this.previousSnapshot = counters;
     this.sink({
       level: "info",
       time: new Date().toISOString(),
       operation: "metrics_snapshot",
       workerId,
-      counters: this.snapshot(),
+      counters,
+      alerts: activeAlerts,
     });
   },
 };
