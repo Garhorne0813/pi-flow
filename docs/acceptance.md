@@ -95,7 +95,7 @@ observed Sandbox durations do not establish an invoice or paid charges.
 ## Database connection fault stage (#18)
 
 Run `node --import tsx scripts/acceptance/database-faults.ts` against a dedicated
- disposable PostgreSQL database. The test role must be able to terminate its
+disposable PostgreSQL database. The test role must be able to terminate its
 own tagged backends and briefly lock harness_schema; do not use production.
 CI retains the commit-bound JSON report alongside existing load/crash reports.
 
