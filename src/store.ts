@@ -125,9 +125,15 @@ export class PostgresStore implements Store {
       this.listening = (async () => {
         const c = await this.pool.connect();
         try {
-          if (this.closed) { c.release(true); return; }
+          if (this.closed) {
+            c.release(true);
+            return;
+          }
           await c.query("LISTEN harness_run_event");
-          if (this.closed) { c.release(true); return; }
+          if (this.closed) {
+            c.release(true);
+            return;
+          }
           this.listener = c;
           c.on("notification", (m) => {
             if (m.payload) this.notifications.emit(m.payload);
