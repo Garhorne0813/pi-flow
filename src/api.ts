@@ -492,6 +492,8 @@ export function buildAPI(
       0,
       (s) => run(s, a, rid).state,
     );
+    if (a.expiresAt !== undefined && Date.now() >= a.expiresAt)
+      throw new Fault(401, "AUTHENTICATION_EXPIRED");
     reply.hijack();
     reply.raw.writeHead(200, {
       "Content-Type": "text/event-stream",
@@ -502,13 +504,39 @@ export function buildAPI(
     });
     let closed = false;
     const disconnected = new AbortController();
-    reply.raw.on("close", () => {
+    let expiryTimer: ReturnType<typeof setTimeout> | undefined;
+    const expired = () =>
+      a.expiresAt !== undefined && Date.now() >= a.expiresAt;
+    const expire = () => {
+      if (closed) return;
       closed = true;
       disconnected.abort();
+      reply.raw.end(
+        'event: stream.error\ndata: {"code":"AUTHENTICATION_EXPIRED"}\n\n',
+      );
+    };
+    const armExpiry = () => {
+      if (a.expiresAt === undefined || closed) return;
+      const remaining = a.expiresAt - Date.now();
+      if (remaining <= 0) return expire();
+      expiryTimer = setTimeout(
+        () => {
+          if (expired()) expire();
+          else armExpiry();
+        },
+        Math.min(remaining, 2147483647),
+      );
+    };
+    reply.raw.on("close", () => {
+      closed = true;
+      clearTimeout(expiryTimer);
+      disconnected.abort();
     });
+    armExpiry();
     let lastBeat = Date.now();
     try {
       while (!closed) {
+        if (expired()) { expire(); break; }
         const batch = await service.store.eventPage(
           a.tenantId,
           rid,
@@ -516,7 +544,12 @@ export function buildAPI(
           100,
           (s) => run(s, a, rid).state,
         );
+        if (expired()) expire();
+        if (closed) break;
         for (const e of batch.events) {
+          // A database read or backpressure wait may cross the JWT deadline.
+          if (expired()) expire();
+          if (closed) break;
           cursor = e.eventId;
           if (
             !reply.raw.write(
@@ -559,6 +592,7 @@ export function buildAPI(
           'event: stream.error\ndata: {"code":"ACCESS_REVOKED_OR_UNAVAILABLE"}\n\n',
         );
     } finally {
+      clearTimeout(expiryTimer);
       reply.raw.end();
     }
   });
