@@ -51,3 +51,6 @@ Pi SDK + 本地 HTTP 网关的合约与失真测试是阶段成果；部署端�
 财务级结算独立由 [#38](https://github.com/Garhorne0813/pi-flow/issues/38) 跟踪，
 需要实际提供商账单导入、幂等匹配、差异/冲销审计和金额核验。本次未实现账单对账，
 该后续任务不作为 #19 预算控制与估算审计的关闭条件，也不据此声称准确供应商结算。
+
+长期请求账本拆表/按账期聚合、Sandbox 区间一次遍历及 Event/Audit 归档独立由
+[#39](https://github.com/Garhorne0813/pi-flow/issues/39) 跟踪；当前未完成该增长治理。

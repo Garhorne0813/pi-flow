@@ -49,3 +49,14 @@ stages retain their value without becoming production sign-off. #19 confirms
 budget enforcement and estimate auditability, not provider invoices. Existing
 microbenchmarks do not demonstrate elimination of tenant/advisory lock
 contention or establish a production SLO.
+
+## 第三轮合并前清单
+
+- [x] #11：专用候选/目标读取，20,001 Run / 100,001 Event 的 idle Worker 索引、返回量和 P95 检查。
+- [x] #12：SSE 满页立即追赶并让步，5,000 条历史 HTTP 中途断线回放。
+- [x] 本地隔离 PG：001–004 升级、重复迁移、失败回滚、当前状态还原；目标部署演练仍待 #18。
+- [x] 整合代码本地完整回归、构建/smoke；远程三项 CI 结果在 PR #34 按提交核对。
+- [ ] main 分支保护：配置已准备，API GET/PUT Forbidden，尚未远程启用。
+- [x] #18 保持开放且为生产发布阻塞项，#14/#35 Open、Reconciler 默认关闭。
+
+长期 Usage/Event/Audit 增长治理另见 #39，不作为本轮已完成内容。

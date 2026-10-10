@@ -6,7 +6,7 @@
 CI 显式设置 REQUIRE_POSTGRES_TESTS，缺失数据库地址将失败，不能隐式跳过。
 
 仓库管理员在 GitHub Settings → Rules → Rulesets 为 main 启用分支规则：
-Require a pull request、Require status checks（quality）、Block force pushes、
+Require a pull request、Require status checks（quality、vendor、postgres-fault-load）、Block force pushes、
 Restrict deletions。首次 workflow 跑完后选择实际检查名称；未配置规则之前，
 workflow 只报告检查结果，不能保证阻止合并。
 
@@ -33,3 +33,18 @@ Reconciler 默认关闭，未确认实例不按超时或列表缺失释放容量
 
 #19 的预算和成本估算不能作为已付账单依据；提供商财务级对账独立跟踪 #38，
 不混入预算控制的验收结论。
+
+## main 分支保护配置
+
+可执行配置见 [main-protection.json](../.github/main-protection.json)，要求 PR、一名审核者、
+新提交撤销旧批准、解决讨论、strict required checks，禁止强推/删除并覆盖管理员。
+三个实际 check 名称为 `quality`、`vendor`、`postgres-fault-load`；Acceptance workflow
+对所有 main/work PR 运行，避免路径过滤让 required check 永久 Pending。
+管理员可执行：
+
+```sh
+gh api --method PUT repos/Garhorne0813/pi-flow/branches/main/protection --input .github/main-protection.json
+```
+
+本轮对 protection API 的 GET/PUT 均返回 Forbidden，因此**尚未启用**。配置文件与绿色
+CI 不代表远程规则已生效，#10 仍须核验仓库设置并通过评审发布 main；本轮未合并。

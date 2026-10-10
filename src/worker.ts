@@ -114,21 +114,11 @@ export class Worker {
       const tenant = tenants[(start + i) % tenants.length]!;
       if (this.stopping || this.active.size >= this.concurrency) break;
       this.lastTenant = tenant;
-      // Idle scans are snapshots; claiming/recovering still rechecks under tx.
-      const pending = await this.service.store.read(tenant, (s) =>
-        Object.values(s.runs).some(
-          (r) =>
-            r.state === "QUEUED" || (r.lease && r.lease.expires < Date.now()),
-        ),
-      );
-      if (!pending) continue;
-      const candidates = await this.service.store.read(tenant, (s) =>
-        Object.values(s.runs)
-          .filter(
-            (r) =>
-              r.state === "QUEUED" || (r.lease && r.lease.expires < Date.now()),
-          )
-          .map((r) => r.id),
+      // One bounded indexed scan. Claims/recovery recheck under the Run lock.
+      const candidates = await this.service.store.listClaimableRuns(
+        tenant,
+        Date.now(),
+        64,
       );
       let r: Run | undefined;
       for (const rid of candidates) {
@@ -272,18 +262,23 @@ export class Worker {
     );
     const emit = (type: string, data: unknown) => batcher.emit(type, data);
     const get = () =>
-      this.service.store.read(tenant, (s) => {
-        const r = this.owned(s, initial.id);
-        const { ses, config } = authorizedRun(s, r);
-        if (!this.service.hasBundle(config.skillBundle, r.actor.tenantId))
-          throw new Fault(403, "BUNDLE_NOT_GRANTED");
-        return {
-          r,
-          ses,
-          config,
-          skills: config.skills.map((k) => s.skills[k]!),
-        };
-      });
+      this.service.store.readRun(
+        tenant,
+        initial.id,
+        (s) => {
+          const r = this.owned(s, initial.id);
+          const { ses, config } = authorizedRun(s, r);
+          if (!this.service.hasBundle(config.skillBundle, r.actor.tenantId))
+            throw new Fault(403, "BUNDLE_NOT_GRANTED");
+          return {
+            r,
+            ses,
+            config,
+            skills: config.skills.map((k) => s.skills[k]!),
+          };
+        },
+        true,
+      );
     const defer = async (kind: "question" | "approval", payload: unknown) => {
       if (initial.parentRunId)
         throw new Fault(409, "SUBAGENT_INTERACTION_UNSUPPORTED");
@@ -440,8 +435,9 @@ export class Worker {
       );
       let prompt = ctx.r.prompt;
       if (initial.resumedFrom) {
-        const i = await this.service.store.read(
+        const i = await this.service.store.readMetadata(
           tenant,
+          ["interactions"],
           (s) => s.interactions[initial.resumedFrom!],
         );
         if (i?.kind === "approval" && i.response === "approve") {

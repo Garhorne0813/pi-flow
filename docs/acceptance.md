@@ -91,3 +91,12 @@ implemented automatic check of GitHub issue state.
 provider-invoice reconciliation is independently tracked in
 [#38](https://github.com/Garhorne0813/pi-flow/issues/38); usage confirmation and
 observed Sandbox durations do not establish an invoice or paid charges.
+
+## 第三轮新增的开发基线检查
+
+新增 `worker-history.ts`（20,001 Run / 100,001 Event，索引/返回量/P95）和
+`sse-history.ts`（5,000 条 Unicode 历史、满终态页、实际中途断连续传），CI 保存 JSON 报告。
+它们补充早期 20 事件负载场景，仍是合成数据，不能替代 #35/#36/#37 及 #18 生产验收。
+隔离 schema 的 001–004 升级/离线回滚回归见 `test/migration-roundtrip.test.ts`；
+目标部署全停、备份/Volume 恢复与签署仍待完成。main protection API 返回 Forbidden，
+可执行规则配置已准备，远程启用仍未完成。开发基线合并审查与生产部署门禁分开记录。

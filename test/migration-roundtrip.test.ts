@@ -1,0 +1,245 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { readFile, readdir } from "node:fs/promises";
+import { PostgresStore } from "../src/store.js";
+import { emptyState, id, event, type Run } from "../src/domain.js";
+const url = process.env.TEST_DATABASE_URL;
+if (process.env.REQUIRE_POSTGRES_TESTS === "true" && !url)
+  throw new Error("TEST_DATABASE_URL required");
+async function isolated() {
+  const control = new PostgresStore(url!),
+    schema = "roundtrip_" + id().replaceAll("-", "");
+  await control.pool.query(`CREATE SCHEMA ${schema}`);
+  const scoped = new URL(url!);
+  scoped.searchParams.set("options", `-c search_path=${schema}`);
+  const store = new PostgresStore(scoped.toString());
+  return {
+    store,
+    async close() {
+      await store.close();
+      await control.pool.query(`DROP SCHEMA ${schema} CASCADE`);
+      await control.close();
+    },
+  };
+}
+async function migrate(store: PostgresStore) {
+  const c = await store.pool.connect();
+  try {
+    await c.query("BEGIN");
+    for (const n of (await readdir("migrations"))
+      .filter((n) => n.endsWith(".sql"))
+      .sort())
+      await c.query(await readFile("migrations/" + n, "utf8"));
+    await c.query("COMMIT");
+  } catch (e) {
+    await c.query("ROLLBACK");
+    throw e;
+  } finally {
+    c.release();
+  }
+}
+test(
+  "001–004 upgrade and offline rollback preserve current Runs, checkpoints, event IDs, unknown capacity and generations",
+  { skip: !url },
+  async () => {
+    const f = await isolated();
+    try {
+      await f.store.pool.query(
+        await readFile("migrations/001_initial.sql", "utf8"),
+      );
+      const state = emptyState(),
+        actor = { tenantId: "legacy", userId: "u", admin: true };
+      state.sessions.s = {
+        id: "s",
+        workspaceId: "w",
+        agentVersionId: "a",
+        entries: [{ checkpoint: "before" }],
+        createdAt: new Date().toISOString(),
+      };
+      const r: Run = {
+        id: "r",
+        sessionId: "s",
+        actor,
+        prompt: "preserve",
+        state: "RUNNING",
+        lease: { owner: "old", expires: 10 },
+        createdAt: new Date().toISOString(),
+        requestDigest: "hash",
+        depth: 0,
+        steps: 1,
+      };
+      state.runs.r = r;
+      event(state, r, "run.started");
+      state.sequence = 40;
+      state.audit = [
+        {
+          id: "audit",
+          actorId: "u",
+          timestamp: new Date().toISOString(),
+          action: "old",
+          resource: "r",
+          result: "allowed",
+        },
+      ];
+      state.usage = {
+        requests: {},
+        resources: [{ workspaceId: "w", state: "unknown", at: 1 }],
+      };
+      const entries = Object.fromEntries(
+        ["reserved", "active", "paused", "unknown", "released"].map(
+          (status, i) => [
+            JSON.stringify(["legacy", "w" + i]),
+            {
+              tenantId: "legacy",
+              workspaceId: "w" + i,
+              userId: "u",
+              state: status,
+              operation: "op" + i,
+              sandboxId: "box" + i,
+              updatedAt: 10,
+            },
+          ],
+        ),
+      );
+      await f.store.pool.query(
+        "INSERT INTO harness_tenants(tenant_id,state) VALUES($1,$2)",
+        ["legacy", JSON.stringify(state)],
+      );
+      await f.store.pool.query(
+        "INSERT INTO harness_sandbox_capacity VALUES(1,$1)",
+        [JSON.stringify({ entries })],
+      );
+      await migrate(f.store);
+      await f.store.ready();
+      assert.deepEqual(await f.store.read("legacy", (s) => s), state);
+      assert.deepEqual(await f.store.capacityRead((s) => s.entries), entries);
+      await migrate(f.store);
+      assert.deepEqual(await f.store.read("legacy", (s) => s), state);
+      await f.store.tx("legacy", (s) => {
+        s.runs.r!.state = "FAILED";
+        s.runs.r!.error = "WORKER_LOST_UNKNOWN_TOOL_OUTCOME";
+        delete s.runs.r!.lease;
+        s.sessions.s!.entries = [{ checkpoint: "after" }];
+        event(s, s.runs.r!, "run.failed", { unknown: true });
+      });
+      await f.store.capacityTx((s) => {
+        const e = s.entries[JSON.stringify(["legacy", "w0"])]!;
+        e.operation = "new-generation";
+        e.state = "unknown";
+        e.sandboxId = "new-box";
+        e.updatedAt = 20;
+      });
+      const current = await f.store.read("legacy", (s) => s),
+        capacity = await f.store.capacityRead((s) => s);
+      assert.deepEqual(
+        current.events.map((e) => e.eventId),
+        [1, 41],
+      );
+      await f.store.pool.query(
+        await readFile("scripts/rollback-normalized.sql", "utf8"),
+      );
+      const restored = (
+        await f.store.pool.query(
+          "SELECT state FROM harness_tenants WHERE tenant_id='legacy'",
+        )
+      ).rows[0].state;
+      assert.deepEqual(
+        restored,
+        current,
+        "rollback uses current normalized data, not migration-time JSON",
+      );
+      assert.deepEqual(
+        (
+          await f.store.pool.query(
+            "SELECT state FROM harness_sandbox_capacity WHERE id=1",
+          )
+        ).rows[0].state,
+        capacity,
+      );
+      await assert.rejects(f.store.ready(), /SCHEMA_MISMATCH/);
+      assert.equal(
+        (
+          await f.store.pool.query(
+            "SELECT version FROM harness_schema WHERE id=1",
+          )
+        ).rows[0].version,
+        1,
+      );
+      // Prevent a repeated upgrade from silently using retained stale normalized tables.
+      await assert.rejects(migrate(f.store), /Legacy aggregates detected/);
+      assert.deepEqual(
+        (
+          await f.store.pool.query(
+            "SELECT state FROM harness_tenants WHERE tenant_id='legacy'",
+          )
+        ).rows[0].state,
+        restored,
+      );
+      assert.equal(
+        (
+          await f.store.pool.query(
+            "SELECT version FROM harness_schema WHERE id=1",
+          )
+        ).rows[0].version,
+        1,
+      );
+    } finally {
+      await f.close();
+    }
+  },
+);
+test(
+  "001–004 migration failure rolls back all partial tables, flags and legacy JSON changes",
+  { skip: !url },
+  async () => {
+    const f = await isolated();
+    try {
+      await f.store.pool.query(
+        await readFile("migrations/001_initial.sql", "utf8"),
+      );
+      const state = emptyState();
+      state.runs.broken = {
+        id: "broken",
+        sessionId: "missing",
+        actor: { tenantId: "broken", userId: "u", admin: false },
+        state: "QUEUED",
+        prompt: "bad",
+        createdAt: new Date().toISOString(),
+        requestDigest: "bad",
+        depth: 0,
+        steps: 0,
+      };
+      await f.store.pool.query(
+        "INSERT INTO harness_tenants(tenant_id,state) VALUES($1,$2)",
+        ["broken", JSON.stringify(state)],
+      );
+      await assert.rejects(migrate(f.store), /foreign key/);
+      assert.deepEqual(
+        (
+          await f.store.pool.query(
+            "SELECT state FROM harness_tenants WHERE tenant_id='broken'",
+          )
+        ).rows[0].state,
+        state,
+      );
+      assert.deepEqual(
+        (
+          await f.store.pool.query(
+            "SELECT to_regclass('harness_runs') AS runs,to_regclass('harness_sandbox_leases') AS leases,to_regclass('harness_migration_flags') AS flags",
+          )
+        ).rows[0],
+        { runs: null, leases: null, flags: null },
+      );
+      assert.equal(
+        (
+          await f.store.pool.query(
+            "SELECT version FROM harness_schema WHERE id=1",
+          )
+        ).rows[0].version,
+        1,
+      );
+    } finally {
+      await f.close();
+    }
+  },
+);

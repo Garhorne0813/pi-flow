@@ -31,3 +31,17 @@ socket drain/close，不发无界数据。JWT 到期处理由独立 #16 修复�
 已归一化或开销恒定；#11 普通跨实体事务的租户锁仍存在。生产负载证据独立由
 [#18](https://github.com/Garhorne0813/pi-flow/issues/18) 和
 [真实网关 #37](https://github.com/Garhorne0813/pi-flow/issues/37) 跟踪。
+
+## 第三轮：大历史 HTTP 回放
+
+SSE 满 100 条时立即读取下一页，在页间用 setImmediate 让出事件循环；逐条 write 的
+背压/drain、断连和 JWT 到期检查继续生效。只有不足一页且非终态时才等待通知/250ms
+轮询；终态满页会再查询一次确认已追赶完成。每页同一 MVCC 快照只返回相关 Workspace
+成员/deleting、Run 身份/Session/state 与最多 100 个事件，不返回审计、用量或 Agent 配置。
+
+复现：`TEST_DATABASE_URL=... node --import tsx scripts/acceptance/sse-history.ts`。
+真实 HTTP + PG、5,000 条含 Unicode 的合成历史事件、终态恰好满页；客户端消费到
+第 1,237 条后实际取消连接，以 Last-Event-ID 重连，核对全部 ID/内容无遗漏、无重复。
+另验证已到末尾的重连为空、满页历史不调用 waitForEvents、回放时健康请求可处理。
+一次本地运行含数据准备约 1.25 秒，等待次数 0；这是正确性/分页等待验证，不是生产 SLO。
+长期 Event/Audit 归档与 JSONB/用量增长独立由 [#39](https://github.com/Garhorne0813/pi-flow/issues/39) 跟踪。
