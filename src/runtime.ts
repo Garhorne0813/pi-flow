@@ -113,7 +113,10 @@ export class PiRuntime implements Runtime {
       process.env.LLM_MODEL_ID
     ) {
       const url = new URL(process.env.LLM_BASE_URL);
-      if (url.protocol !== "https:")
+      if (
+        url.protocol !== "https:" &&
+        !(url.protocol === "http:" && process.env.LLM_ALLOW_HTTP === "true")
+      )
         throw new Error("LLM gateway requires HTTPS");
       const builtin = runtime.getModel(
         process.env.LLM_PROVIDER,

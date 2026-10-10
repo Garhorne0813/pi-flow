@@ -55,9 +55,11 @@ node --env-file=.env dist/worker-main.js
 
 API 和 Worker 必须使用同一数据库、模型批准列表、Skills Bundle 映射和 MCP Endpoint 配置。生产模式还必须配置 `TENANT_CAPABILITIES_JSON`，明确每个租户可用的 Bundle / Endpoint 引用；不同租户的机密技能和服务凭证应配置为不同引用。生产模式缺少关键配置时直接拒绝启动，不会退回 Demo。UCS 令牌需包含 `sub`、`tenant_id`、`exp`；管理员 `roles` 包含 `harness-admin`。Ticket 协议尚未实现，可替换 `Auth` 适配函数。
 
+封闭联调环境没有 UCS 时，可显式设置至少 16 字符的 `DEV_TOKEN`，并用 `DEV_TENANT_ID` / `DEV_USER_ID` 指定固定身份。固定 Token 始终授予管理员权限，启动时会写入 `auth_fixed_token_enabled` 告警；只用于可信隔离环境，对外开放前应移除并配置 UCS OIDC。模型网关默认必须使用 HTTPS；没有 TLS 的隔离内网可显式设置 `LLM_ALLOW_HTTP=true`，上线前应改用 HTTPS。
+
 LLM Gateway 当前采用 OpenAI Chat Completions 兼容协议，部署配置中的 `LLM_PROVIDER` / `LLM_MODEL_ID` 构成模型白名单；模型单次输出上限 4096。模型请求派发前使用共享账本预留额度并设置输出上限，可信 usage 返回后按服务端价格快照核算。验收范围是可执行预算控制与可审计成本估算；输入估算和最终供应商账单仍可能不同，不能保证单次绝不超支。详见 [用量与预算口径](docs/usage-budgets.md)。
 
-Cube Template 必须预装 Python 3 / Bash，存在无 sudo 的执行用户，对其授予 Workspace 写权限；模板不得预置共享技能或额外技能挂载，`/skills` 应为空。持久 Volume 后端、非特权配置、磁盘/CPU/内存和网络出口限制由 Cube 集群配置。Harness 不向 Sandbox 注入 UCS、模型或 MCP 凭证。Skills 发布者负责不可变 Volume；每次远程工具执行前校验已挂载 SKILL.md 的规范路径和 SHA-256；read/grep 返回 manifest 内容前再次校验，路径别名使用同一策略。Skill Volume 必须保持不可变，bash 的执行前校验不能替代存储不可变性。
+Cube Template 必须预装 Python 3 / Bash，执行用户不得属于 root 组或可无密码 sudo，并且需要 Workspace 写权限；模板不得预置共享技能或额外技能挂载，`/skills` 应为空。持久 Volume 后端、非特权配置、磁盘/CPU/内存和网络出口限制由 Cube 集群配置。`allowPublicTraffic=false` 限制入站数据面访问，不代表出口受限；需要由集群强制出口策略，并在目标环境验证。一次真实集群联调发现公网出口仍可达，相关模板策略需要修复并复测。Harness 不向 Sandbox 注入 UCS、模型或 MCP 凭证。Skills 发布者负责不可变 Volume；每次远程工具执行前校验已挂载 SKILL.md 的规范路径和 SHA-256；read/grep 返回 manifest 内容前再次校验，路径别名使用同一策略。Skill Volume 必须保持不可变，bash 的执行前校验不能替代存储不可变性。
 
 每个技能版本使用独立 Volume，其根目录只包含该技能的 `SKILL.md`、脚本和资源。部署 `SKILL_VOLUMES_JSON` 将 skill ID 绑定到 Bundle、完整 SKILL.md 路径和 Volume；例如 `{"review@v1":{"bundle":"default","path":"/skills/review/v1/SKILL.md","volume":"skill-review-v1"}}`。Agent 配置 `skills:["review@v1"]` 后，Sandbox 仅在 `/skills/review/v1` 只读挂载该 Volume，不挂载整个 Bundle。`skills:[]` 不挂载任何技能；缺少或不匹配的映射会拒绝创建，禁止回退到共享 Bundle Volume。`SKILL_BUNDLES_JSON` 保留为租户权限分组，其值不再作为挂载源。旧部署需要把 Bundle 文件拆成每技能 Volume 并配置新映射。
 
@@ -69,7 +71,7 @@ Cube Node SDK 的 npm 包在开发时返回 404，已从官方固定 commit 构�
 
 ## 验证
 
-PR 自动执行 Node 24 质量门禁和真实 PostgreSQL 测试；开发、发布、分支保护与回滚步骤见 [docs/release.md](docs/release.md)。
+PR 自动执行 Node 24 质量门禁和真实 PostgreSQL 测试；开发、发布、分支保护与回滚步骤见 [docs/release.md](docs/release.md)。真实 Cube 联调记录及尚需部署侧处理的模板、存储和网络问题见 [docs/local-deployment.md](docs/local-deployment.md)。
 
 ```bash
 npm run check
@@ -111,15 +113,23 @@ SSE 在连接 JWT 的 exp 到期时关闭，并返回无 event ID 的 `stream.er
 
 配置项：`SANDBOX_MAX_ACTIVE_PER_USER`、`SANDBOX_MAX_ACTIVE_TOTAL`、`SANDBOX_IDLE_PAUSE_SECONDS`、`SANDBOX_IDLE_RELEASE_SECONDS`、`SANDBOX_SWEEP_INTERVAL_SECONDS`、`SANDBOX_MAX_SNAPSHOTS_PER_WORKSPACE`（默认 20）。均为正整数；释放阈值不能小于暂停阈值。变更已有部署前，先停止全部旧 API/Worker、备份，再执行 `npm run migrate` 应用 001–004 并统一升级。当前容量记录位于 `harness_sandbox_leases`，旧 `harness_sandbox_capacity` 仅保留迁移审核；禁止新旧 JSONB/关系表写入者混跑。启动时登记旧实例，已存在的超额实例不强制销毁，但停止新增/恢复，直到有容量。
 
-REST 提供容量/状态查询、暂停/恢复/释放，以及快照创建/列表/删除/恢复/克隆。快照管理要求 Workspace editor/owner，并拒绝有未结束 Run 的工作区；viewer 可查看自身可访问工作区的状态和快照目录。恢复按快照创建时的技能范围检查当前注册状态与部署映射，在销毁旧实例后通过快照模板创建新实例，显式覆盖技能/Workspace 挂载和网络限制。技能撤销或映射变更时拒绝恢复；禁止任意传入外部 Snapshot ID。克隆创建当前用户拥有的新 Workspace，使用独立的新 Volume，也受配额限制。
+REST 提供容量/状态查询、暂停/恢复/释放，以及快照创建/列表/删除/恢复/克隆。快照管理要求 Workspace editor/owner，并拒绝有未结束 Run 的工作区；viewer 可查看自身可访问工作区的状态和快照目录。恢复按快照创建时的技能范围检查当前注册状态与部署映射，在销毁旧实例后通过快照模板创建新实例，并使用快照里记录的 Volume 挂载和 Harness 的网络设置。技能撤销或映射变更时拒绝恢复；禁止任意传入外部 Snapshot ID。Demo 克隆创建当前用户拥有的新 Workspace，使用独立的新 Volume，也受配额限制。Cube 快照继承原卷挂载，当前拒绝跨 Workspace 克隆（`SNAPSHOT_CLONE_UNSUPPORTED`），直到后端支持安全的卷重新绑定。
 
-实例快照的实际内存/文件系统语义取决于 Cube 后端，Harness 不把它当作持久 Volume 的备份：恢复保留当前 `/workspace` 文件，不回滚这些文件、数据库或对话历史；克隆得到独立的空 Workspace Volume，不复制原 Workspace 文件。生产数据备份需另行配置 Volume 存储后端的备份方案。Demo 快照模拟元数据与生命周期，不能替代真实 Cube 快照验收。
+实例快照的实际内存/文件系统语义取决于 Cube 后端，Harness 不把它当作持久 Volume 的备份：恢复保留当前 `/workspace` 文件，不回滚这些文件、数据库或对话历史；Demo 克隆得到独立的空 Workspace Volume，不复制原 Workspace 文件。生产数据备份需另行配置 Volume 存储后端的备份方案。Demo 快照模拟元数据与生命周期，不能替代真实 Cube 快照验收。
 
 远程创建/销毁结果不确定时保留容量预留，不按计时盲目释放，也不自动重试创建。管理员可在容量查询中看到本租户的 reserved/unknown 条目；已有明确 Sandbox ID 时可通过释放接口确认 Kill 后回收配额。创建请求丢失且没有 ID、或进程在记录 ID 前崩溃时，需要按 Cube metadata 与数据库做运维对账；完整自动孤儿对账仍未实现。已释放记录保留不计数的标记，避免并发启动时把已清理的旧实例再次登记。
 
 ## 真实 DeepSeek 测试
 
 支持 Pi 内置 `deepseek` provider / `deepseek-flash`；使用其原生 Endpoint 时保留 Pi 的 reasoning / compatibility 配置，不重新登记为通用模型。
+
+同一 live 测试也支持 OpenAI 兼容网关。通过 `SMOKE_PROVIDER`、`SMOKE_MODEL`、`SMOKE_BASE_URL` 选择网关和模型，密钥可用 `SMOKE_API_KEY` 提供；若 `LLM_PROVIDER` 与 `SMOKE_PROVIDER` 相同，也可复用 `LLM_API_KEY`。纯 HTTP 内网网关还需显式设置 `LLM_ALLOW_HTTP=true`。
+
+```bash
+npm run build
+SMOKE_PROVIDER=glm SMOKE_MODEL=glm-5.3-flash SMOKE_BASE_URL=http://<gateway>/v1 \
+LLM_ALLOW_HTTP=true node --env-file=.env scripts/smoke-deepseek.mjs
+```
 
 ```bash
 npm run build
