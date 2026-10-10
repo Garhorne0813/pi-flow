@@ -24,6 +24,11 @@ const app = buildAPI(
   new SandboxManager(store, new DemoSandbox()),
 );
 const held: pg.PoolClient[] = [];
+let base = "";
+const probe = async (url: string) => ({
+  statusCode: (await fetch(base + url, { signal: AbortSignal.timeout(3000) }))
+    .status,
+});
 let locked = false;
 const report: Record<string, unknown> = {
   tier: "synthetic-state-real-postgres-http",
@@ -31,7 +36,7 @@ const report: Record<string, unknown> = {
 };
 async function readyWithinDeadline(expected: number) {
   const start = performance.now();
-  const r = await app.inject({ url: "/health/ready" });
+  const r = await probe("/health/ready");
   const ms = performance.now() - start;
   assert.equal(r.statusCode, expected);
   assert.ok(ms < 2500, `readiness took ${ms}ms`);
@@ -46,7 +51,7 @@ async function until(fn: () => Promise<boolean>) {
 }
 try {
   await control.connect();
-  await app.ready();
+  base = await app.listen({ host: "127.0.0.1", port: 0 });
   await readyWithinDeadline(200);
 
   // Saturate the application's pool without consuming its independent probe pool.
@@ -61,7 +66,7 @@ try {
   await until(async () => store.pool.waitingCount === 1);
   assert.equal(finished, false);
   report.poolSaturationReadyMs = await readyWithinDeadline(200);
-  assert.equal((await app.inject({ url: "/health/live" })).statusCode, 200);
+  assert.equal((await probe("/health/live")).statusCode, 200);
   held.pop()!.release();
   assert.equal(await queued, "QUEUED");
   while (held.length) held.pop()!.release();
@@ -73,12 +78,10 @@ try {
   await control.query("SET LOCAL lock_timeout = '2s'");
   await control.query("LOCK TABLE harness_schema IN ACCESS EXCLUSIVE MODE");
   report.blockedReadyMs = await readyWithinDeadline(503);
-  assert.equal((await app.inject({ url: "/health/live" })).statusCode, 200);
+  assert.equal((await probe("/health/live")).statusCode, 200);
   await control.query("ROLLBACK");
   locked = false;
-  await until(
-    async () => (await app.inject({ url: "/health/ready" })).statusCode === 200,
-  );
+  await until(async () => (await probe("/health/ready")).statusCode === 200);
   report.readinessRecovered = true;
 
   // Kill only a tagged transaction backend after loading state, before commit.
@@ -121,9 +124,7 @@ try {
   for (const { pid } of idle.rows)
     await control.query("SELECT pg_terminate_backend($1)", [pid]);
   await new Promise((resolve) => setTimeout(resolve, 50));
-  await until(
-    async () => (await app.inject({ url: "/health/ready" })).statusCode === 200,
-  );
+  await until(async () => (await probe("/health/ready")).statusCode === 200);
   const waiting = store.waitForEvents(f.actor.tenantId, f.run.id, 2000);
   let listener: number | undefined;
   await until(async () => {
@@ -136,6 +137,15 @@ try {
   });
   await control.query("SELECT pg_terminate_backend($1)", [listener]);
   await waiting;
+  const wakeStart = performance.now();
+  const recoveredWait = store.waitForEvents(f.actor.tenantId, f.run.id, 2000);
+  await until(async () => {
+    const r = await control.query(
+      "SELECT pid FROM pg_stat_activity WHERE application_name=$1 AND query='LISTEN harness_run_event'",
+      [tag],
+    );
+    return r.rows.some((row) => row.pid !== listener);
+  });
   const expected = await store.runTx(f.actor.tenantId, f.run.id, (s) => {
     event(s, s.runs[f.run.id]!, "message.delta", {
       delta: "durable after disconnect",
@@ -155,7 +165,11 @@ try {
     new Set(page.events.map((e) => e.eventId)).size,
     page.events.length,
   );
-  await store.waitForEvents(f.actor.tenantId, f.run.id, 100);
+  await recoveredWait;
+  assert.ok(
+    performance.now() - wakeStart < 1500,
+    "notification must wake recovered listener before fallback",
+  );
   report.listenerReconnected = true;
   report.durableReplayAfterNotificationLoss = true;
   report.status = "passed";
