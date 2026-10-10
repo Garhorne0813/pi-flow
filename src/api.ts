@@ -479,7 +479,13 @@ export function buildAPI(
         .int()
         .min(0)
         .parse(req.headers["last-event-id"] ?? 0);
-    await service.store.read(a.tenantId, (s) => run(s, a, rid));
+    await service.store.eventPage(
+      a.tenantId,
+      rid,
+      cursor,
+      0,
+      (s) => run(s, a, rid).state,
+    );
     reply.hijack();
     reply.raw.writeHead(200, {
       "Content-Type": "text/event-stream",
@@ -489,21 +495,21 @@ export function buildAPI(
       "X-Request-ID": req.id,
     });
     let closed = false;
+    const disconnected = new AbortController();
     reply.raw.on("close", () => {
       closed = true;
+      disconnected.abort();
     });
     let lastBeat = Date.now();
     try {
       while (!closed) {
-        const batch = await service.store.read(a.tenantId, (s) => {
-          const r = run(s, a, rid);
-          return {
-            state: r.state,
-            events: s.events
-              .filter((e) => e.runId === rid && e.eventId > cursor)
-              .slice(0, 100),
-          };
-        });
+        const batch = await service.store.eventPage(
+          a.tenantId,
+          rid,
+          cursor,
+          100,
+          (s) => run(s, a, rid).state,
+        );
         for (const e of batch.events) {
           cursor = e.eventId;
           if (
@@ -534,7 +540,12 @@ export function buildAPI(
           reply.raw.write(": heartbeat\n\n");
           lastBeat = Date.now();
         }
-        await new Promise((r) => setTimeout(r, 250));
+        await service.store.waitForEvents(
+          a.tenantId,
+          rid,
+          250,
+          disconnected.signal,
+        );
       }
     } catch {
       if (!closed)

@@ -9,10 +9,11 @@ export async function loadState(
   tenant: string,
   lock = false,
   runId?: string,
+  targetLock = true,
 ): Promise<State> {
   const row = await c.query(
     "SELECT state FROM harness_tenants WHERE tenant_id=$1" +
-      (lock ? " FOR UPDATE" : runId ? " FOR SHARE" : ""),
+      (lock ? " FOR UPDATE" : runId && targetLock ? " FOR SHARE" : ""),
     [tenant],
   );
   const s = { ...emptyState(), ...row.rows[0]?.state } as State;
@@ -24,7 +25,7 @@ export async function loadState(
   const runs = await c.query(
     "SELECT data FROM harness_runs WHERE tenant_id=$1" +
       (runId
-        ? " AND run_id=$2 FOR UPDATE"
+        ? " AND run_id=$2" + (targetLock ? " FOR UPDATE" : "")
         : lock
           ? " ORDER BY run_id FOR UPDATE"
           : ""),
@@ -46,7 +47,6 @@ export async function loadState(
     for (const row of parents.rows)
       if (row.data.id !== runId) s.runs[row.data.id] = row.data;
   }
-
   s.events = runId
     ? []
     : (
@@ -103,6 +103,10 @@ export async function saveEvents(
     );
   }
   after.sequence = Math.max(after.sequence, cursor);
+  for (const runId of new Set(newEvents.map((e) => e.runId)))
+    await c.query("SELECT pg_notify('harness_run_event',$1)", [
+      JSON.stringify([tenant, runId]),
+    ]);
 }
 export async function saveState(
   c: pg.PoolClient,
