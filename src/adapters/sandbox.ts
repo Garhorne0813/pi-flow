@@ -1,15 +1,5 @@
 import { posix } from "node:path";
 import {
-  Sandbox,
-  Volume,
-  VolumeMount,
-  Config,
-  SandboxNotFoundError,
-  VolumeNotFoundError,
-  ApiError,
-} from "@cubesandbox/sdk";
-import { createHash } from "node:crypto";
-import {
   Fault,
   workspace,
   audit,
@@ -24,273 +14,16 @@ import {
   SandboxPolicySchema,
   type SandboxPolicy,
 } from "./sandbox-policy.js";
-import {
-  skillMountPath,
-  skillScope,
-  type SkillVolume,
-} from "./skill-mounts.js";
 import type { Store } from "../store.js";
-import { remoteScript } from "./remote-script.js";
-export interface SandboxProvider {
-  scope(bundle: string, skills: readonly Skill[]): string;
-  createVolume(name: string): Promise<string>;
-  create(
-    volume: string,
-    bundle: string,
-    skills: readonly Skill[],
-    snapshotId?: string,
-    operation?: string,
-  ): Promise<string>;
-  connect(sandboxId: string): Promise<void>;
-  execute(
-    sandboxId: string,
-    op: string,
-    args: Record<string, unknown>,
-  ): Promise<unknown>;
-  kill(sandboxId: string): Promise<void>;
-  pause(sandboxId: string): Promise<void>;
-  snapshot(sandboxId: string, name?: string): Promise<string>;
-  deleteSnapshot(snapshotId: string): Promise<void>;
-  destroyVolume(volumeId: string): Promise<void>;
-}
-export class CubeProvider implements SandboxProvider {
-  private config = new Config();
-  constructor(
-    private skillVolumes: Record<string, SkillVolume>,
-    private user: string,
-    private driver: string,
-  ) {
-    if (/^(root(?::|$)|0(?::|$))/.test(user) || !user)
-      throw new Error("Cube execution user must be non-root");
-    const volumes = Object.values(skillVolumes).map((s) => s.volume);
-    if (new Set(volumes).size !== volumes.length)
-      throw new Error("Each skill version requires a separate volume");
-  }
-  async createVolume(name: string) {
-    try {
-      return (await Volume.connect(name, { config: this.config })).volumeId;
-    } catch (e) {
-      if (!(e instanceof VolumeNotFoundError)) throw e;
-    }
-    try {
-      return (
-        await Volume.create({ name, driver: this.driver, config: this.config })
-      ).volumeId;
-    } catch (e) {
-      if (e instanceof ApiError && e.statusCode === 409)
-        return (await Volume.connect(name, { config: this.config })).volumeId;
-      throw e;
-    }
-  }
-  scope(bundle: string, skills: readonly Skill[]) {
-    const metadata = skillScope(bundle, skills);
-    const volumes = [...skills]
-      .sort((a, b) => a.id.localeCompare(b.id))
-      .map((skill) => {
-        const published = Object.hasOwn(this.skillVolumes, skill.id)
-          ? this.skillVolumes[skill.id]
-          : undefined;
-        if (
-          !published ||
-          published.bundle !== bundle ||
-          published.path !== skill.path
-        )
-          throw new Fault(403, "SKILL_VOLUME_NOT_REGISTERED");
-        return { id: skill.id, volume: published.volume };
-      });
-    return createHash("sha256")
-      .update(JSON.stringify({ metadata, volumes }))
-      .digest("hex");
-  }
-  async create(
-    volume: string,
-    bundle: string,
-    skills: readonly Skill[],
-    snapshotId?: string,
-    operation?: string,
-  ) {
-    const scope = this.scope(bundle, skills);
-    const selected = skills.map((skill) => ({
-      skill,
-      published: this.skillVolumes[skill.id]!,
-    }));
-    const w = await Volume.connect(volume, { config: this.config });
-    const volumeMounts: Record<string, Volume | VolumeMount> = {
-      "/workspace": w,
-    };
-    const mounted = new Set([w.volumeId]);
-    for (const { skill, published } of selected) {
-      const v = await Volume.connect(published.volume, { config: this.config });
-      if (mounted.has(v.volumeId))
-        throw new Fault(403, "SKILL_VOLUME_CONFLICT");
-      mounted.add(v.volumeId);
-      volumeMounts[skillMountPath(skill)] = new VolumeMount(v, {
-        readOnly: true,
-      });
-    }
-    const sb = await Sandbox.create({
-      config: this.config,
-      ...(snapshotId ? { templateId: snapshotId } : {}),
-      volumeMounts,
-      network: { allowPublicTraffic: false },
-      metadata: {
-        harnessWorkspaceVolume: volume,
-        harnessSkillBundle: bundle,
-        harnessSkillScope: scope,
-        ...(operation ? { harnessOperation: operation } : {}),
-      },
-    });
-    return sb.sandboxId;
-  }
-  async connect(sid: string) {
-    try {
-      await Sandbox.connect(sid, { config: this.config });
-    } catch (e) {
-      if (e instanceof SandboxNotFoundError)
-        throw new Fault(410, "SANDBOX_GONE");
-      throw e;
-    }
-  }
-  async execute(sid: string, op: string, args: Record<string, unknown>) {
-    const sb = await Sandbox.connect(sid, { config: this.config });
-    const script = Buffer.from(remoteScript).toString("base64");
-    const params = Buffer.from(JSON.stringify({ op, args })).toString("base64");
-    const cmd = `python3 -c "import base64;exec(base64.b64decode('${script}'))" '${params}'`;
-    const result = await sb.commands.run(cmd, {
-      user: this.user,
-      cwd: "/workspace",
-      timeoutMs: 130000,
-    });
-    if (result.exitCode !== 0) {
-      for (const code of [
-        "SKILL_DIGEST_MISMATCH",
-        "SKILL_IDENTITY_UNCONFIRMED",
-      ])
-        if (result.stderr.includes(code)) throw new Fault(409, code);
-      throw new Fault(502, "REMOTE_TOOL_FAILED");
-    }
-    try {
-      return JSON.parse(result.stdout);
-    } catch {
-      throw new Fault(502, "INVALID_SANDBOX_RESULT");
-    }
-  }
-  async kill(sid: string) {
-    try {
-      // Control-plane deletion must not auto-resume a paused instance.
-      const s = new Sandbox({ sandboxID: sid }, this.config);
-      await s.kill();
-    } catch (e) {
-      if (
-        !(e instanceof SandboxNotFoundError) &&
-        !(e instanceof ApiError && e.statusCode === 404)
-      )
-        throw e;
-    }
-  }
-  async pause(sid: string) {
-    const s = new Sandbox({ sandboxID: sid }, this.config);
-    await s.pause({ wait: true });
-  }
-  async snapshot(sid: string, name?: string) {
-    return (
-      await new Sandbox({ sandboxID: sid }, this.config).createSnapshot(name)
-    ).snapshotId;
-  }
-  async deleteSnapshot(id: string) {
-    try {
-      await Sandbox.deleteSnapshot(id, { config: this.config });
-    } catch (e) {
-      if (!(e instanceof ApiError && e.statusCode === 404)) throw e;
-    }
-  }
-  async destroyVolume(vid: string) {
-    await Volume.destroy(vid, { config: this.config });
-  }
-}
-// Test/demo adapter stores files in memory and never executes a local command.
-export class DemoSandbox implements SandboxProvider {
-  volumes = new Map<string, Map<string, string>>();
-  boxes = new Map<string, string>();
-  skillSelections = new Map<string, readonly Skill[]>();
-  paused = new Set<string>();
-  snapshots = new Map<string, { skills: readonly Skill[] }>();
-  scope(bundle: string, skills: readonly Skill[]) {
-    return skillScope(bundle, skills);
-  }
-  async createVolume(name: string) {
-    if (!this.volumes.has(name)) this.volumes.set(name, new Map());
-    return name;
-  }
-  async create(
-    v: string,
-    b: string,
-    skills: readonly Skill[] = [],
-    snapshotId?: string,
-  ) {
-    if (snapshotId && !this.snapshots.has(snapshotId))
-      throw new Fault(404, "SNAPSHOT_NOT_FOUND");
-    skillScope(b, skills);
-    if (!this.volumes.has(v)) this.volumes.set(v, new Map());
-    const sid = crypto.randomUUID();
-    this.boxes.set(sid, v);
-    this.skillSelections.set(sid, structuredClone(skills));
-    return sid;
-  }
-  async connect(s: string) {
-    if (!this.boxes.has(s)) throw new Fault(410, "SANDBOX_GONE");
-    this.paused.delete(s);
-  }
-  async execute(s: string, op: string, a: Record<string, unknown>) {
-    await this.connect(s);
-    const files = this.volumes.get(this.boxes.get(s)!)!;
-    const raw = String(a.path ?? "/workspace");
-    const p = raw.startsWith("/") ? raw : "/workspace/" + raw;
-    if (!p.startsWith("/workspace/") && p !== "/workspace")
-      throw new Fault(403, "PATH_DENIED");
-    if (p.split("/").includes("..")) throw new Fault(403, "PATH_DENIED");
-    if (op === "write") {
-      files.set(p, String(a.content));
-      return { written: true };
-    }
-    if (op === "read") {
-      if (!files.has(p)) throw new Fault(404, "FILE_NOT_FOUND");
-      const text = files.get(p)!;
-      return Array.isArray(a._skillManifests) && a._skillManifests.length
-        ? {
-            path: p,
-            text,
-            sha256: createHash("sha256").update(text).digest("hex"),
-          }
-        : { text };
-    }
-    if (op === "ls" || op === "find") return { entries: [...files.keys()] };
-    throw new Fault(501, "DEMO_TOOL_UNSUPPORTED");
-  }
-  async kill(s: string) {
-    this.boxes.delete(s);
-    this.skillSelections.delete(s);
-    this.paused.delete(s);
-  }
-  async pause(s: string) {
-    if (!this.boxes.has(s)) throw new Fault(410, "SANDBOX_GONE");
-    this.paused.add(s);
-  }
-  async snapshot(s: string, _name?: string) {
-    await this.connect(s);
-    const id = crypto.randomUUID();
-    this.snapshots.set(id, {
-      skills: structuredClone(this.skillSelections.get(s)!),
-    });
-    return id;
-  }
-  async deleteSnapshot(id: string) {
-    this.snapshots.delete(id);
-  }
-  async destroyVolume(v: string) {
-    this.volumes.delete(v);
-  }
-}
+import type { SandboxProvider } from "../sandbox/provider.js";
+import { remote } from "../sandbox/remote.js";
+import {
+  assertLifecycleAvailable,
+  assertLease,
+} from "../sandbox/lease-manager.js";
+export type { SandboxProvider } from "../sandbox/provider.js";
+export { CubeProvider } from "../sandbox/cube-provider.js";
+export { DemoSandbox } from "../sandbox/demo-provider.js";
 export class SandboxManager {
   readonly policy: SandboxPolicy;
   readonly capacity: SandboxCapacity;
@@ -340,55 +73,8 @@ export class SandboxManager {
     signal?: AbortSignal,
     late?: (value: T) => Promise<void>,
     timeout = this.limits.remoteTimeoutMs,
-  ): Promise<T> {
-    return new Promise((resolve, reject) => {
-      let settled = false;
-      let abandoned = false;
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      const clean = () => {
-        clearTimeout(timer);
-        signal?.removeEventListener("abort", abort);
-      };
-      const stop = (error: unknown) => {
-        if (settled) return;
-        settled = abandoned = true;
-        clean();
-        reject(error);
-      };
-      const abort = () => stop(signal?.reason);
-      if (signal?.aborted) {
-        reject(signal.reason);
-        return;
-      }
-      signal?.addEventListener("abort", abort, { once: true });
-      timer = setTimeout(
-        () => stop(new Fault(504, "SANDBOX_REMOTE_TIMEOUT")),
-        timeout,
-      );
-      Promise.resolve()
-        .then(() => {
-          signal?.throwIfAborted();
-          return start();
-        })
-        .then(
-          (value) => {
-            if (abandoned) {
-              if (late) void late(value).catch(() => {});
-              return;
-            }
-            settled = true;
-            clean();
-            resolve(value);
-          },
-          (error) => {
-            if (!settled) {
-              settled = true;
-              clean();
-              reject(error);
-            }
-          },
-        );
-    });
+  ) {
+    return remote(start, signal, late, timeout);
   }
   private kill(a: Actor, wid: string, owner: string, sid: string) {
     return this.remote(
@@ -579,8 +265,7 @@ export class SandboxManager {
       if (failed) throw new Fault(409, "LEASE_LOST");
       await this.store.read(a.tenantId, (s) => {
         const w = workspace(s, a, wid);
-        if (w.lock?.owner !== owner || w.lock.expires < Date.now())
-          throw new Fault(409, "LEASE_LOST");
+        assertLease(w, owner);
       });
       signal?.throwIfAborted();
     };
@@ -999,26 +684,7 @@ export class SandboxManager {
     const owner = crypto.randomUUID();
     const w = await this.store.tx(a.tenantId, (s) => {
       const w = workspace(s, a, wid, true);
-      if (
-        (w.lock && w.lock.expires > Date.now()) ||
-        (w.fileLock && w.fileLock.expires > Date.now())
-      )
-        throw new Fault(409, "WORKSPACE_BUSY");
-      if (
-        options.cutoff !== undefined &&
-        (w.sandboxLastUsedAt ?? Date.now()) > options.cutoff
-      )
-        throw new Fault(409, "SANDBOX_NOT_IDLE");
-      if (
-        Object.values(s.runs).some(
-          (r) =>
-            s.sessions[r.sessionId]?.workspaceId === wid &&
-            (options.allRuns
-              ? !terminal(r.state)
-              : ["QUEUED", "RUNNING"].includes(r.state)),
-        )
-      )
-        throw new Fault(409, "ACTIVE_RUNS");
+      assertLifecycleAvailable(s, w, options);
       w.lock = { owner, expires: Date.now() + 180000, kind: "lifecycle" };
       return w;
     });
@@ -1071,8 +737,7 @@ export class SandboxManager {
   ) {
     await this.store.tx(a.tenantId, (s) => {
       const w = workspace(s, a, wid);
-      if (w.lock?.owner !== owner || w.lock.expires < Date.now())
-        throw new Fault(409, "LEASE_LOST");
+      assertLease(w, owner);
       fn(w);
     });
   }
