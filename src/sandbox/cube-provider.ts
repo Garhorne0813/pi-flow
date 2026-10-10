@@ -17,6 +17,9 @@ import {
 import { remoteScript } from "../adapters/remote-script.js";
 import type { SandboxProvider } from "./provider.js";
 export class CubeProvider implements SandboxProvider {
+  readonly requiresTrafficToken = true;
+  // Cube snapshot templates inherit their source volume mounts.
+  readonly supportsSnapshotClone = false;
   private config = new Config();
   constructor(
     private skillVolumes: Record<string, SkillVolume>,
@@ -77,24 +80,27 @@ export class CubeProvider implements SandboxProvider {
       skill,
       published: this.skillVolumes[skill.id]!,
     }));
-    const w = await Volume.connect(volume, { config: this.config });
-    const volumeMounts: Record<string, Volume | VolumeMount> = {
-      "/workspace": w,
-    };
-    const mounted = new Set([w.volumeId]);
-    for (const { skill, published } of selected) {
-      const v = await Volume.connect(published.volume, { config: this.config });
-      if (mounted.has(v.volumeId))
-        throw new Fault(403, "SKILL_VOLUME_CONFLICT");
-      mounted.add(v.volumeId);
-      volumeMounts[skillMountPath(skill)] = new VolumeMount(v, {
-        readOnly: true,
-      });
+    // Snapshot templates already include their recorded workspace and skill
+    // mounts. Re-declaring them makes CubeMaster reject the create request.
+    const volumeMounts: Record<string, Volume | VolumeMount> = {};
+    if (!snapshotId) {
+      const w = await Volume.connect(volume, { config: this.config });
+      volumeMounts["/workspace"] = w;
+      const mounted = new Set([w.volumeId]);
+      for (const { skill, published } of selected) {
+        const v = await Volume.connect(published.volume, { config: this.config });
+        if (mounted.has(v.volumeId))
+          throw new Fault(403, "SKILL_VOLUME_CONFLICT");
+        mounted.add(v.volumeId);
+        volumeMounts[skillMountPath(skill)] = new VolumeMount(v, {
+          readOnly: true,
+        });
+      }
     }
     const sb = await Sandbox.create({
       config: this.config,
       ...(snapshotId ? { templateId: snapshotId } : {}),
-      volumeMounts,
+      ...(Object.keys(volumeMounts).length ? { volumeMounts } : {}),
       network: { allowPublicTraffic: false },
       metadata: {
         harnessWorkspaceVolume: volume,
@@ -103,7 +109,10 @@ export class CubeProvider implements SandboxProvider {
         ...(operation ? { harnessOperation: operation } : {}),
       },
     });
-    return sb.sandboxId;
+    return {
+      sandboxId: sb.sandboxId,
+      trafficToken: sb.trafficAccessToken ?? undefined,
+    };
   }
   async connect(sid: string) {
     try {
@@ -114,8 +123,21 @@ export class CubeProvider implements SandboxProvider {
       throw e;
     }
   }
-  async execute(sid: string, op: string, args: Record<string, unknown>) {
-    const sb = await Sandbox.connect(sid, { config: this.config });
+  async execute(
+    sid: string,
+    op: string,
+    args: Record<string, unknown>,
+    trafficToken?: string,
+  ) {
+    const connected = await Sandbox.connect(sid, { config: this.config });
+    // connect preserves keep-alive and auto-resume behavior, but does not
+    // return the create-only token needed by CubeProxy data-plane requests.
+    const sb = trafficToken
+      ? new Sandbox(
+          { sandboxID: sid, trafficAccessToken: trafficToken },
+          this.config,
+        )
+      : connected;
     const script = Buffer.from(remoteScript).toString("base64");
     const params = Buffer.from(JSON.stringify({ op, args })).toString("base64");
     const cmd = `python3 -c "import base64;exec(base64.b64decode('${script}'))" '${params}'`;

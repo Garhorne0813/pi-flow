@@ -29,7 +29,7 @@ export class DemoSandbox implements SandboxProvider {
     const sid = crypto.randomUUID();
     this.boxes.set(sid, v);
     this.skillSelections.set(sid, structuredClone(skills));
-    return sid;
+    return { sandboxId: sid };
   }
   async connect(s: string) {
     if (!this.boxes.has(s)) throw new Fault(410, "SANDBOX_GONE");

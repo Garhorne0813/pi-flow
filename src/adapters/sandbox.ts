@@ -24,10 +24,18 @@ import {
 export type { SandboxProvider } from "../sandbox/provider.js";
 export { CubeProvider } from "../sandbox/cube-provider.js";
 export { DemoSandbox } from "../sandbox/demo-provider.js";
+// The recorded instance is gone; its traffic token must not follow a successor.
+function clearInstance(w: Workspace) {
+  delete w.sandboxId;
+  delete w.sandboxState;
+  delete w.sandboxSkillScope;
+  delete w.sandboxTrafficToken;
+}
 export class SandboxManager {
   readonly policy: SandboxPolicy;
   readonly capacity: SandboxCapacity;
   private nextSweepAt = 0;
+
   constructor(
     private store: Store,
     private provider: SandboxProvider,
@@ -123,7 +131,7 @@ export class SandboxManager {
     )
       await this.store.tx(a.tenantId, (s) => {
         const w = s.workspaces[wid];
-        if (w && !w.lock && !w.sandboxId) delete w.sandboxState;
+        if (w && !w.lock && !w.sandboxId) clearInstance(w);
       });
   }
   private async lateSandbox(a: Actor, wid: string, owner: string, sid: string) {
@@ -160,11 +168,8 @@ export class SandboxManager {
       if (await this.capacity.released(a.tenantId, wid, owner))
         await this.store.tx(a.tenantId, (s) => {
           const w = s.workspaces[wid];
-          if (w && !w.lock && (!w.sandboxId || w.sandboxId === sid)) {
-            delete w.sandboxId;
-            delete w.sandboxState;
-            delete w.sandboxSkillScope;
-          }
+          if (w && !w.lock && (!w.sandboxId || w.sandboxId === sid))
+            clearInstance(w);
           audit(
             s,
             a,
@@ -206,11 +211,7 @@ export class SandboxManager {
       if (released)
         await this.store.tx(a.tenantId, (s) => {
           const w = s.workspaces[wid];
-          if (w?.lock?.owner === owner) {
-            delete w.sandboxId;
-            delete w.sandboxState;
-            delete w.sandboxSkillScope;
-          }
+          if (w?.lock?.owner === owner) clearInstance(w);
         });
     } catch (e) {
       if (e instanceof Fault && e.code === "CAPACITY_LEASE_LOST") throw e;
@@ -321,14 +322,14 @@ export class SandboxManager {
       let sid = w.sandboxId;
       activeSid = sid;
       await assertOwned();
-      if (sid && w.sandboxSkillScope !== scope) {
+      if (
+        sid &&
+        (w.sandboxSkillScope !== scope ||
+          (this.provider.requiresTrafficToken && !w.sandboxTrafficToken))
+      ) {
         await this.remote(() => this.kill(a, wid, owner, sid!), signal);
         activeSid = sid = undefined;
-        await this.record(a, wid, owner, (w) => {
-          delete w.sandboxId;
-          delete w.sandboxSkillScope;
-          delete w.sandboxState;
-        });
+        await this.record(a, wid, owner, (w) => clearInstance(w));
         await this.capacity.pending(a.tenantId, wid, owner);
       }
       if (sid) {
@@ -347,10 +348,7 @@ export class SandboxManager {
           connecting = false;
           activeSid = sid = undefined;
           await this.capacity.pending(a.tenantId, wid, owner);
-          await this.record(a, wid, owner, (w) => {
-            delete w.sandboxId;
-            delete w.sandboxState;
-          });
+          await this.record(a, wid, owner, (w) => clearInstance(w));
         }
         await assertOwned();
       }
@@ -365,14 +363,15 @@ export class SandboxManager {
             JSON.stringify({ owner, volumeId: vid }),
           ),
         );
-        sid = await this.remote(
+        const created = await this.remote(
           () => {
             creationStarted = true;
             return this.provider.create(vid!, bundle, skills, undefined, owner);
           },
           signal,
-          (id) => this.lateSandbox(a, wid, owner, id),
+          (created) => this.lateSandbox(a, wid, owner, created.sandboxId),
         );
+        sid = created.sandboxId;
         activeSid = sid;
         await this.capacity.pending(a.tenantId, wid, owner, sid);
         await assertOwned();
@@ -380,6 +379,9 @@ export class SandboxManager {
           w.sandboxId = sid;
           w.sandboxSkillScope = scope;
           w.sandboxSkills = [...skillIds];
+          if (created.trafficToken)
+            w.sandboxTrafficToken = created.trafficToken;
+          else delete w.sandboxTrafficToken;
         });
       }
       activeSid = sid;
@@ -453,7 +455,7 @@ export class SandboxManager {
             remaining.state === "released" &&
             !w.sandboxId
           )
-            delete w.sandboxState;
+            clearInstance(w);
         }
       });
     }
@@ -475,19 +477,28 @@ export class SandboxManager {
       bundle,
       async (sid) => {
         signal?.throwIfAborted();
-        const skills = await this.store.read(a.tenantId, (s) =>
-          skillIds.map((id) => {
-            const skill = s.skills[id];
-            if (!skill?.enabled || skill.bundle !== bundle)
-              throw new Fault(403, "SKILL_DENIED");
-            return { path: skill.path, digest: skill.digest };
+        const { skills, trafficToken } = await this.store.read(
+          a.tenantId,
+          (s) => ({
+            skills: skillIds.map((id) => {
+              const skill = s.skills[id];
+              if (!skill?.enabled || skill.bundle !== bundle)
+                throw new Fault(403, "SKILL_DENIED");
+              return { path: skill.path, digest: skill.digest };
+            }),
+            trafficToken: s.workspaces[wid]?.sandboxTrafficToken,
           }),
         );
         signal?.throwIfAborted();
-        return this.provider.execute(sid, op, {
-          ...args,
-          _skillManifests: skills,
-        });
+        return this.provider.execute(
+          sid,
+          op,
+          {
+            ...args,
+            _skillManifests: skills,
+          },
+          trafficToken,
+        );
       },
       skillIds,
       signal,
@@ -618,11 +629,12 @@ export class SandboxManager {
       reserved = true;
       await assertFileOwned();
       creationStarted = true;
-      sid = await this.remote(
+      const created = await this.remote(
         () => this.provider.create(volume!, w.bundle!, [], undefined, owner),
         undefined,
-        (id) => this.lateSandbox(a, capacityId, owner, id),
+        (created) => this.lateSandbox(a, capacityId, owner, created.sandboxId),
       );
+      sid = created.sandboxId;
       await this.capacity.pending(a.tenantId, capacityId, owner, sid);
       await this.capacity.active(a.tenantId, capacityId, owner, sid);
       if (lost) throw new Fault(409, "LEASE_LOST");
@@ -636,12 +648,17 @@ export class SandboxManager {
       });
       const result = await this.remote(
         () =>
-          this.provider.execute(sid!, op, {
-            ...args,
-            path,
-            _workspaceOnly: true,
-            _skillManifests: [],
-          }),
+          this.provider.execute(
+            sid!,
+            op,
+            {
+              ...args,
+              path,
+              _workspaceOnly: true,
+              _skillManifests: [],
+            },
+            created.trafficToken,
+          ),
         undefined,
         undefined,
         130000,
@@ -759,11 +776,7 @@ export class SandboxManager {
       await this.capacity.paused(a.tenantId, w.id, owner);
     } catch (e) {
       if (e instanceof Fault && e.code === "SANDBOX_GONE") {
-        await this.record(a, w.id, owner, (w) => {
-          delete w.sandboxId;
-          delete w.sandboxState;
-          delete w.sandboxSkillScope;
-        });
+        await this.record(a, w.id, owner, (w) => clearInstance(w));
         await this.capacity.released(a.tenantId, w.id, owner);
       } else {
         await this.capacity.unknown(a.tenantId, w.id, owner);
@@ -782,11 +795,7 @@ export class SandboxManager {
     if (entry) await this.capacity.claim(a.tenantId, w.id, entry, owner);
     try {
       if (sid) await this.kill(a, w.id, owner, sid);
-      await this.record(a, w.id, owner, (w) => {
-        delete w.sandboxId;
-        delete w.sandboxState;
-        delete w.sandboxSkillScope;
-      });
+      await this.record(a, w.id, owner, (w) => clearInstance(w));
       await this.capacity.released(a.tenantId, w.id, owner);
     } catch (e) {
       await this.capacity.unknown(a.tenantId, w.id, owner);
@@ -1017,12 +1026,8 @@ export class SandboxManager {
     try {
       if (w.sandboxId) await this.kill(a, w.id, owner, w.sandboxId);
       await this.capacity.pending(a.tenantId, w.id, owner);
-      await this.record(a, w.id, owner, (w) => {
-        delete w.sandboxId;
-        delete w.sandboxState;
-        delete w.sandboxSkillScope;
-      });
-      sid = await this.remote(
+      await this.record(a, w.id, owner, (w) => clearInstance(w));
+      const created = await this.remote(
         () =>
           this.provider.create(
             volume,
@@ -1032,14 +1037,17 @@ export class SandboxManager {
             owner,
           ),
         undefined,
-        (id) => this.lateSandbox(a, w.id, owner, id),
+        (created) => this.lateSandbox(a, w.id, owner, created.sandboxId),
       );
+      sid = created.sandboxId;
       await this.capacity.pending(a.tenantId, w.id, owner, sid);
       await this.record(a, w.id, owner, (w) => {
         w.sandboxId = sid;
         w.sandboxState = "active";
         w.sandboxSkillScope = snapshot.skillScope;
         w.sandboxSkills = [...snapshot.skills];
+        if (created.trafficToken) w.sandboxTrafficToken = created.trafficToken;
+        else delete w.sandboxTrafficToken;
       });
       await this.capacity.active(a.tenantId, w.id, owner, sid);
       return { sandboxId: sid, state: "active" };
@@ -1068,6 +1076,8 @@ export class SandboxManager {
       "sandbox.snapshot_clone",
       async (source) => {
         const snapshot = this.snapshotRecord(source, snapshotId);
+        if (this.provider.supportsSnapshotClone === false)
+          throw new Fault(409, "SNAPSHOT_CLONE_UNSUPPORTED");
         await this.snapshotSelection(a, snapshot);
         const target: Workspace = {
           id: crypto.randomUUID(),
@@ -1149,10 +1159,7 @@ export class SandboxManager {
       }
       killed = true;
       await this.store.tx(a.tenantId, (s) => {
-        const current = s.workspaces[wid]!;
-        delete current.sandboxId;
-        delete current.sandboxState;
-        delete current.sandboxSkillScope;
+        clearInstance(s.workspaces[wid]!);
       });
       await this.capacity.released(a.tenantId, wid, owner);
       for (const snapshot of Object.values(w.sandboxSnapshots ?? {})) {
