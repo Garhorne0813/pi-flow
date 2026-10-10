@@ -177,3 +177,65 @@ test(
     }
   },
 );
+test("legacy run spend, unpriced history and unrelated workspaces cannot bypass accounting boundaries", async () => {
+  const store = new MemoryStore(),
+    f = await setup(store);
+  await store.tx(f.actor.tenantId, (s) => {
+    s.runs[f.runs[0]!.id]!.tokens = 900;
+  });
+  await assert.rejects(
+    new UsageLedger(store).reserve(
+      f.actor.tenantId,
+      f.runs[0]!.id,
+      100,
+      "worker",
+    ),
+    { code: "MODEL_BUDGET_EXCEEDED" },
+  );
+  await new UsageLedger(store).reserve(
+    f.actor.tenantId,
+    f.runs[1]!.id,
+    1,
+    "worker",
+  );
+  const priced = new UsageLedger(
+    store,
+    UsagePolicy.parse({
+      tenantDailyCostMicros: 10000,
+      prices: {
+        "gateway/model": {
+          version: "v2",
+          input: 1,
+          output: 1,
+          cacheRead: 0,
+          cacheWrite: 0,
+        },
+      },
+    }),
+  );
+  await assert.rejects(
+    priced.reserve(f.actor.tenantId, f.runs[2]!.id, 1, "worker"),
+    { code: "MODEL_PRICE_REQUIRED" },
+  );
+  await store.tx(f.actor.tenantId, (s) => {
+    s.usage!.resources.push(
+      {
+        workspaceId: f.w.id,
+        sandboxId: "owned",
+        state: "active",
+        at: Date.now() - 1000,
+      },
+      {
+        workspaceId: "unrelated",
+        sandboxId: "other",
+        state: "active",
+        at: Date.now() - 10000,
+      },
+    );
+  });
+  const report = await store.read(f.actor.tenantId, (s) =>
+    usageReport(s, UsagePolicy.parse({}), undefined, f.runs[0]!.id),
+  );
+  assert.equal(report.sandbox.observedCreates, 1);
+  assert.ok(report.sandbox.activeMs < 10000);
+});
