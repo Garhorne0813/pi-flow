@@ -19,7 +19,10 @@ test(
     const s1 = new PostgresStore(url!),
       s2 = new PostgresStore(url!);
     try {
-      await s1.pool.query(await readFile("migrations/001_initial.sql", "utf8"));
+      await s1.pool.query(
+        (await readFile("migrations/001_initial.sql", "utf8")) +
+          (await readFile("migrations/003_runs_sessions_events.sql", "utf8")),
+      );
       const service = new HarnessService(s1, [], ["default"]);
       const av = await service.publish(
         a,
@@ -93,7 +96,8 @@ test(
     const managers = stores.map((store) => new SandboxCapacity(store, policy));
     try {
       await stores[0]!.pool.query(
-        await readFile("migrations/001_initial.sql", "utf8"),
+        (await readFile("migrations/001_initial.sql", "utf8")) +
+          (await readFile("migrations/003_runs_sessions_events.sql", "utf8")),
       );
       const results = await Promise.allSettled(
         workspaces.map((w, i) =>
@@ -207,7 +211,8 @@ test(
     const writer = await store.pool.connect();
     try {
       await store.pool.query(
-        await readFile("migrations/001_initial.sql", "utf8"),
+        (await readFile("migrations/001_initial.sql", "utf8")) +
+          (await readFile("migrations/003_runs_sessions_events.sql", "utf8")),
       );
       await store.tx(tenant, (s) => {
         s.sequence = 7;
@@ -311,7 +316,8 @@ test(
     );
     try {
       await stores[0]!.pool.query(
-        await readFile("migrations/001_initial.sql", "utf8"),
+        (await readFile("migrations/001_initial.sql", "utf8")) +
+          (await readFile("migrations/003_runs_sessions_events.sql", "utf8")),
       );
       const agent = await services[0]!.publish(
         actor,
@@ -383,7 +389,8 @@ test(
     );
     try {
       await stores[0]!.pool.query(
-        await readFile("migrations/001_initial.sql", "utf8"),
+        (await readFile("migrations/001_initial.sql", "utf8")) +
+          (await readFile("migrations/003_runs_sessions_events.sql", "utf8")),
       );
       await managers[0]!.reserve(tenant, w, "A", undefined);
       await managers[0]!.active(tenant, wid, "A", "sid-A");
@@ -430,6 +437,158 @@ test(
           if (e.tenantId === tenant) delete s.entries[k];
       });
       await Promise.all(stores.map((s) => s.close()));
+    }
+  },
+);
+
+test(
+  "PostgreSQL per-Run transactions overlap without tenant rewrites and reject stale lease owners",
+  { skip: !url },
+  async () => {
+    const stores = [new PostgresStore(url!), new PostgresStore(url!)];
+    const actor = { tenantId: "row-" + id(), userId: "user", admin: true };
+    let release!: () => void;
+    try {
+      await stores[0]!.pool.query(
+        (await readFile("migrations/001_initial.sql", "utf8")) +
+          (await readFile("migrations/003_runs_sessions_events.sql", "utf8")),
+      );
+      const service = new HarnessService(stores[0]!, [], ["default"]);
+      const av = await service.publish(
+        actor,
+        AgentConfig.parse({
+          name: "run",
+          systemPrompt: "test",
+          model: { provider: "demo", modelId: "demo" },
+          tools: [],
+          skillBundle: "default",
+        }),
+      );
+      const w = await service.createWorkspace(actor, "rows");
+      const sessions = await Promise.all(
+        [0, 1].map(() => service.createSession(actor, w.id, av.id)),
+      );
+      const runs = await Promise.all(
+        sessions.map((s) => service.submit(actor, s.id, "test")),
+      );
+      await stores[0]!.tx(actor.tenantId, (s) => {
+        for (const r of runs)
+          s.runs[r.id]!.lease = { owner: "owner", expires: Date.now() + 60000 };
+      });
+      const revision = (
+        await stores[0]!.pool.query(
+          "SELECT revision FROM harness_tenants WHERE tenant_id=$1",
+          [actor.tenantId],
+        )
+      ).rows[0].revision;
+      const gate = new Promise<void>((r) => (release = r));
+      let entered = false;
+      const first = stores[0]!.runTx(actor.tenantId, runs[0]!.id, async (s) => {
+        entered = true;
+        await gate;
+        s.runs[runs[0]!.id]!.lease!.expires = Date.now() + 90000;
+      });
+      for (let i = 0; i < 100 && !entered; i++)
+        await new Promise<void>((r) => setTimeout(r,5));
+      assert.ok(entered);
+      await stores[1]!.runTx(actor.tenantId, runs[1]!.id, (s) => {
+        s.runs[runs[1]!.id]!.lease!.expires = Date.now() + 90000;
+      });
+      release();
+      await first;
+      assert.equal(
+        (
+          await stores[0]!.pool.query(
+            "SELECT revision FROM harness_tenants WHERE tenant_id=$1",
+            [actor.tenantId],
+          )
+        ).rows[0].revision,
+        revision,
+      );
+      await stores[1]!.runTx(actor.tenantId, runs[0]!.id, (s) => {
+        s.runs[runs[0]!.id]!.lease = {
+          owner: "new",
+          expires: Date.now() + 60000,
+        };
+      });
+      await assert.rejects(
+        stores[0]!.runTx(actor.tenantId, runs[0]!.id, (s) => {
+          if (s.runs[runs[0]!.id]!.lease?.owner !== "owner")
+            throw new Error("LEASE_LOST");
+        }),
+        /LEASE_LOST/,
+      );
+    } finally {
+      release?.();
+      await stores[0]!.pool.query(
+        "DELETE FROM harness_tenants WHERE tenant_id=$1",
+        [actor.tenantId],
+      );
+      await Promise.all(stores.map((s) => s.close()));
+    }
+  },
+);
+
+test(
+  "PostgreSQL historical sessions/runs/events migrate byte-for-byte with stable event IDs",
+  { skip: !url },
+  async () => {
+    const control = new PostgresStore(url!);
+    const schema = "run_migrate_" + id().replaceAll("-", "");
+    await control.pool.query(`CREATE SCHEMA ${schema}`);
+    const scoped = new URL(url!);
+    scoped.searchParams.set("options", `-c search_path=${schema}`);
+    const store = new PostgresStore(scoped.toString());
+    try {
+      await store.pool.query(
+        await readFile("migrations/001_initial.sql", "utf8"),
+      );
+      const { emptyState, event } = await import("../src/domain.js");
+      const state = emptyState();
+      const actor = { tenantId: "old", userId: "u", admin: true };
+      state.sessions.s = {
+        id: "s",
+        workspaceId: "w",
+        agentVersionId: "a",
+        entries: [{ history: "retained" }],
+        createdAt: new Date().toISOString(),
+      };
+      state.runs.r = {
+        id: "r",
+        sessionId: "s",
+        actor,
+        prompt: "persisted",
+        state: "FAILED",
+        requestDigest: "hash",
+        createdAt: new Date().toISOString(),
+        depth: 0,
+        steps: 0,
+        lease: { owner: "lost", expires: 10 },
+      };
+      event(state, state.runs.r, "run.failed", {
+        code: "WORKER_LOST_UNKNOWN_TOOL_OUTCOME",
+      });
+      await store.pool.query(
+        "INSERT INTO harness_tenants(tenant_id,state) VALUES($1,$2)",
+        ["old", JSON.stringify(state)],
+      );
+      const migration = await readFile(
+        "migrations/003_runs_sessions_events.sql",
+        "utf8",
+      );
+      await store.pool.query(migration);
+      assert.deepEqual(await store.read("old", (s) => s), state);
+      await store.pool.query(migration);
+      assert.deepEqual(await store.read("old", (s) => s), state);
+      await store.runTx("old", "r", (s) => event(s, s.runs.r!, "test.next"));
+      assert.deepEqual(
+        (await store.read("old", (s) => s.events)).map((e) => e.eventId),
+        [1, 2],
+      );
+    } finally {
+      await store.close();
+      await control.pool.query(`DROP SCHEMA ${schema} CASCADE`);
+      await control.close();
     }
   },
 );

@@ -64,33 +64,44 @@ export class Worker {
         ),
       );
       if (!pending) continue;
-      const r = await this.service.store.tx(tenant, (s) => {
-        for (const old of Object.values(s.runs)) {
-          if (old.lease && old.lease.expires < Date.now()) {
-            delete old.lease;
-            if (old.state === "RUNNING") {
-              old.state = "FAILED";
-              old.error = "WORKER_LOST_UNKNOWN_TOOL_OUTCOME";
-              event(s, old, "run.failed", { code: old.error });
+      const candidates = await this.service.store.read(tenant, (s) =>
+        Object.values(s.runs)
+          .filter(
+            (r) =>
+              r.state === "QUEUED" || (r.lease && r.lease.expires < Date.now()),
+          )
+          .map((r) => r.id),
+      );
+      let r: Run | undefined;
+      for (const rid of candidates) {
+        r = await this.service.store.runTx(tenant, rid, (s) => {
+          const current = s.runs[rid];
+          if (!current) return;
+          if (current.lease && current.lease.expires < Date.now()) {
+            delete current.lease;
+            if (current.state === "RUNNING") {
+              current.state = "FAILED";
+              current.error = "WORKER_LOST_UNKNOWN_TOOL_OUTCOME";
+              event(s, current, "run.failed", { code: current.error });
             }
           }
-        }
-        const r = Object.values(s.runs).find((r) => r.state === "QUEUED");
-        if (!r) return;
-        try {
-          const { config } = authorizedRun(s, r);
-          r.deadline ??= Date.now() + config.timeoutSeconds * 1000;
-          r.state = "RUNNING";
-          r.lease = { owner: this.owner, expires: Date.now() + 30000 };
-          event(s, r, "run.started");
-          return r;
-        } catch (e) {
-          r.state = "FAILED";
-          r.error = e instanceof Fault ? e.code : "AUTHORIZATION_FAILED";
-          event(s, r, "run.failed", { code: r.error });
-          return;
-        }
-      });
+          if (current.state !== "QUEUED") return;
+          try {
+            const { config } = authorizedRun(s, current);
+            current.deadline ??= Date.now() + config.timeoutSeconds * 1000;
+            current.state = "RUNNING";
+            current.lease = { owner: this.owner, expires: Date.now() + 30000 };
+            event(s, current, "run.started");
+            return current;
+          } catch (e) {
+            current.state = "FAILED";
+            current.error =
+              e instanceof Fault ? e.code : "AUTHORIZATION_FAILED";
+            event(s, current, "run.failed", { code: current.error });
+          }
+        });
+        if (r) break;
+      }
       if (r) {
         const p = this.execute(tenant, r).catch(() => {});
         this.active.add(p);
@@ -150,7 +161,7 @@ export class Worker {
     );
     const heartbeat = setInterval(() => {
       void this.service.store
-        .tx(tenant, (s) => {
+        .runTx(tenant, initial.id, (s) => {
           const r = this.owned(s, initial.id);
           authorizedRun(s, r);
           if ((r.deadline ?? 0) < Date.now())
@@ -409,7 +420,7 @@ export class Worker {
       });
       if (!waiting) {
         controller.signal.throwIfAborted();
-        await this.service.store.tx(tenant, (s) => {
+        await this.service.store.runTx(tenant, initial.id, (s) => {
           const r = this.owned(s, initial.id);
           authorizedRun(s, r);
           r.state = "COMPLETED";
@@ -443,7 +454,7 @@ export class Worker {
       this.controllers.delete(controller);
       clearInterval(heartbeat);
       clearTimeout(timeout);
-      await this.service.store.tx(tenant, (s) => {
+      await this.service.store.runTx(tenant, initial.id, (s) => {
         const r = s.runs[initial.id];
         if (r?.lease?.owner === this.owner) delete r.lease;
       });
