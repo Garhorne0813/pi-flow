@@ -1,9 +1,21 @@
 import pg from "pg";
+import {
+  loadState,
+  saveState,
+  saveRun,
+  saveEvents,
+  metadata,
+} from "./run-store.js";
 import { emptyState, type State } from "./domain.js";
 import type { CapacityState } from "./adapters/sandbox-policy.js";
 export interface Store {
   read<T>(tenant: string, fn: (state: State) => T | Promise<T>): Promise<T>;
   tx<T>(tenant: string, fn: (state: State) => T | Promise<T>): Promise<T>;
+  runTx<T>(
+    tenant: string,
+    runId: string,
+    fn: (state: State) => T | Promise<T>,
+  ): Promise<T>;
   tenants(): Promise<string[]>;
   capacityRead<T>(fn: (state: CapacityState) => T | Promise<T>): Promise<T>;
   capacityTx<T>(fn: (state: CapacityState) => T | Promise<T>): Promise<T>;
@@ -38,6 +50,13 @@ export class MemoryStore implements Store {
     });
     this.tail = task.catch(() => {});
     return task;
+  }
+  runTx<T>(
+    tenant: string,
+    runId: string,
+    fn: (state: State) => T | Promise<T>,
+  ): Promise<T> {
+    return this.tx(tenant, fn);
   }
   async read<T>(tenant: string, fn: (s: State) => T | Promise<T>): Promise<T> {
     await this.tail;
@@ -97,16 +116,44 @@ export class PostgresStore implements Store {
         "INSERT INTO harness_tenants (tenant_id,state) VALUES ($1,$2) ON CONFLICT DO NOTHING",
         [tenant, JSON.stringify(emptyState())],
       );
-      const row = await c.query(
-        "SELECT state FROM harness_tenants WHERE tenant_id=$1 FOR UPDATE",
-        [tenant],
-      );
-      const s = row.rows[0].state as State;
+      const before = await loadState(c, tenant, true),
+        s = structuredClone(before);
       const result = await fn(s);
-      await c.query(
-        "UPDATE harness_tenants SET state=$2, revision=revision+1 WHERE tenant_id=$1",
-        [tenant, JSON.stringify(s)],
-      );
+      await saveState(c, tenant, before, s);
+      await c.query("COMMIT");
+      return structuredClone(result);
+    } catch (e) {
+      await c.query("ROLLBACK");
+      throw e;
+    } finally {
+      c.release();
+    }
+  }
+  async runTx<T>(
+    tenant: string,
+    runId: string,
+    fn: (state: State) => T | Promise<T>,
+  ): Promise<T> {
+    const c = await this.pool.connect();
+    try {
+      await c.query("BEGIN");
+      const before = await loadState(c, tenant, false, runId),
+        s = structuredClone(before);
+      const result = await fn(s);
+      if (
+        JSON.stringify(metadata(before)) !==
+          JSON.stringify(metadata({ ...s, sequence: before.sequence })) ||
+        JSON.stringify(before.sessions) !== JSON.stringify(s.sessions)
+      )
+        throw new Error(
+          "runTx may only change the target Run and append events",
+        );
+      if (Object.keys(s.runs).some((rid) => rid !== runId))
+        throw new Error("runTx scope violation");
+      const r = s.runs[runId];
+      if (r && JSON.stringify(r) !== JSON.stringify(before.runs[runId]))
+        await saveRun(c, tenant, r);
+      await saveEvents(c, tenant, before, s);
       await c.query("COMMIT");
       return structuredClone(result);
     } catch (e) {
@@ -117,11 +164,18 @@ export class PostgresStore implements Store {
     }
   }
   async read<T>(tenant: string, fn: (s: State) => T | Promise<T>): Promise<T> {
-    const row = await this.pool.query(
-      "SELECT state FROM harness_tenants WHERE tenant_id=$1",
-      [tenant],
-    );
-    return structuredClone(await fn(row.rows[0]?.state ?? emptyState()));
+    const c = await this.pool.connect();
+    try {
+      await c.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+      const result = await fn(await loadState(c, tenant));
+      await c.query("COMMIT");
+      return structuredClone(result);
+    } catch (e) {
+      await c.query("ROLLBACK");
+      throw e;
+    } finally {
+      c.release();
+    }
   }
   async tenants() {
     return (
