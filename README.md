@@ -95,6 +95,12 @@ JWT/MCP 测试使用本地 HTTPS 测试服务，需要 `openssl`；远程工具�
 
 API 协议和配置示例见 [docs/api.md](docs/api.md)。
 
+SSE 在连接 JWT 的 exp 到期时关闭，并返回无 event ID 的 `stream.error`
+（`AUTHENTICATION_EXPIRED`）。客户端通过 Authorization header 携带新令牌重连，
+用最后收到的 Run event ID 作为 Last-Event-ID 回放；不要把令牌放进 URL。
+每轮读取仍检查 Workspace ACL。离线 JWKS 验签只保证签名/到期检查，
+不提供 UCS 中央即时撤销；需要该保证的部署应接入企业 introspection/撤销事件。
+
 ## Sandbox 容量与生命周期
 
 默认每个租户内的用户（Workspace owner）最多 3 个活跃 Sandbox，整个 Harness 部署最多 100 个；协作者操作同一 Workspace 仍计入 owner 配额。创建/恢复/克隆先在共享数据库中原子预留容量，运行中、预留中和结果不确定的操作均计数，暂停实例不计数。配额覆盖同一数据库管理的实例，不包含 Cube 集群上其他应用创建的实例。`WORKER_CONCURRENCY` 仍只限制 Run 并发，不是 Sandbox 数量。API 与所有 Worker 必须使用相同配额和生命周期配置。
@@ -136,3 +142,5 @@ NODE_USE_ENV_PROXY=1 npm run test:deepseek:capabilities
 `npm run bench:store:reads` 在已迁移的 `TEST_DATABASE_URL` 测试库上，对比旧 SSE 写事务路径与新只读路径。创建并清理专用租户，模拟 100 个 250 ms 事件轮询与 4 个 1 s Run 心跳；不连接模型或 Sandbox。参数与实测结果见 [docs/read-benchmark.md](docs/read-benchmark.md)。SSE/列表查询不锁定或写回租户行；每个请求结束时仍保留一次审计写入。
 
 容量 `operation` 是每次操作生成的唯一持久标识，激活后也保留；预留与接管原子比较前一条记录，暂停/释放/未知结果只更新匹配的标识。过期请求不能覆盖新请求的配额，普通 Agent 实例、文件实例和生命周期操作使用同一规则。取消在创建/连接/激活各阶段检查：已知实例确认 Kill 后退还配额；无 ID 的创建未知结果或 Kill 未确认继续占用，Workspace Volume 保留。升级时须同时更新并重启 API 与所有 Worker，避免与旧版不校验 fencing 的写入者混跑；现有 JSONB 状态兼容，无额外迁移。
+
+健康检查、Worker 心跳和 Kubernetes probes 见 [docs/health.md](docs/health.md)。
