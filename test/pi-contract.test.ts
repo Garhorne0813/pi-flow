@@ -39,6 +39,9 @@ test("real Pi 0.99.2 uses only remote tools and restores canonical session entri
       chunk({ content: "Remote content verified." });
       chunk({}, "stop");
     }
+    res.write(
+      `data: ${JSON.stringify({ choices: [], usage: { prompt_tokens: 3, completion_tokens: 4, total_tokens: 7 } })}\n\n`,
+    );
     res.write("data: [DONE]\n\n");
     res.end();
   });
@@ -70,6 +73,8 @@ test("real Pi 0.99.2 uses only remote tools and restores canonical session entri
     let entries: unknown[] = [];
     let calls = 0;
     const events: string[] = [];
+    const recordedUsage: unknown[] = [];
+    let reservedRequests = 0;
     const cfg = AgentConfig.parse({
       name: "test",
       systemPrompt: "Use remote_read to read the file.",
@@ -85,6 +90,13 @@ test("real Pi 0.99.2 uses only remote tools and restores canonical session entri
       specs: specs(cfg.tools),
       signal: new AbortController().signal,
       consume: async () => {},
+      beforeModelRequest: async (estimate) => {
+        assert.ok(estimate > 0);
+        return { id: "request-" + ++reservedRequests, maxOutputTokens: 12 };
+      },
+      recordModelUsage: async (_id, usage) => {
+        recordedUsage.push(usage);
+      },
       call: async (name, args) => {
         assert.equal(name, "remote_read");
         assert.deepEqual(args, { path: "hello.txt" });
@@ -107,6 +119,7 @@ test("real Pi 0.99.2 uses only remote tools and restores canonical session entri
     );
     assert.ok(events.includes("message.delta"));
     for (const req of requests) {
+      assert.equal(req.max_tokens ?? req.max_completion_tokens, 12);
       const names = req.tools.map((t: any) => t.function.name);
       assert.deepEqual(names, ["remote_read"]);
     }
@@ -130,6 +143,22 @@ test("real Pi 0.99.2 uses only remote tools and restores canonical session entri
           (m: any) =>
             m.role === "tool" && String(m.content).includes("remote-only"),
         ),
+    );
+    assert.equal(recordedUsage.length, requests.length);
+    assert.ok(recordedUsage.every((u: any) => u.totalTokens === 7));
+    const beforeDenied = requests.length;
+    await assert.rejects(
+      runtime.execute({
+        ...context(),
+        beforeModelRequest: async () => {
+          throw new Error("budget denied");
+        },
+      }),
+    );
+    assert.equal(
+      requests.length,
+      beforeDenied,
+      "budget refusal must precede gateway dispatch",
     );
   } finally {
     await new Promise<void>((resolve, reject) =>
