@@ -133,8 +133,10 @@ export class UsageLedger {
           s.agents[s.sessions[root.sessionId]!.agentVersionId]!.config;
       let maxOutputTokens = Math.min(
         4096,
-        config.maxTokens - runUsed - inputEstimate,
-        rootConfig.maxTokens - familyUsed - inputEstimate,
+        config.maxTokens - Math.max(runUsed, r.tokens ?? 0) - inputEstimate,
+        rootConfig.maxTokens -
+          Math.max(familyUsed, root.tokens ?? 0) -
+          inputEstimate,
       );
       const day = records.filter((x) => x.at.slice(0, 10) === now.slice(0, 10)),
         month = records.filter((x) => x.at.slice(0, 7) === now.slice(0, 7));
@@ -169,7 +171,8 @@ export class UsageLedger {
         [month, this.policy.tenantMonthlyCostMicros],
       ] as const) {
         if (cap === undefined) continue;
-        if (!price) throw new Fault(503, "MODEL_PRICE_REQUIRED");
+        if (!price || list.some((x) => x.costMicros === null))
+          throw new Fault(503, "MODEL_PRICE_REQUIRED");
         const remaining =
           cap -
           total(list, "costMicros") -
@@ -272,7 +275,11 @@ export function usageReport(
       ? null
       : total(records, "costMicros");
   const resources = (s.usage?.resources ?? []).filter(
-    (r) => !userId || s.workspaces[r.workspaceId]?.ownerId === userId,
+    (r) =>
+      (!userId || s.workspaces[r.workspaceId]?.ownerId === userId) &&
+      (!runId ||
+        r.workspaceId ===
+          s.sessions[s.runs[runId]?.sessionId ?? ""]?.workspaceId),
   );
   const sandbox = {
     activeMs: 0,
