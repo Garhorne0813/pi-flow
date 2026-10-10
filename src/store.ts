@@ -116,14 +116,18 @@ export class MemoryStore implements Store {
 }
 export class PostgresStore implements Store {
   private notifications = new EventEmitter().setMaxListeners(0);
+  private closed = false;
   private listener?: pg.PoolClient;
   private listening?: Promise<void>;
   private async listen() {
+    if (this.closed) return;
     if (!this.listening)
       this.listening = (async () => {
         const c = await this.pool.connect();
         try {
+          if (this.closed) { c.release(true); return; }
           await c.query("LISTEN harness_run_event");
+          if (this.closed) { c.release(true); return; }
           this.listener = c;
           c.on("notification", (m) => {
             if (m.payload) this.notifications.emit(m.payload);
@@ -162,7 +166,7 @@ export class PostgresStore implements Store {
       this.notifications.once(key, done);
       this.notifications.once("disconnected", done);
       signal?.addEventListener("abort", done, { once: true });
-      if (signal?.aborted) done();
+      if (signal?.aborted || this.closed) done();
       else void this.listen();
     });
   }
@@ -313,7 +317,9 @@ export class PostgresStore implements Store {
     ).rows.map((x) => x.tenant_id as string);
   }
   async close() {
+    this.closed = true;
     this.notifications.emit("disconnected");
+    await this.listening;
     if (this.listener) {
       this.listener.release(true);
       this.listener = undefined;
