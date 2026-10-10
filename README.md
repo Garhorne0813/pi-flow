@@ -55,7 +55,7 @@ node --env-file=.env dist/worker-main.js
 
 API 和 Worker 必须使用同一数据库、模型批准列表、Skills Bundle 映射和 MCP Endpoint 配置。生产模式还必须配置 `TENANT_CAPABILITIES_JSON`，明确每个租户可用的 Bundle / Endpoint 引用；不同租户的机密技能和服务凭证应配置为不同引用。生产模式缺少关键配置时直接拒绝启动，不会退回 Demo。UCS 令牌需包含 `sub`、`tenant_id`、`exp`；管理员 `roles` 包含 `harness-admin`。Ticket 协议尚未实现，可替换 `Auth` 适配函数。
 
-LLM Gateway 当前采用 OpenAI Chat Completions 兼容协议，部署配置中的 `LLM_PROVIDER` / `LLM_MODEL_ID` 构成模型白名单；模型单次输出上限 4096。Token 预算按返回 usage 累计，是响应后检查的预算；单次响应可能超额，不是精确的预付费额度。
+LLM Gateway 当前采用 OpenAI Chat Completions 兼容协议，部署配置中的 `LLM_PROVIDER` / `LLM_MODEL_ID` 构成模型白名单；模型单次输出上限 4096。模型请求派发前使用共享账本预留额度并设置输出上限，可信 usage 返回后按服务端价格快照核算。验收范围是可执行预算控制与可审计成本估算；输入估算和最终供应商账单仍可能不同，不能保证单次绝不超支。详见 [用量与预算口径](docs/usage-budgets.md)。
 
 Cube Template 必须预装 Python 3 / Bash，存在无 sudo 的执行用户，对其授予 Workspace 写权限；模板不得预置共享技能或额外技能挂载，`/skills` 应为空。持久 Volume 后端、非特权配置、磁盘/CPU/内存和网络出口限制由 Cube 集群配置。Harness 不向 Sandbox 注入 UCS、模型或 MCP 凭证。Skills 发布者负责不可变 Volume；每次远程工具执行前校验已挂载 SKILL.md 的规范路径和 SHA-256；read/grep 返回 manifest 内容前再次校验，路径别名使用同一策略。Skill Volume 必须保持不可变，bash 的执行前校验不能替代存储不可变性。
 
