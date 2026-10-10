@@ -624,3 +624,56 @@ test("SSE does not send a batch when a pending database read crosses token expir
     await app.close();
   }
 });
+test("SSE token expiry closes a backpressured connection even when the client stops reading", async () => {
+  const { get } = await import("node:http");
+  const { event } = await import("../src/domain.js");
+  const f = await fixture(),
+    r = await f.service.submit(alice, f.ses.id, "blocked stream");
+  await f.store.tx(alice.tenantId, (s) => {
+    for (let i = 0; i < 100; i++)
+      event(s, s.runs[r.id]!, "message.delta", {
+        delta: "x".repeat(256 * 1024),
+      });
+  });
+  const app = buildAPI(
+    f.service,
+    async () => ({ ...alice, expiresAt: Date.now() + 500 }),
+    f.sandbox,
+  );
+  let closed = false,
+    backpressured = false;
+  let probe: ReturnType<typeof setTimeout> | undefined;
+  app.addHook("onRequest", async (_req, reply) => {
+    reply.raw.once("close", () => {
+      closed = true;
+    });
+    probe = setTimeout(() => {
+      backpressured = reply.raw.writableNeedDrain;
+    }, 350);
+  });
+  const base = await app.listen({ host: "127.0.0.1", port: 0 });
+  const request = get(`${base}/api/v1/runs/${r.id}/events`, (response) => {
+    response.pause();
+    response.on("error", () => {});
+  });
+  request.on("error", () => {});
+  try {
+    const end = Date.now() + 2000;
+    while (!closed && Date.now() < end)
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(
+      backpressured,
+      true,
+      "test must reach stalled response backpressure",
+    );
+    assert.equal(
+      closed,
+      true,
+      "expiry must release the server connection despite an unread response",
+    );
+  } finally {
+    clearTimeout(probe);
+    request.destroy();
+    await app.close();
+  }
+});
