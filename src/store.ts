@@ -8,6 +8,7 @@ import {
   saveEvents,
   metadata,
 } from "./run-store.js";
+import { resourceTransitions } from "./usage.js";
 import { emptyState, type State } from "./domain.js";
 import { readCapacity, writeCapacity } from "./capacity-store.js";
 import type {
@@ -116,7 +117,9 @@ export class MemoryStore implements Store {
   tx<T>(tenant: string, fn: (s: State) => T | Promise<T>): Promise<T> {
     const task = this.tail.then(async () => {
       const s = structuredClone(this.states.get(tenant) ?? emptyState());
+      const before = structuredClone(s);
       const result = await fn(s);
+      resourceTransitions(before, s);
       this.states.set(tenant, s);
       return structuredClone(result);
     });
@@ -296,6 +299,7 @@ export class PostgresStore implements Store {
       const before = await loadState(c, tenant, true),
         s = structuredClone(before);
       const result = await fn(s);
+      resourceTransitions(before, s);
       await saveState(c, tenant, before, s);
       await c.query("COMMIT");
       return structuredClone(result);

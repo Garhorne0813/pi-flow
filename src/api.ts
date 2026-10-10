@@ -2,6 +2,7 @@ import Fastify from "fastify";
 import { SandboxReconciler } from "./sandbox-reconciler.js";
 import { bounded } from "./health.js";
 import { telemetry, traceContext } from "./telemetry.js";
+import { usageReport, policyFromEnv } from "./usage.js";
 import { z } from "zod";
 import {
   Fault,
@@ -142,6 +143,27 @@ export function buildAPI(
       }, {}),
     );
     return { counters: telemetry.snapshot(), sandbox: capacity };
+  });
+  app.get("/api/v1/admin/usage", async (req) => {
+    const a = actor(req);
+    admin(a);
+    return service.store.read(a.tenantId, (s) =>
+      usageReport(s, policyFromEnv()),
+    );
+  });
+  app.get("/api/v1/usage", async (req) => {
+    const a = actor(req);
+    return service.store.read(a.tenantId, (s) =>
+      usageReport(s, policyFromEnv(), a.userId),
+    );
+  });
+  app.get("/api/v1/runs/:id/usage", async (req) => {
+    const a = actor(req),
+      rid = uuid.parse(params(req.params).id);
+    return service.store.read(a.tenantId, (s) => {
+      run(s, a, rid);
+      return usageReport(s, policyFromEnv(), undefined, rid);
+    });
   });
   app.get("/api/v1/agents", async (req) => {
     const a = actor(req),

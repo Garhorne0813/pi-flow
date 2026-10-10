@@ -12,6 +12,7 @@ import { HarnessService, authorizedRun } from "./service.js";
 import type { Runtime } from "./runtime.js";
 import type { SandboxManager } from "./adapters/sandbox.js";
 import type { MCPManager, McpCallContext } from "./adapters/mcp.js";
+import { UsageLedger, policyFromEnv } from "./usage.js";
 import { argumentsSchemas, specs } from "./tool-specs.js";
 import { DeltaBatcher } from "./delta-batcher.js";
 import { SandboxReconciler } from "./sandbox-reconciler.js";
@@ -20,6 +21,7 @@ import { telemetry, traceContext, withContext } from "./telemetry.js";
 export class Worker {
   readonly owner = id();
   private stopping = false;
+  private ledger: UsageLedger;
   private active = new Set<Promise<void>>();
   private controllers = new Set<AbortController>();
   private maintenance?: Promise<unknown>;
@@ -50,6 +52,7 @@ export class Worker {
     private concurrency = 4,
     private shutdownTimeoutMs = 5000,
   ) {
+    this.ledger = new UsageLedger(service.store, policyFromEnv());
     if (!Number.isFinite(shutdownTimeoutMs) || shutdownTimeoutMs <= 0)
       throw new Error("Invalid Worker shutdown timeout");
   }
@@ -456,6 +459,23 @@ export class Worker {
       const modelStarted = Date.now();
       try {
         await this.runtime.execute({
+        beforeModelRequest: async (estimate) => {
+          try {
+            return await this.ledger.reserve(
+              tenant,
+              initial.id,
+              estimate,
+              this.owner,
+            );
+          } catch (e) {
+            fault = e instanceof Fault ? e.code : "MODEL_BUDGET_CHECK_FAILED";
+            controller.abort(e);
+            throw e;
+          }
+        },
+        recordModelUsage: (requestId, usage, duration) =>
+          this.ledger.settle(tenant, requestId, usage, duration),
+
           config: ctx.config,
           entries: ctx.ses.entries,
           prompt,
