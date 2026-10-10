@@ -1,4 +1,5 @@
 import Fastify from "fastify";
+import { SandboxReconciler } from "./sandbox-reconciler.js";
 import { z } from "zod";
 import {
   Fault,
@@ -91,6 +92,11 @@ export function buildAPI(
       );
   });
   app.get("/health", async () => ({ status: "ok" }));
+  app.post("/api/v1/admin/sandbox/reconcile", async (req) => {
+    const a = actor(req);
+    admin(a);
+    return new SandboxReconciler(service.store, sandbox).scan(a.tenantId);
+  });
   app.get("/api/v1/agents", async (req) => {
     const a = actor(req),
       p = page.parse(req.query);

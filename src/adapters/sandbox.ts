@@ -23,6 +23,7 @@ import {
   SandboxCapacity,
   SandboxPolicySchema,
   type SandboxPolicy,
+  type CapacityEntry,
 } from "./sandbox-policy.js";
 import {
   skillMountPath,
@@ -32,6 +33,7 @@ import {
 import type { Store } from "../store.js";
 import { remoteScript } from "./remote-script.js";
 export interface SandboxProvider {
+  inventory?(): Promise<SandboxAsset[]>;
   scope(bundle: string, skills: readonly Skill[]): string;
   createVolume(name: string): Promise<string>;
   create(
@@ -53,6 +55,11 @@ export interface SandboxProvider {
   deleteSnapshot(snapshotId: string): Promise<void>;
   destroyVolume(volumeId: string): Promise<void>;
 }
+export type SandboxAsset = {
+  sandboxId: string;
+  operation: string;
+  volumeId: string;
+};
 export class CubeProvider implements SandboxProvider {
   private config = new Config();
   constructor(
@@ -81,6 +88,23 @@ export class CubeProvider implements SandboxProvider {
         return (await Volume.connect(name, { config: this.config })).volumeId;
       throw e;
     }
+  }
+  async inventory(): Promise<SandboxAsset[]> {
+    const rows = await Sandbox.list(this.config);
+    if (!Array.isArray(rows))
+      throw new Fault(502, "SANDBOX_INVENTORY_UNSUPPORTED");
+    return rows.flatMap((row) => {
+      const sandboxId = row.sandboxID ?? row.sandboxId;
+      const operation = row.metadata?.harnessOperation;
+      const volumeId = row.metadata?.harnessWorkspaceVolume;
+      if (
+        typeof sandboxId !== "string" ||
+        typeof operation !== "string" ||
+        typeof volumeId !== "string"
+      )
+        return [];
+      return [{ sandboxId, operation, volumeId }];
+    });
   }
   scope(bundle: string, skills: readonly Skill[]) {
     const metadata = skillScope(bundle, skills);
@@ -210,6 +234,7 @@ export class CubeProvider implements SandboxProvider {
 }
 // Test/demo adapter stores files in memory and never executes a local command.
 export class DemoSandbox implements SandboxProvider {
+  operations = new Map<string, string>();
   volumes = new Map<string, Map<string, string>>();
   boxes = new Map<string, string>();
   skillSelections = new Map<string, readonly Skill[]>();
@@ -227,6 +252,7 @@ export class DemoSandbox implements SandboxProvider {
     b: string,
     skills: readonly Skill[] = [],
     snapshotId?: string,
+    operation?: string,
   ) {
     if (snapshotId && !this.snapshots.has(snapshotId))
       throw new Fault(404, "SNAPSHOT_NOT_FOUND");
@@ -234,6 +260,7 @@ export class DemoSandbox implements SandboxProvider {
     if (!this.volumes.has(v)) this.volumes.set(v, new Map());
     const sid = crypto.randomUUID();
     this.boxes.set(sid, v);
+    if (operation) this.operations.set(sid, operation);
     this.skillSelections.set(sid, structuredClone(skills));
     return sid;
   }
@@ -268,6 +295,7 @@ export class DemoSandbox implements SandboxProvider {
     throw new Fault(501, "DEMO_TOOL_UNSUPPORTED");
   }
   async kill(s: string) {
+    this.operations.delete(s);
     this.boxes.delete(s);
     this.skillSelections.delete(s);
     this.paused.delete(s);
@@ -290,11 +318,95 @@ export class DemoSandbox implements SandboxProvider {
   async destroyVolume(v: string) {
     this.volumes.delete(v);
   }
+  async inventory(): Promise<SandboxAsset[]> {
+    return [...this.boxes].flatMap(([sandboxId, volumeId]) => {
+      const operation = this.operations.get(sandboxId);
+      return operation ? [{ sandboxId, volumeId, operation }] : [];
+    });
+  }
 }
 export class SandboxManager {
   readonly policy: SandboxPolicy;
   readonly capacity: SandboxCapacity;
   private nextSweepAt = 0;
+  async inventory() {
+    if (!this.provider.inventory)
+      throw new Fault(503, "SANDBOX_INVENTORY_UNSUPPORTED");
+    return this.provider.inventory();
+  }
+  async reconcileOrphan(expected: CapacityEntry, asset: SandboxAsset) {
+    const wid = expected.workspaceId.replace(/:files$/, "");
+    const actor = {
+      tenantId: expected.tenantId,
+      userId: expected.userId,
+      admin: false,
+    };
+    return this.managed(
+      actor,
+      wid,
+      "sandbox.reconcile",
+      async (w, owner) => {
+        if (
+          w.volumeId !== asset.volumeId ||
+          !expected.operation ||
+          (!expected.sandboxId && expected.operation !== asset.operation) ||
+          (expected.sandboxId && expected.sandboxId !== asset.sandboxId)
+        )
+          throw new Fault(409, "RECONCILE_IDENTITY_UNCONFIRMED");
+        if (w.sandboxId === asset.sandboxId && w.sandboxState !== "unknown")
+          throw new Fault(409, "RECONCILE_ACTIVE_INSTANCE");
+        const references = await this.store.capacityRead((s) =>
+          Object.values(s.entries).some(
+            (e) =>
+              e.sandboxId === asset.sandboxId &&
+              (e.tenantId !== expected.tenantId ||
+                e.workspaceId !== expected.workspaceId) &&
+              e.state !== "released",
+          ),
+        );
+        if (references) throw new Fault(409, "RECONCILE_IDENTITY_UNCONFIRMED");
+        await this.record(actor, wid, owner, () => {});
+        // CAS is the final fence. Another reconciler or newer operation wins
+        // before any remote deletion; the loser never calls kill.
+        await this.capacity.claim(
+          actor.tenantId,
+          expected.workspaceId,
+          expected,
+          owner,
+        );
+        await this.capacity.pending(
+          actor.tenantId,
+          expected.workspaceId,
+          owner,
+          asset.sandboxId,
+        );
+        try {
+          await this.kill(actor, expected.workspaceId, owner, asset.sandboxId);
+          await this.record(actor, wid, owner, (current) => {
+            if (current.sandboxId === asset.sandboxId) {
+              delete current.sandboxId;
+              delete current.sandboxState;
+              delete current.sandboxSkillScope;
+            }
+          });
+          await this.capacity.released(
+            actor.tenantId,
+            expected.workspaceId,
+            owner,
+          );
+        } catch (e) {
+          await this.capacity.unknown(
+            actor.tenantId,
+            expected.workspaceId,
+            owner,
+            asset.sandboxId,
+          );
+          throw e;
+        }
+      },
+      { allRuns: true },
+    );
+  }
   constructor(
     private store: Store,
     private provider: SandboxProvider,
