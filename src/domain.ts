@@ -65,6 +65,9 @@ export type Workspace = {
   volumeId?: string;
   sandboxId?: string;
   sandboxSkillScope?: string;
+  // Per-sandbox data-plane token returned by Cube create; connect does not
+  // re-issue it, so it must survive Worker restarts with the Sandbox record.
+  sandboxTrafficToken?: string;
   sandboxState?: "active" | "paused" | "unknown";
   sandboxLastUsedAt?: number;
   sandboxSnapshots?: Record<string, SandboxSnapshot>;

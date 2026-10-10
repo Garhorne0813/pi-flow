@@ -215,7 +215,7 @@ for (const reused of [false, true])
     });
     f.provider.create = async (...args) => {
       await gate;
-      return reused ? successorId : create(...args);
+      return reused ? { sandboxId: successorId } : create(...args);
     };
     await assert.rejects(
       f.sandbox.execute(actor, f.w.id, "old", "default", "ls", {}),

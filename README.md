@@ -109,9 +109,9 @@ SSE 在连接 JWT 的 exp 到期时关闭，并返回无 event ID 的 `stream.er
 
 配置项：`SANDBOX_MAX_ACTIVE_PER_USER`、`SANDBOX_MAX_ACTIVE_TOTAL`、`SANDBOX_IDLE_PAUSE_SECONDS`、`SANDBOX_IDLE_RELEASE_SECONDS`、`SANDBOX_SWEEP_INTERVAL_SECONDS`、`SANDBOX_MAX_SNAPSHOTS_PER_WORKSPACE`（默认 20）。均为正整数；释放阈值不能小于暂停阈值。变更已有部署前，执行 `npm run migrate` 创建新的 `harness_sandbox_capacity` 表，并停掉旧版 Worker 后统一升级。启动时登记旧实例，已存在的超额实例不强制销毁，但停止新增/恢复，直到有容量。
 
-REST 提供容量/状态查询、暂停/恢复/释放，以及快照创建/列表/删除/恢复/克隆。快照管理要求 Workspace editor/owner，并拒绝有未结束 Run 的工作区；viewer 可查看自身可访问工作区的状态和快照目录。恢复按快照创建时的技能范围检查当前注册状态与部署映射，在销毁旧实例后通过快照模板创建新实例，显式覆盖技能/Workspace 挂载和网络限制。技能撤销或映射变更时拒绝恢复；禁止任意传入外部 Snapshot ID。克隆创建当前用户拥有的新 Workspace，使用独立的新 Volume，也受配额限制。
+REST 提供容量/状态查询、暂停/恢复/释放，以及快照创建/列表/删除/恢复/克隆。快照管理要求 Workspace editor/owner，并拒绝有未结束 Run 的工作区；viewer 可查看自身可访问工作区的状态和快照目录。恢复按快照创建时的技能范围检查当前注册状态与部署映射，在销毁旧实例后通过快照模板创建新实例，使用快照里记录的 Volume 挂载和 Harness 的网络设置。技能撤销或映射变更时拒绝恢复；禁止任意传入外部 Snapshot ID。Demo 克隆创建当前用户拥有的新 Workspace，使用独立的新 Volume，也受配额限制；Cube 当前拒绝跨 Workspace 克隆，避免继承源卷。
 
-实例快照的实际内存/文件系统语义取决于 Cube 后端，Harness 不把它当作持久 Volume 的备份：恢复保留当前 `/workspace` 文件，不回滚这些文件、数据库或对话历史；克隆得到独立的空 Workspace Volume，不复制原 Workspace 文件。生产数据备份需另行配置 Volume 存储后端的备份方案。Demo 快照模拟元数据与生命周期，不能替代真实 Cube 快照验收。
+实例快照的实际内存/文件系统语义取决于 Cube 后端，Harness 不把它当作持久 Volume 的备份：恢复保留当前 `/workspace` 文件，不回滚这些文件、数据库或对话历史；Demo 克隆得到独立的空 Workspace Volume，不复制原 Workspace 文件。生产数据备份需另行配置 Volume 存储后端的备份方案。Demo 快照模拟元数据与生命周期，不能替代真实 Cube 快照验收。
 
 远程创建/销毁结果不确定时保留容量预留，不按计时盲目释放，也不自动重试创建。管理员可在容量查询中看到本租户的 reserved/unknown 条目；已有明确 Sandbox ID 时可通过释放接口确认 Kill 后回收配额。创建请求丢失且没有 ID、或进程在记录 ID 前崩溃时，需要按 Cube metadata 与数据库做运维对账；完整自动孤儿对账仍未实现。已释放记录保留不计数的标记，避免并发启动时把已清理的旧实例再次登记。
 
@@ -142,6 +142,10 @@ NODE_USE_ENV_PROXY=1 npm run test:deepseek:capabilities
 `npm run bench:store:reads` 在已迁移的 `TEST_DATABASE_URL` 测试库上，对比旧 SSE 写事务路径与新只读路径。创建并清理专用租户，模拟 100 个 250 ms 事件轮询与 4 个 1 s Run 心跳；不连接模型或 Sandbox。参数与实测结果见 [docs/read-benchmark.md](docs/read-benchmark.md)。SSE/列表查询不锁定或写回租户行；每个请求结束时仍保留一次审计写入。
 
 容量 `operation` 是每次操作生成的唯一持久标识，激活后也保留；预留与接管原子比较前一条记录，暂停/释放/未知结果只更新匹配的标识。过期请求不能覆盖新请求的配额，普通 Agent 实例、文件实例和生命周期操作使用同一规则。取消在创建/连接/激活各阶段检查：已知实例确认 Kill 后退还配额；无 ID 的创建未知结果或 Kill 未确认继续占用，Workspace Volume 保留。升级时须同时更新并重启 API 与所有 Worker，避免与旧版不校验 fencing 的写入者混跑；现有 JSONB 状态兼容，无额外迁移。
+
+## Cube 实例授权与快照限制
+
+Cube 创建时的 trafficAccessToken 随实例记录持久化，执行时复用，实例清除时删除。缺少 Token 的旧实例在租约内重建并保留工作区卷。快照恢复使用模板记录的挂载；Cube 快照继承源卷，当前拒绝跨 Workspace 克隆（SNAPSHOT_CLONE_UNSUPPORTED），避免共享源工作区数据。Demo 克隆仍使用独立卷。
 
 健康检查、Worker 心跳和 Kubernetes probes 见 [docs/health.md](docs/health.md)。
 
