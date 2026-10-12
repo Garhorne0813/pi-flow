@@ -5,6 +5,7 @@ export function remote<T>(
   signal?: AbortSignal,
   late?: (value: T) => Promise<void>,
   timeout = 30000,
+  lateFailure?: (error: unknown) => Promise<void>,
 ): Promise<T> {
   return new Promise((resolve, reject) => {
     let settled = false;
@@ -49,6 +50,12 @@ export function remote<T>(
           resolve(value);
         },
         (error) => {
+          if (abandoned && lateFailure) {
+            void lateFailure(error).catch((e) =>
+              telemetry.error("sandbox_late_failure", e),
+            );
+            return;
+          }
           if (!settled) {
             settled = true;
             clean();

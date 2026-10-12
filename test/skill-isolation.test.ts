@@ -587,11 +587,12 @@ test("Sandbox injects only registered selected manifest identities, overriding u
     "agent",
     "default",
     "grep",
-    { pattern: "x", _skillManifests: [] },
+    { pattern: "x", _skillManifests: [], _skillIds: [] },
     undefined,
     [a.id],
   );
   assert.deepEqual(seen!._skillManifests, [{ path: a.path, digest: a.digest }]);
+  assert.deepEqual(seen!._skillIds, [a.id]);
 });
 
 test("Worker verifies resolved manifest identities for aliases and rejects unconfirmed identities", async () => {
