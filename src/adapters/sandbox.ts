@@ -1,4 +1,5 @@
 import { posix } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { telemetry } from "../telemetry.js";
 import {
   Fault,
@@ -9,11 +10,13 @@ import {
   type Skill,
   type Workspace,
   type SandboxSnapshot,
+  type State,
 } from "../domain.js";
 import {
   SandboxCapacity,
   SandboxPolicySchema,
   type SandboxPolicy,
+  type CapacityEntry,
 } from "./sandbox-policy.js";
 import type { Store } from "../store.js";
 import {
@@ -46,7 +49,11 @@ export class SandboxManager {
     policy: Partial<SandboxPolicy> = {},
     private canUseBundle: (bundle: string, tenant: string) => boolean = () =>
       true,
-    private limits = { remoteTimeoutMs: 30000, cleanupTimeoutMs: 1000 },
+    private limits: {
+      remoteTimeoutMs: number;
+      cleanupTimeoutMs: number;
+      leaseWaitTimeoutMs?: number;
+    } = { remoteTimeoutMs: 30000, cleanupTimeoutMs: 1000 },
   ) {
     if (Object.values(limits).some((v) => !Number.isFinite(v) || v <= 0))
       throw new Error("Invalid Sandbox time limits");
@@ -290,16 +297,19 @@ export class SandboxManager {
     fn: (sid: string) => Promise<T>,
     skillIds: readonly string[] = [],
     signal?: AbortSignal,
+    access: { write?: boolean; authorize?: (s: State) => void } = {},
   ): Promise<T> {
     signal?.throwIfAborted();
     owner = `${owner}:${crypto.randomUUID()}`;
     if (!this.canUseBundle(bundle, a.tenantId))
       throw new Fault(403, "BUNDLE_NOT_GRANTED");
-    const { skills, scope } = await this.store.tx(a.tenantId, (s) => {
+    const deadline =
+      performance.now() + (this.limits.leaseWaitTimeoutMs ?? 130000);
+    const validate = (s: State) => {
       signal?.throwIfAborted();
-      const w = workspace(s, a, wid);
-      if (w.lock && w.lock.expires > Date.now())
-        throw new Fault(409, "WORKSPACE_BUSY");
+      const w = workspace(s, a, wid, access.write);
+      if (!this.canUseBundle(bundle, a.tenantId))
+        throw new Fault(403, "BUNDLE_NOT_GRANTED");
       if (w.bundle && w.bundle !== bundle)
         throw new Fault(403, "SKILL_BUNDLE_MISMATCH");
       const skills = skillIds.map((id) => {
@@ -308,28 +318,75 @@ export class SandboxManager {
           throw new Fault(403, "SKILL_DENIED");
         return sk;
       });
-      const scope = this.provider.scope(bundle, skills);
-      w.lock = { owner, expires: Date.now() + 180000, kind: "agent" };
-      w.bundle = bundle;
-      return { skills, scope };
-    });
+      if (performance.now() >= deadline)
+        throw new Fault(504, "WORKSPACE_QUEUE_TIMEOUT");
+      return { w, skills };
+    };
+    const available = (w: Workspace) => {
+      if (!w.lock || w.lock.expires <= Date.now()) return true;
+      if (w.lock.kind === "agent") return false;
+      throw new Fault(409, "WORKSPACE_BUSY");
+    };
+    const acquire = () =>
+      this.store.tx(a.tenantId, (s) => {
+        const { w, skills } = validate(s);
+        access.authorize?.(s);
+        if (!available(w)) return undefined;
+        const scope = this.provider.scope(bundle, skills);
+        w.lock = { owner, expires: Date.now() + 180000, kind: "agent" };
+        w.bundle = bundle;
+        return { skills, scope };
+      });
+    const observe = () =>
+      this.store.readMetadata(a.tenantId, ["workspaces", "skills"], (s) =>
+        available(validate(s).w),
+      );
+    let acquired = (await observe()) ? await acquire() : undefined;
+    // Observe metadata without locking or loading Runs, Sessions or events.
+    // Only contend for the write transaction when the lease appears available;
+    // acquisition still rechecks everything atomically across Workers. No FIFO
+    // is promised, and waiters reserve no capacity.
+    while (!acquired) {
+      try {
+        await delay(
+          Math.max(1, Math.min(50, deadline - performance.now())),
+          undefined,
+          { signal },
+        );
+      } catch (e) {
+        signal?.throwIfAborted();
+        throw e;
+      }
+      if (await observe()) acquired = await acquire();
+    }
+    const { skills, scope } = acquired;
     let failed = false,
       reserved = false,
       activated = false,
       creationStarted = false,
+      instanceTouched = false,
+      authorizationFailed = false,
       connecting = false;
+    let previousCapacity: CapacityEntry | undefined;
     let activeSid: string | undefined, killing: Promise<void> | undefined;
     const assertOwned = async () => {
       signal?.throwIfAborted();
       if (failed) throw new Fault(409, "LEASE_LOST");
       await this.store.read(a.tenantId, (s) => {
-        const w = workspace(s, a, wid);
+        let w: Workspace;
+        try {
+          w = workspace(s, a, wid, access.write);
+          access.authorize?.(s);
+        } catch (e) {
+          authorizationFailed = true;
+          throw e;
+        }
         assertLease(w, owner);
       });
       signal?.throwIfAborted();
     };
     const stop = () => {
-      if (activeSid && !killing) {
+      if (activeSid && instanceTouched && !killing) {
         const sid = activeSid;
         killing = (async () => {
           // Keep ownership while deletion is in flight; a late callback cannot
@@ -359,6 +416,7 @@ export class SandboxManager {
       await this.capacity.adoptLegacy();
       const expected = await this.capacity.inspect(a.tenantId, wid);
       await this.capacity.reserve(a.tenantId, w, owner, expected);
+      previousCapacity = expected;
       reserved = true;
       let vid = w.volumeId;
       if (!vid) {
@@ -385,7 +443,10 @@ export class SandboxManager {
         (w.sandboxSkillScope !== scope ||
           (this.provider.requiresTrafficToken && !w.sandboxTrafficToken))
       ) {
-        await this.remote(() => this.kill(a, wid, owner, sid!), signal);
+        await this.remote(() => {
+          instanceTouched = true;
+          return this.kill(a, wid, owner, sid!);
+        }, signal);
         activeSid = sid = undefined;
         await this.record(a, wid, owner, (w) => clearInstance(w));
         await this.capacity.pending(a.tenantId, wid, owner);
@@ -396,7 +457,10 @@ export class SandboxManager {
           connecting = true;
           const connectingSid = sid;
           await this.remote(
-            () => this.provider.connect(connectingSid),
+            () => {
+              instanceTouched = true;
+              return this.provider.connect(connectingSid);
+            },
             signal,
             () => this.lateSandbox(a, wid, owner, connectingSid),
           );
@@ -423,6 +487,7 @@ export class SandboxManager {
         );
         const created = await this.remote(
           () => {
+            instanceTouched = true;
             creationStarted = true;
             return this.provider.create(vid!, bundle, skills, undefined, owner);
           },
@@ -470,15 +535,31 @@ export class SandboxManager {
         reserved = false;
         throw e;
       }
-      if (
+      if (reserved && !instanceTouched && !creationStarted) {
+        // No instance call or unconfirmed creation was dispatched. A denial
+        // here must not poison the workspace or release a pre-existing instance.
+        if (
+          !(await this.capacity.rollbackReservation(
+            a.tenantId,
+            wid,
+            owner,
+            previousCapacity,
+          ))
+        )
+          throw new Fault(409, "CAPACITY_LEASE_LOST");
+        reserved = false;
+      } else if (
         reserved &&
         (signal?.aborted ||
           failed ||
+          (!activated && authorizationFailed) ||
           (e instanceof Fault &&
             [
               "LEASE_LOST",
               "CAPACITY_LEASE_LOST",
               "SANDBOX_REMOTE_TIMEOUT",
+              "RUN_CANCELLED",
+              "RUN_TIMEOUT",
             ].includes(e.code)))
       ) {
         if (connecting) {
@@ -534,6 +615,7 @@ export class SandboxManager {
     args: Record<string, unknown>,
     signal?: AbortSignal,
     skillIds: readonly string[] = [],
+    authorize?: (s: State) => void,
   ) {
     return this.withLease(
       a,
@@ -568,6 +650,7 @@ export class SandboxManager {
       },
       skillIds,
       signal,
+      { write: !["read", "ls", "grep", "find"].includes(op), authorize },
     );
   }
   // File APIs use a temporary instance with only the workspace volume. Its
