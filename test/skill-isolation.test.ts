@@ -351,14 +351,14 @@ test("parent and child skills intersect physically and parent mounts are restore
     {
       execute: async (ctx) => {
         if (ctx.prompt === "parent") {
-          assert.deepEqual(await ctx.call("remote_ls", { path: "/skills" }), {
+          assert.deepEqual(await ctx.call("ls", { path: "/skills" }), {
             entries: [a.path, c.path],
           });
           await ctx.call("delegate_to_agent", {
             agentVersionId: child.id,
             task: "child",
           });
-          assert.deepEqual(await ctx.call("remote_ls", { path: "/skills" }), {
+          assert.deepEqual(await ctx.call("ls", { path: "/skills" }), {
             entries: [a.path, c.path],
           });
         } else {
@@ -369,16 +369,16 @@ test("parent and child skills intersect physically and parent mounts are restore
           );
           assert.equal(
             (
-              (await ctx.call("remote_read", { path: a.path })) as {
+              (await ctx.call("read", { path: a.path })) as {
                 text: string;
               }
             ).text,
             "a",
           );
-          await assert.rejects(ctx.call("remote_read", { path: b.path }), {
+          await assert.rejects(ctx.call("read", { path: b.path }), {
             code: "FILE_NOT_FOUND",
           });
-          await assert.rejects(ctx.call("remote_read", { path: c.path }), {
+          await assert.rejects(ctx.call("read", { path: c.path }), {
             code: "FILE_NOT_FOUND",
           });
         }
@@ -613,7 +613,7 @@ test("Worker verifies resolved manifest identities for aliases and rejects uncon
           "/workspace/link",
           "unknown",
         ]) {
-          await assert.rejects(ctx.call("remote_read", { path }), {
+          await assert.rejects(ctx.call("read", { path }), {
             code:
               path === "unknown"
                 ? "SKILL_IDENTITY_UNCONFIRMED"
