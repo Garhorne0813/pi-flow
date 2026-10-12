@@ -13,7 +13,7 @@ Built on Pi, with CubeSandbox for remote execution. The current release is a **0
 ### Agent conversations
 
 - **Streaming responses** — receive message deltas, tool results, task status, and interaction requests over SSE.
-- **Persistent sessions** — keep conversation history and Todo state in a workspace; each session pins an agent version.
+- **Persistent sessions** — keep conversation history and Todo state in a workspace; each session binds to a logical Agent. New independent tasks use its currently active version, while in-progress task chains retain their original version.
 - **Reconnect and cancel** — replay missed events using `Last-Event-ID`; disconnecting leaves the task running, while an explicit cancel stops it.
 - **Reliable submissions** — an idempotency key prevents duplicate task creation; one active Run is allowed per session.
 
