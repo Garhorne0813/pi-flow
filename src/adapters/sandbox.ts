@@ -10,6 +10,7 @@ import {
   type Skill,
   type Workspace,
   type SandboxSnapshot,
+  type State,
 } from "../domain.js";
 import {
   SandboxCapacity,
@@ -238,6 +239,7 @@ export class SandboxManager {
     fn: (sid: string) => Promise<T>,
     skillIds: readonly string[] = [],
     signal?: AbortSignal,
+    access: { write?: boolean; authorize?: (s: State) => void } = {},
   ): Promise<T> {
     signal?.throwIfAborted();
     owner = `${owner}:${crypto.randomUUID()}`;
@@ -245,35 +247,47 @@ export class SandboxManager {
       throw new Fault(403, "BUNDLE_NOT_GRANTED");
     const deadline =
       performance.now() + (this.limits.leaseWaitTimeoutMs ?? 130000);
+    const validate = (s: State) => {
+      signal?.throwIfAborted();
+      const w = workspace(s, a, wid, access.write);
+      if (!this.canUseBundle(bundle, a.tenantId))
+        throw new Fault(403, "BUNDLE_NOT_GRANTED");
+      if (w.bundle && w.bundle !== bundle)
+        throw new Fault(403, "SKILL_BUNDLE_MISMATCH");
+      const skills = skillIds.map((id) => {
+        const sk = s.skills[id];
+        if (!sk?.enabled || sk.bundle !== bundle)
+          throw new Fault(403, "SKILL_DENIED");
+        return sk;
+      });
+      if (performance.now() >= deadline)
+        throw new Fault(504, "WORKSPACE_QUEUE_TIMEOUT");
+      return { w, skills };
+    };
+    const available = (w: Workspace) => {
+      if (!w.lock || w.lock.expires <= Date.now()) return true;
+      if (w.lock.kind === "agent") return false;
+      throw new Fault(409, "WORKSPACE_BUSY");
+    };
     const acquire = () =>
       this.store.tx(a.tenantId, (s) => {
-        signal?.throwIfAborted();
-        const w = workspace(s, a, wid);
-        if (!this.canUseBundle(bundle, a.tenantId))
-          throw new Fault(403, "BUNDLE_NOT_GRANTED");
-        if (w.bundle && w.bundle !== bundle)
-          throw new Fault(403, "SKILL_BUNDLE_MISMATCH");
-        const skills = skillIds.map((id) => {
-          const sk = s.skills[id];
-          if (!sk?.enabled || sk.bundle !== bundle)
-            throw new Fault(403, "SKILL_DENIED");
-          return sk;
-        });
-        if (performance.now() >= deadline)
-          throw new Fault(504, "WORKSPACE_QUEUE_TIMEOUT");
-        if (w.lock && w.lock.expires > Date.now()) {
-          if (w.lock.kind === "agent") return undefined;
-          throw new Fault(409, "WORKSPACE_BUSY");
-        }
+        const { w, skills } = validate(s);
+        access.authorize?.(s);
+        if (!available(w)) return undefined;
         const scope = this.provider.scope(bundle, skills);
         w.lock = { owner, expires: Date.now() + 180000, kind: "agent" };
         w.bundle = bundle;
         return { skills, scope };
       });
-    let acquired = await acquire();
-    // Retry the persistent lease, rather than a process-local mutex: competing
-    // Runs on other Workers must serialize too. Never wait inside a transaction
-    // or reserve capacity before acquiring the workspace. No FIFO is promised.
+    const observe = () =>
+      this.store.readMetadata(a.tenantId, ["workspaces", "skills"], (s) =>
+        available(validate(s).w),
+      );
+    let acquired = (await observe()) ? await acquire() : undefined;
+    // Observe metadata without locking or loading Runs, Sessions or events.
+    // Only contend for the write transaction when the lease appears available;
+    // acquisition still rechecks everything atomically across Workers. No FIFO
+    // is promised, and waiters reserve no capacity.
     while (!acquired) {
       try {
         await delay(
@@ -285,7 +299,7 @@ export class SandboxManager {
         signal?.throwIfAborted();
         throw e;
       }
-      acquired = await acquire();
+      if (await observe()) acquired = await acquire();
     }
     const { skills, scope } = acquired;
     let failed = false,
@@ -298,7 +312,8 @@ export class SandboxManager {
       signal?.throwIfAborted();
       if (failed) throw new Fault(409, "LEASE_LOST");
       await this.store.read(a.tenantId, (s) => {
-        const w = workspace(s, a, wid);
+        const w = workspace(s, a, wid, access.write);
+        access.authorize?.(s);
         assertLease(w, owner);
       });
       signal?.throwIfAborted();
@@ -502,6 +517,7 @@ export class SandboxManager {
     args: Record<string, unknown>,
     signal?: AbortSignal,
     skillIds: readonly string[] = [],
+    authorize?: (s: State) => void,
   ) {
     return this.withLease(
       a,
@@ -535,6 +551,7 @@ export class SandboxManager {
       },
       skillIds,
       signal,
+      { write: !["read", "ls", "grep", "find"].includes(op), authorize },
     );
   }
   // File APIs use a temporary instance with only the workspace volume. Its

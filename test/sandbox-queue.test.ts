@@ -208,3 +208,127 @@ for (const kind of ["lifecycle", "files"] as const)
       "external",
     );
   });
+
+for (const op of ["write", "edit", "bash"])
+  test(`queued ${op} cannot execute after editor is downgraded to viewer`, async () => {
+    const f = await fixture();
+    const editor = { ...actor, userId: "editor", admin: false };
+    await f.store.tx(actor.tenantId, (s) => {
+      s.workspaces[f.w.id]!.members.editor = "editor";
+    });
+    let calls = 0;
+    f.provider.execute = async () => {
+      calls++;
+      return {};
+    };
+    const waiting = f
+      .makeManager()
+      .execute(editor, f.w.id, "editor-run", "default", op, {});
+    const checked = assert.rejects(waiting, { code: "READ_ONLY" });
+    try {
+      await new Promise((r) => setTimeout(r, 10));
+      await f.store.tx(actor.tenantId, (s) => {
+        s.workspaces[f.w.id]!.members.editor = "viewer";
+      });
+      f.gate.resolve();
+      await Promise.all([f.held, checked]);
+      assert.equal(calls, 0);
+      // Direct read-only access remains available to a viewer.
+      await f.sandbox.execute(
+        editor,
+        f.w.id,
+        "viewer-read",
+        "default",
+        "ls",
+        {},
+      );
+      assert.equal(calls, 1);
+    } finally {
+      f.gate.resolve();
+      await Promise.allSettled([f.held, waiting, checked]);
+    }
+  });
+
+test("write permission is rechecked atomically after an available-lock observation", async () => {
+  const f = await fixture();
+  f.gate.resolve();
+  await f.held;
+  let calls = 0;
+  f.provider.execute = async () => {
+    calls++;
+    return {};
+  };
+  const readMetadata = f.store.readMetadata.bind(f.store);
+  f.store.readMetadata = async (tenant, keys, fn) => {
+    const observed = await readMetadata(tenant, keys, fn);
+    await f.store.tx(tenant, (s) => {
+      s.workspaces[f.w.id]!.members[actor.userId] = "viewer";
+    });
+    return observed;
+  };
+  await assert.rejects(
+    f.sandbox.execute(actor, f.w.id, "writer", "default", "write", {}),
+    { code: "READ_ONLY" },
+  );
+  assert.equal(calls, 0);
+  assert.equal(
+    await f.store.read(actor.tenantId, (s) => s.workspaces[f.w.id]!.lock),
+    undefined,
+  );
+});
+
+test("twenty blocked waiters use metadata reads without write transactions or full-state reads", async () => {
+  const f = await fixture(5000);
+  const tx = f.store.tx.bind(f.store),
+    read = f.store.read.bind(f.store);
+  let writes = 0,
+    fullReads = 0;
+  f.store.tx = (tenant, fn) => {
+    writes++;
+    return tx(tenant, fn);
+  };
+  f.store.read = (tenant, fn) => {
+    fullReads++;
+    return read(tenant, fn);
+  };
+  // MemoryStore's metadata implementation delegates to read; mirror the
+  // PostgreSQL implementation so full-state instrumentation stays meaningful.
+  f.store.readMetadata = (tenant, keys, fn) =>
+    read(tenant, (s) =>
+      fn({
+        ...s,
+        runs: {},
+        sessions: {},
+        events: [],
+      }),
+    );
+  const controller = new AbortController(),
+    reason = new Error("stop waiters");
+  const waiting = Array.from({ length: 20 }, (_, i) =>
+    f.sandbox.execute(
+      actor,
+      f.w.id,
+      `waiter-${i}`,
+      "default",
+      "ls",
+      {},
+      controller.signal,
+    ),
+  );
+  const checked = waiting.map((p) =>
+    assert.rejects(p, (error: unknown) => error === reason),
+  );
+  try {
+    await new Promise((r) => setTimeout(r, 160));
+    assert.equal(writes, 0);
+    assert.equal(fullReads, 0);
+    controller.abort(reason);
+    await Promise.all(checked);
+    assert.equal(writes, 0);
+  } finally {
+    controller.abort(reason);
+    await Promise.allSettled(checked);
+    f.gate.resolve();
+    await f.held;
+  }
+});

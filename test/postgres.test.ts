@@ -60,16 +60,45 @@ test(
         ),
         "agent",
       );
-      second = managers[1]!.execute(
-        actor,
-        w.id,
-        "run-two",
-        "default",
-        "find",
-        {},
-      );
-      await new Promise((r) => setTimeout(r, 100));
-      assert.equal(calls, 1);
+      let writes = 0,
+        observations = 0;
+      const tx = stores[1]!.tx.bind(stores[1]!);
+      const readMetadata = stores[1]!.readMetadata.bind(stores[1]!);
+      stores[1]!.tx = (tenant, fn) => {
+        writes++;
+        return tx(tenant, fn);
+      };
+      stores[1]!.readMetadata = async (tenant, keys, fn) => {
+        const result = await readMetadata(tenant, keys, fn);
+        observations++;
+        return result;
+      };
+      // Even an unrelated writer holding the tenant row must not block lease
+      // observations or cause waiting tools to join the write-lock queue.
+      const blocker = await stores[0]!.pool.connect();
+      try {
+        await blocker.query("BEGIN");
+        await blocker.query(
+          "SELECT state FROM harness_tenants WHERE tenant_id=$1 FOR UPDATE",
+          [actor.tenantId],
+        );
+        second = managers[1]!.execute(
+          actor,
+          w.id,
+          "run-two",
+          "default",
+          "find",
+          {},
+        );
+        void second.catch(() => {});
+        await new Promise((r) => setTimeout(r, 160));
+        assert.equal(calls, 1);
+        assert.equal(writes, 0);
+        assert.ok(observations >= 2);
+      } finally {
+        await blocker.query("ROLLBACK");
+        blocker.release();
+      }
       release();
       assert.deepEqual(await Promise.all([first, second]), [
         { text: "result" },

@@ -427,6 +427,51 @@ test("parallel grep and find in one Run transparently serialize", async () => {
     await f.worker.stop();
   }
 });
+test("queued Worker tools reauthorize a revoked Agent before acquiring the lease", async () => {
+  const f = await fixture({
+    execute: async (ctx) => {
+      await ctx.call("remote_ls", {});
+    },
+  });
+  let release!: () => void, entered!: () => void;
+  const gate = new Promise<void>((r) => (release = r)),
+    began = new Promise<void>((r) => (entered = r));
+  const held = f.sandbox.withLease(
+    alice,
+    f.w.id,
+    "other-run",
+    "default",
+    async () => {
+      entered();
+      await gate;
+    },
+  );
+  let calls = 0;
+  f.provider.execute = async () => {
+    calls++;
+    return {};
+  };
+  const run = await f.service.submit(alice, f.ses.id, "queued");
+  try {
+    await began;
+    await f.worker.tick();
+    await new Promise((r) => setTimeout(r, 60));
+    assert.equal(calls, 0);
+    await f.store.tx(alice.tenantId, (s) => {
+      s.agents[f.agent.id]!.enabled = false;
+    });
+    release();
+    await held;
+    const result = await drain(f, run.id);
+    assert.equal(result.state, "FAILED");
+    assert.equal(result.error, "AGENT_REVOKED");
+    assert.equal(calls, 0);
+  } finally {
+    release();
+    await held;
+    await f.worker.stop();
+  }
+});
 test("token budget terminates model execution", async () => {
   const f = await fixture({
     execute: async (c) => {
