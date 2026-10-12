@@ -42,7 +42,7 @@ MCP 发现只遍历当前 Agent 的 Server 列表；调用与审批前再次检�
 - 审批/拒绝/问答持久状态、新 Run 续跑、审批副作用仅执行一次。
 - 子 Agent 权限交集与独立 Session、工具和 Token 预算。
 - Worker 故障不重放、Run 取消、SSE 终态事件与游标回放。
-- 真实 Pi 0.99.2 对接本地模拟网关：只有配置的规范工具名，read/bash 调用注册的远程工具，规范 Session Entries 及旧 remote_* 历史恢复后含原工具结果。
+- 真实 Pi 0.99.2 对接本地模拟网关：只有配置的规范工具名，read/bash 调用注册的远程工具，规范 Session Entries 恢复后含原工具结果。
 - 真实 MCP SDK 对接本地 HTTPS Streamable HTTP Server：筛选工具、认证头与实时撤销。
 - Agent 技能挂载计划（Cube SDK 调用替身）、不同 Session/父子 Agent 切换技能范围、工作区保留、旧实例替换、Kill 失败拒绝访问；未授权 MCP Server 不被访问、不被发现、不可调用或申请审批。
 - 真实 UCS JWT/JWKS HTTPS 验证：签名、issuer/audience/expiry/tenant。
@@ -105,7 +105,3 @@ Sandbox 控制请求的本地等待最多 30 秒，工具执行最多 130 秒；
 事件含 callId、runId 和可选 requestId；tools/call 的 JSON-RPC `_meta` 包含同样的关联信息，HTTP `x-harness-call-id` / `x-harness-run-id` 可供服务端日志对账。关联信息不构成服务端幂等保证，也不证明远端回滚。白名单、审批与实时撤销继续生效。
 
 新增回归覆盖四种 Sandbox 请求永久挂起、迟到 Volume/create/connect/kill、后继复用与独立孤儿、同 Worker 超时后调度下一 Run、有界停机错误；真实本地 HTTPS MCP 在副作用完成后阻塞响应，通过正常审批与继续流程取消，确认 FAILED/未知、关联 ID 一致且调用不重放。另验证发送前取消、确认结果后取消、Run deadline 超时和没有取消的响应丢失。
-
-### 工具命名兼容性
-
-新注册的 Sandbox 工具仅向模型暴露规范名字；`todo`、`ask_user_question`、`delegate_to_agent` 和 `mcp_{server}_{tool}` 名字不变。旧 Session Entries 中的 `remote_*` 调用及结果作为历史保留，不重写、不重放；恢复后的新调用使用规范名字。待审批记录中的 `remote_*` 仍由 Worker 去除前缀后验证 schema、工具白名单、当前授权并交给 CubeSandbox 执行。无需迁移已有记录，旧名字不会作为额外工具注册给模型。

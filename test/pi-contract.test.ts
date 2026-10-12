@@ -9,7 +9,7 @@ import {
   type RuntimeContext,
 } from "../src/runtime.js";
 import { specs } from "../src/tool-specs.js";
-test("real Pi 0.99.2 uses canonical custom read/bash and restores legacy session entries", async () => {
+test("real Pi 0.99.2 uses canonical custom read/bash and restores canonical session entries", async () => {
   const requests: Record<string, any>[] = [];
   let count = 0;
   const server = createServer(async (req, res) => {
@@ -145,30 +145,7 @@ test("real Pi 0.99.2 uses canonical custom read/bash and restores legacy session
         String(m.content).includes("SKILL.md"),
       ),
     );
-    // Simulate pre-rename persisted tool calls/results without rewriting IDs or history.
-    entries = entries.map((entry: any) => {
-      if (entry.type !== "message") return entry;
-      const message = entry.message;
-      if (message.role === "assistant")
-        return {
-          ...entry,
-          message: {
-            ...message,
-            content: message.content.map((block: any) =>
-              block.type === "toolCall"
-                ? { ...block, name: `remote_${block.name}` }
-                : block,
-            ),
-          },
-        };
-      if (message.role === "toolResult")
-        return {
-          ...entry,
-          message: { ...message, toolName: `remote_${message.toolName}` },
-        };
-      return entry;
-    });
-    const legacyEntries = structuredClone(entries);
+    const savedEntries = structuredClone(entries);
     const restored = SessionManager.inMemory(
       "/harness",
       undefined,
@@ -186,9 +163,9 @@ test("real Pi 0.99.2 uses canonical custom read/bash and restores legacy session
       resumedRequest.messages.flatMap((m: any) =>
         (m.tool_calls ?? []).map((t: any) => t.function.name),
       ),
-      ["remote_read", "remote_bash"],
+      ["read", "bash"],
     );
-    assert.deepEqual(entries.slice(0, legacyEntries.length), legacyEntries);
+    assert.deepEqual(entries.slice(0, savedEntries.length), savedEntries);
     for (const name of ["read", "bash"])
       assert.ok(
         resumedRequest.messages.some(
