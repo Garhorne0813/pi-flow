@@ -46,6 +46,20 @@ def write(v,content):
   try: os.unlink(tmp,dir_fd=fd)
   except FileNotFoundError: pass
   os.close(fd)
+# Fail closed when an older Cube ignores host-mount metadata or restores it rw.
+# Check the exact target, not merely the enclosing root filesystem.
+host_mounts=a.get('_hostSkillMounts',[])
+if host_mounts:
+ mounts={}
+ with open('/proc/self/mountinfo') as f:
+  for line in f:
+   fields=line.split(); mounts[fields[4]]=fields[5].split(',')
+ for mount in host_mounts:
+  if os.path.realpath(mount)!=mount or 'ro' not in mounts.get(mount,[]):
+   raise SkillIntegrityError('SKILL_HOST_MOUNT_UNCONFIRMED')
+  for d,dirs,files in os.walk(mount,followlinks=False):
+   for name in dirs+files:
+    if os.path.islink(os.path.join(d,name)): raise SkillIntegrityError('SKILL_HOST_SOURCE_UNSAFE')
 # Only the harness supplies this registry; validate canonical identities and bytes
 # before all tools, including grep and approved shell commands.
 for manifest in a.get('_skillManifests',[]):

@@ -1,4 +1,9 @@
 import { z } from "zod";
+import {
+  SkillVolumeSchema,
+  HostSkillRootsSchema,
+  validateSkillBindings,
+} from "./adapters/skill-mounts.js";
 import { MemoryStore, PostgresStore } from "./store.js";
 import { HarnessService } from "./service.js";
 import {
@@ -46,18 +51,13 @@ export async function bootstrap() {
     );
   if (!Object.keys(bundles).length)
     throw new Error("Skill bundle mapping required");
+  const hostSkillRoots = HostSkillRootsSchema.parse(
+    JSON.parse(process.env.SKILL_HOST_ROOTS_JSON ?? "[]"),
+  );
   const skillVolumes = z
-    .record(
-      z.string(),
-      z
-        .object({
-          bundle: z.string().min(1),
-          path: z.string().regex(/^\/skills\/(?:[a-zA-Z0-9_-]+\/)+SKILL\.md$/),
-          volume: z.string().min(1),
-        })
-        .strict(),
-    )
+    .record(z.string(), SkillVolumeSchema)
     .parse(JSON.parse(process.env.SKILL_VOLUMES_JSON ?? "{}"));
+  validateSkillBindings(skillVolumes, hostSkillRoots);
   for (const skill of Object.values(skillVolumes))
     if (!Object.hasOwn(bundles, skill.bundle))
       throw new Error("Unknown skill volume bundle");
@@ -88,6 +88,7 @@ export async function bootstrap() {
         skillVolumes,
         process.env.CUBE_EXEC_USER!,
         process.env.CUBE_VOLUME_DRIVER!,
+        hostSkillRoots,
       );
   const service = new HarnessService(
     store,

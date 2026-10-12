@@ -12,6 +12,8 @@ import { Fault, type Skill } from "../domain.js";
 import {
   skillMountPath,
   skillScope,
+  validateSkillBindings,
+  validateHostSkillSource,
   type SkillVolume,
 } from "../adapters/skill-mounts.js";
 import { remoteScript } from "../adapters/remote-script.js";
@@ -25,12 +27,11 @@ export class CubeProvider implements SandboxProvider {
     private skillVolumes: Record<string, SkillVolume>,
     private user: string,
     private driver: string,
+    private hostSkillRoots: readonly string[] = [],
   ) {
     if (/^(root(?::|$)|0(?::|$))/.test(user) || !user)
       throw new Error("Cube execution user must be non-root");
-    const volumes = Object.values(skillVolumes).map((s) => s.volume);
-    if (new Set(volumes).size !== volumes.length)
-      throw new Error("Each skill version requires a separate volume");
+    validateSkillBindings(skillVolumes, hostSkillRoots);
   }
   async createVolume(name: string) {
     try {
@@ -49,6 +50,7 @@ export class CubeProvider implements SandboxProvider {
     }
   }
   scope(bundle: string, skills: readonly Skill[]) {
+    validateSkillBindings(this.skillVolumes, this.hostSkillRoots, false);
     const metadata = skillScope(bundle, skills);
     const volumes = [...skills]
       .sort((a, b) => a.id.localeCompare(b.id))
@@ -62,7 +64,9 @@ export class CubeProvider implements SandboxProvider {
           published.path !== skill.path
         )
           throw new Fault(403, "SKILL_VOLUME_NOT_REGISTERED");
-        return { id: skill.id, volume: published.volume };
+        return "hostPath" in published
+          ? { id: skill.id, backend: "host", source: published.hostPath }
+          : { id: skill.id, volume: published.volume };
       });
     return createHash("sha256")
       .update(JSON.stringify({ metadata, volumes }))
@@ -80,6 +84,8 @@ export class CubeProvider implements SandboxProvider {
       skill,
       published: this.skillVolumes[skill.id]!,
     }));
+    for (const { published } of selected)
+      if ("hostPath" in published) validateHostSkillSource(published.hostPath);
     // Snapshot templates already include their recorded workspace and skill
     // mounts. Re-declaring them makes CubeMaster reject the create request.
     const volumeMounts: Record<string, Volume | VolumeMount> = {};
@@ -88,7 +94,10 @@ export class CubeProvider implements SandboxProvider {
       volumeMounts["/workspace"] = w;
       const mounted = new Set([w.volumeId]);
       for (const { skill, published } of selected) {
-        const v = await Volume.connect(published.volume, { config: this.config });
+        if ("hostPath" in published) continue;
+        const v = await Volume.connect(published.volume, {
+          config: this.config,
+        });
         if (mounted.has(v.volumeId))
           throw new Fault(403, "SKILL_VOLUME_CONFLICT");
         mounted.add(v.volumeId);
@@ -97,18 +106,55 @@ export class CubeProvider implements SandboxProvider {
         });
       }
     }
+    const hostMounts = selected.flatMap(({ skill, published }) =>
+      "hostPath" in published
+        ? [
+            {
+              hostPath: published.hostPath,
+              mountPath: skillMountPath(skill),
+              readOnly: true,
+            },
+          ]
+        : [],
+    );
     const sb = await Sandbox.create({
       config: this.config,
       ...(snapshotId ? { templateId: snapshotId } : {}),
       ...(Object.keys(volumeMounts).length ? { volumeMounts } : {}),
       network: { allowPublicTraffic: false },
       metadata: {
+        ...(!snapshotId && hostMounts.length
+          ? { "host-mount": JSON.stringify(hostMounts) }
+          : {}),
         harnessWorkspaceVolume: volume,
         harnessSkillBundle: bundle,
         harnessSkillScope: scope,
         ...(operation ? { harnessOperation: operation } : {}),
       },
     });
+    if (hostMounts.length) {
+      try {
+        await this.runRemote(sb, "ls", {
+          path: "/workspace",
+          _hostSkillMounts: hostMounts.map((m) => m.mountPath),
+          _skillManifests: skills.map((s) => ({
+            path: s.path,
+            digest: s.digest,
+          })),
+        });
+      } catch (error) {
+        // A failed preflight must never expose the instance to tools.
+        try {
+          await this.kill(sb.sandboxId);
+        } catch (cleanup) {
+          throw new AggregateError(
+            [error, cleanup],
+            `Host mount preflight failed; cleanup unconfirmed for ${sb.sandboxId}`,
+          );
+        }
+        throw error;
+      }
+    }
     return {
       sandboxId: sb.sandboxId,
       trafficToken: sb.trafficAccessToken ?? undefined,
@@ -138,6 +184,28 @@ export class CubeProvider implements SandboxProvider {
           this.config,
         )
       : connected;
+    const manifests = Array.isArray(args._skillManifests)
+      ? (args._skillManifests as { path: string; digest: string }[])
+      : [];
+    const hostMounts = manifests.flatMap((manifest) => {
+      const binding = Object.values(this.skillVolumes).find(
+        (s) => s.path === manifest.path,
+      );
+      if (!binding || !("hostPath" in binding)) return [];
+      if (
+        !this.hostSkillRoots.some((r) => binding.hostPath.startsWith(r + "/"))
+      )
+        throw new Fault(403, "SKILL_HOST_PATH_DENIED");
+      validateHostSkillSource(binding.hostPath);
+      return [binding.path.slice(0, -"/SKILL.md".length)];
+    });
+    return this.runRemote(sb, op, { ...args, _hostSkillMounts: hostMounts });
+  }
+  private async runRemote(
+    sb: Sandbox,
+    op: string,
+    args: Record<string, unknown>,
+  ) {
     const script = Buffer.from(remoteScript).toString("base64");
     const params = Buffer.from(JSON.stringify({ op, args })).toString("base64");
     const cmd = `python3 -c "import base64;exec(base64.b64decode('${script}'))" '${params}'`;
@@ -148,6 +216,8 @@ export class CubeProvider implements SandboxProvider {
     });
     if (result.exitCode !== 0) {
       for (const code of [
+        "SKILL_HOST_MOUNT_UNCONFIRMED",
+        "SKILL_HOST_SOURCE_UNSAFE",
         "SKILL_DIGEST_MISMATCH",
         "SKILL_IDENTITY_UNCONFIRMED",
       ])
