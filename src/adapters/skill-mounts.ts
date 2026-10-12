@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { lstatSync, readdirSync, realpathSync } from "node:fs";
+import { lstat, readdir, realpath } from "node:fs/promises";
 import { posix } from "node:path";
 import { z } from "zod";
 import { Fault, type Skill } from "../domain.js";
@@ -29,18 +29,12 @@ export const HostSkillRootsSchema = z.array(absoluteDirectory);
 export function validateSkillBindings(
   bindings: Record<string, SkillVolume>,
   roots: readonly string[] = [],
-  checkSources = true,
 ) {
   HostSkillRootsSchema.parse(roots);
-  const paths: string[] = [],
-    volumes = new Set<string>(),
+  const volumes = new Set<string>(),
     sources: string[] = [];
   for (const binding of Object.values(bindings)) {
     SkillVolumeSchema.parse(binding);
-    const target = binding.path.slice(0, -"/SKILL.md".length);
-    if (paths.some((p) => overlaps(p, target)))
-      throw new Fault(400, "SKILL_MOUNT_CONFLICT");
-    paths.push(target);
     if ("volume" in binding) {
       if (volumes.has(binding.volume))
         throw new Error("Each skill version requires a separate volume");
@@ -51,7 +45,6 @@ export function validateSkillBindings(
       if (sources.some((p) => overlaps(p, binding.hostPath)))
         throw new Fault(400, "SKILL_HOST_SOURCE_CONFLICT");
       sources.push(binding.hostPath);
-      if (checkSources) validateHostSkillSource(binding.hostPath);
     }
   }
 }
@@ -61,18 +54,21 @@ function overlaps(a: string, b: string) {
 // Cube's metadata protocol cannot attest source realpaths on a remote node.
 // Host mode therefore requires the same storage at this path in the control
 // processes and Cubelet; unavailable sources fail closed rather than guessing.
-export function validateHostSkillSource(source: string) {
+export async function validateHostSkillSource(source: string) {
   try {
-    if (realpathSync(source) !== source || !lstatSync(source).isDirectory())
+    if (
+      (await realpath(source)) !== source ||
+      !(await lstat(source)).isDirectory()
+    )
       throw new Error("non-canonical source");
     const pending = [source];
     let count = 0;
     while (pending.length) {
       const dir = pending.pop()!;
-      for (const name of readdirSync(dir)) {
+      for (const name of await readdir(dir)) {
         if (++count > 10000) throw new Error("source too large");
         const path = posix.join(dir, name),
-          stat = lstatSync(path);
+          stat = await lstat(path);
         if (stat.isSymbolicLink() || (!stat.isDirectory() && !stat.isFile()))
           throw new Error("unsafe source entry");
         if (stat.isDirectory()) pending.push(path);

@@ -3,6 +3,7 @@ import {
   SkillVolumeSchema,
   HostSkillRootsSchema,
   validateSkillBindings,
+  validateHostSkillSource,
 } from "./adapters/skill-mounts.js";
 import { MemoryStore, PostgresStore } from "./store.js";
 import { HarnessService } from "./service.js";
@@ -58,6 +59,8 @@ export async function bootstrap() {
     .record(z.string(), SkillVolumeSchema)
     .parse(JSON.parse(process.env.SKILL_VOLUMES_JSON ?? "{}"));
   validateSkillBindings(skillVolumes, hostSkillRoots);
+  for (const binding of Object.values(skillVolumes))
+    if ("hostPath" in binding) await validateHostSkillSource(binding.hostPath);
   for (const skill of Object.values(skillVolumes))
     if (!Object.hasOwn(bundles, skill.bundle))
       throw new Error("Unknown skill volume bundle");

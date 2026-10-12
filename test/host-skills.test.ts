@@ -18,6 +18,7 @@ import { CubeProvider } from "../src/sandbox/cube-provider.js";
 import {
   SkillVolumeSchema,
   validateSkillBindings,
+  validateHostSkillSource,
   type SkillVolume,
 } from "../src/adapters/skill-mounts.js";
 import type { Skill } from "../src/domain.js";
@@ -84,20 +85,16 @@ test("host schema and allowlist reject missing/ambiguous backends and non-canoni
     { code: "SKILL_HOST_PATH_DENIED" },
   );
   validateSkillBindings({ [a.id]: binding }, [root]);
-  assert.throws(
-    () =>
-      validateSkillBindings(
-        {
-          [a.id]: binding,
-          [b.id]: {
-            bundle: "default",
-            path: "/skills/a/v1/nested/SKILL.md",
-            volume: "v",
-          },
-        },
-        [root],
-      ),
-    { code: "SKILL_MOUNT_CONFLICT" },
+  validateSkillBindings(
+    {
+      [a.id]: binding,
+      [b.id]: {
+        bundle: "default",
+        path: "/skills/a/v1/nested/SKILL.md",
+        volume: "v",
+      },
+    },
+    [root],
   );
   assert.throws(
     () =>
@@ -109,33 +106,24 @@ test("host schema and allowlist reject missing/ambiguous backends and non-canoni
   );
 });
 
-test("host validation rejects missing sources, ancestor symlinks and links to other skill directories", (t) => {
+test("host validation rejects missing sources, ancestor symlinks and links to other skill directories", async (t) => {
   const root = source(t);
   const binding = {
     bundle: "default",
     path: a.path,
     hostPath: root + "/missing",
   };
-  assert.throws(() => validateSkillBindings({ [a.id]: binding }, [root]), {
+  await assert.rejects(validateHostSkillSource(binding.hostPath), {
     code: "SKILL_HOST_SOURCE_UNSAFE",
   });
   symlinkSync(root + "/a", root + "/alias");
-  assert.throws(
-    () =>
-      validateSkillBindings(
-        { [a.id]: { ...binding, hostPath: root + "/alias" } },
-        [root],
-      ),
-    { code: "SKILL_HOST_SOURCE_UNSAFE" },
-  );
+  await assert.rejects(validateHostSkillSource(root + "/alias"), {
+    code: "SKILL_HOST_SOURCE_UNSAFE",
+  });
   symlinkSync(root + "/b", root + "/a/other");
-  assert.throws(
-    () =>
-      validateSkillBindings({ [a.id]: { ...binding, hostPath: root + "/a" } }, [
-        root,
-      ]),
-    { code: "SKILL_HOST_SOURCE_UNSAFE" },
-  );
+  await assert.rejects(validateHostSkillSource(root + "/a"), {
+    code: "SKILL_HOST_SOURCE_UNSAFE",
+  });
 });
 
 test("pure host, mixed and empty selections use the SDK metadata contract; restored mounts are inherited and checked", async (t) => {
@@ -196,6 +184,7 @@ test("pure host, mixed and empty selections use the SDK metadata contract; resto
   // execute after auto-resume checks mounts again; caller cannot suppress it.
   await provider.execute("box", "ls", {
     _hostSkillMounts: [],
+    _skillIds: [a.id],
     _skillManifests: [{ path: a.path, digest: a.digest }],
   });
   assert.deepEqual(calls[3]!.args._hostSkillMounts, ["/skills/a/v1"]);
@@ -373,4 +362,331 @@ test("vendored SDK sends host-mount string metadata alongside readonly volumeMou
     { name: "workspace", path: "/workspace" },
     { name: "skill-b", path: "/skills/b/v1", readOnly: true },
   ]);
+});
+
+async function lifecycle(t: import("node:test").TestContext, timeout = 30000) {
+  const { MemoryStore } = await import("../src/store.js");
+  const { HarnessService } = await import("../src/service.js");
+  const { SandboxManager } = await import("../src/adapters/sandbox.js");
+  const root = source(t),
+    store = new MemoryStore();
+  const actor = { tenantId: "cleanup", userId: "owner", admin: true };
+  await store.tx(actor.tenantId, (s) => {
+    s.skills[a.id] = a;
+  });
+  const workspace = await new HarnessService(
+    store,
+    [],
+    ["default"],
+  ).createWorkspace(actor, "host");
+  const provider = new CubeProvider(
+    { [a.id]: { bundle: a.bundle, path: a.path, hostPath: root + "/a" } },
+    "sandbox",
+    "nfs",
+    [root],
+  );
+  const behavior = {
+    failure: "",
+    cleanupFailure: false,
+    gate: undefined as Promise<void> | undefined,
+  };
+  let created = 0;
+  const killed: string[] = [];
+  t.mock.method(
+    Volume,
+    "connect",
+    async (name: string) => ({ volumeId: name }) as Volume,
+  );
+  t.mock.method(Sandbox, "create", async () => {
+    const failure = behavior.failure,
+      gate = behavior.gate;
+    return {
+      sandboxId: `box-${++created}`,
+      trafficAccessToken: "token",
+      commands: {
+        run: async () => {
+          await gate;
+          return { exitCode: failure ? 1 : 0, stderr: failure, stdout: "{}" };
+        },
+      },
+    } as unknown as Sandbox;
+  });
+  t.mock.method(provider, "connect", async () => {});
+  t.mock.method(provider, "kill", async (sid: string) => {
+    if (behavior.cleanupFailure) throw new Error("kill outcome unknown");
+    killed.push(sid);
+  });
+  t.mock.method(provider, "snapshot", async () => "snapshot");
+  const manager = new SandboxManager(
+    store,
+    provider,
+    { maxActivePerUser: 1 },
+    undefined,
+    { remoteTimeoutMs: timeout, cleanupTimeoutMs: 1000 },
+  );
+  const run = () =>
+    manager.withLease(
+      actor,
+      workspace.id,
+      crypto.randomUUID(),
+      "default",
+      async () => {},
+      [a.id],
+    );
+  return {
+    root,
+    store,
+    actor,
+    workspace,
+    provider,
+    behavior,
+    killed,
+    manager,
+    run,
+  };
+}
+
+test("preflight failure with confirmed deletion releases capacity and retry succeeds", async (t) => {
+  for (const code of [
+    "SKILL_HOST_MOUNT_UNCONFIRMED",
+    "SKILL_DIGEST_MISMATCH",
+    "SKILL_HOST_SOURCE_UNSAFE",
+  ]) {
+    await t.test(code, async (t) => {
+      const f = await lifecycle(t);
+      f.behavior.failure = code;
+      await assert.rejects(f.run(), { code });
+      assert.deepEqual(f.killed, ["box-1"]);
+      assert.equal(
+        (await f.manager.capacity.inspect(f.actor.tenantId, f.workspace.id))!
+          .state,
+        "released",
+      );
+      assert.equal((await f.manager.capacity.usage(f.actor)).user.active, 0);
+      assert.equal(
+        (await f.manager.status(f.actor, f.workspace.id)).state,
+        "released",
+      );
+      f.behavior.failure = "";
+      await f.run();
+      assert.equal((await f.manager.capacity.usage(f.actor)).user.active, 1);
+      assert.equal(
+        (await f.manager.status(f.actor, f.workspace.id)).sandboxId,
+        "box-2",
+      );
+    });
+  }
+});
+
+test("unconfirmed preflight deletion retains charged unknown capacity and instance identity for reconciliation", async (t) => {
+  const f = await lifecycle(t);
+  f.behavior.failure = "SKILL_DIGEST_MISMATCH";
+  f.behavior.cleanupFailure = true;
+  await assert.rejects(f.run(), { code: "SKILL_DIGEST_MISMATCH" });
+  const entry = await f.manager.capacity.inspect(
+    f.actor.tenantId,
+    f.workspace.id,
+  );
+  assert.equal(entry!.state, "unknown");
+  assert.equal(entry!.sandboxId, "box-1");
+  assert.equal((await f.manager.capacity.usage(f.actor)).user.active, 1);
+  await assert.rejects(f.run(), { code: "SANDBOX_OUTCOME_UNKNOWN" });
+  const audit = await f.store.read(f.actor.tenantId, (s) => s.audit);
+  assert.ok(
+    audit.some(
+      (e) =>
+        e.action === "sandbox.creation.cleanup_unconfirmed" &&
+        e.result.includes('"sandboxId":"box-1"'),
+    ),
+  );
+});
+
+test("failed snapshot restore with confirmed cleanup releases capacity and permits restore retry", async (t) => {
+  const f = await lifecycle(t);
+  await f.run();
+  const snapshot = await f.manager.createSnapshot(f.actor, f.workspace.id);
+  f.behavior.failure = "SKILL_HOST_MOUNT_UNCONFIRMED";
+  await assert.rejects(
+    f.manager.restoreSnapshot(f.actor, f.workspace.id, snapshot.id),
+    { code: f.behavior.failure },
+  );
+  assert.equal((await f.manager.capacity.usage(f.actor)).user.active, 0);
+  f.behavior.failure = "";
+  await f.manager.restoreSnapshot(f.actor, f.workspace.id, snapshot.id);
+  assert.equal((await f.manager.capacity.usage(f.actor)).user.active, 1);
+});
+
+async function waitFor(check: () => Promise<boolean>) {
+  for (let i = 0; i < 100; i++) {
+    if (await check()) return;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  assert.fail("reconciliation did not settle");
+}
+
+test("late confirmed preflight cleanup releases timed-out capacity", async (t) => {
+  const f = await lifecycle(t, 100);
+  let finish!: () => void;
+  f.behavior.gate = new Promise<void>((resolve) => {
+    finish = resolve;
+  });
+  f.behavior.failure = "SKILL_DIGEST_MISMATCH";
+  await assert.rejects(f.run());
+  assert.equal(
+    (await f.manager.capacity.inspect(f.actor.tenantId, f.workspace.id))!.state,
+    "unknown",
+  );
+  finish();
+  await waitFor(
+    async () =>
+      (await f.manager.capacity.inspect(f.actor.tenantId, f.workspace.id))!
+        .state === "released",
+  );
+  f.behavior.gate = undefined;
+  f.behavior.failure = "";
+  await f.run();
+  assert.equal((await f.manager.capacity.usage(f.actor)).user.active, 1);
+});
+
+test("late cleanup cannot release or clear a successor's instance", async (t) => {
+  const f = await lifecycle(t, 100);
+  let finish!: () => void;
+  f.behavior.gate = new Promise<void>((resolve) => {
+    finish = resolve;
+  });
+  f.behavior.failure = "SKILL_DIGEST_MISMATCH";
+  await assert.rejects(f.run());
+  const old = (await f.manager.capacity.inspect(
+    f.actor.tenantId,
+    f.workspace.id,
+  ))!;
+  await f.manager.capacity.released(
+    f.actor.tenantId,
+    f.workspace.id,
+    old.operation,
+  );
+  f.behavior.gate = undefined;
+  f.behavior.failure = "";
+  await f.run();
+  finish();
+  await waitFor(async () =>
+    (await f.store.read(f.actor.tenantId, (s) => s.audit)).some(
+      (e) => e.action === "sandbox.creation.cleanup_confirmed",
+    ),
+  );
+  const current = (await f.manager.capacity.inspect(
+    f.actor.tenantId,
+    f.workspace.id,
+  ))!;
+  assert.equal(current.state, "active");
+  assert.equal(current.sandboxId, "box-2");
+  assert.equal(
+    (await f.manager.status(f.actor, f.workspace.id)).sandboxId,
+    "box-2",
+  );
+});
+
+test("unselected overlapping Volume targets remain valid and conflicts reject only joint selection", (t) => {
+  const bindings = {
+    [a.id]: { bundle: a.bundle, path: a.path, volume: "volume-a" },
+    [b.id]: { bundle: b.bundle, path: a.path, volume: "volume-b" },
+  };
+  validateSkillBindings(bindings);
+  const provider = new CubeProvider(bindings, "sandbox", "nfs");
+  const alias = { ...b, path: a.path };
+  provider.scope("default", [a]);
+  provider.scope("default", [alias]);
+  assert.throws(() => provider.scope("default", [a, alias]), {
+    code: "SKILL_MOUNT_CONFLICT",
+  });
+});
+
+test("asynchronous host source validation allows event-loop work during a scan", async (t) => {
+  const root = source(t);
+  let done = false;
+  const validation = validateHostSkillSource(root + "/a").finally(() => {
+    done = true;
+  });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(
+    done,
+    false,
+    "scan must not synchronously block unrelated event-loop work",
+  );
+  await validation;
+});
+
+test("source validation failure before dispatch releases reservation without creating an instance", async (t) => {
+  const { unlinkSync } = await import("node:fs");
+  const f = await lifecycle(t);
+  symlinkSync(f.root + "/b", f.root + "/a/escape");
+  await assert.rejects(f.run(), { code: "SKILL_HOST_SOURCE_UNSAFE" });
+  assert.equal((await f.manager.capacity.usage(f.actor)).user.active, 0);
+  assert.deepEqual(f.killed, []);
+  unlinkSync(f.root + "/a/escape");
+  await f.run();
+  assert.equal(
+    (await f.manager.status(f.actor, f.workspace.id)).sandboxId,
+    "box-1",
+  );
+});
+
+test("late unconfirmed cleanup records the instance ID and keeps capacity charged", async (t) => {
+  const f = await lifecycle(t, 100);
+  let finish!: () => void;
+  f.behavior.gate = new Promise<void>((resolve) => {
+    finish = resolve;
+  });
+  f.behavior.failure = "SKILL_DIGEST_MISMATCH";
+  f.behavior.cleanupFailure = true;
+  await assert.rejects(f.run());
+  finish();
+  await waitFor(
+    async () =>
+      (await f.manager.capacity.inspect(f.actor.tenantId, f.workspace.id))!
+        .sandboxId === "box-1",
+  );
+  assert.equal((await f.manager.capacity.usage(f.actor)).user.active, 1);
+  assert.equal(
+    (await f.manager.status(f.actor, f.workspace.id)).state,
+    "unknown",
+  );
+});
+
+test("mixed backends with mutually exclusive targets verify only the selected binding", async (t) => {
+  const root = source(t),
+    calls: ReturnType<typeof decode>[] = [];
+  const provider = new CubeProvider(
+    {
+      [a.id]: { bundle: a.bundle, path: a.path, hostPath: root + "/a" },
+      [b.id]: { bundle: b.bundle, path: a.path, volume: "skill-b" },
+    },
+    "sandbox",
+    "nfs",
+    [root],
+  );
+  t.mock.method(
+    Sandbox,
+    "connect",
+    async () =>
+      ({
+        commands: {
+          run: async (cmd: string) => {
+            calls.push(decode(cmd));
+            return { exitCode: 0, stdout: "{}", stderr: "" };
+          },
+        },
+      }) as unknown as Sandbox,
+  );
+  const manifest = [{ path: a.path, digest: a.digest }];
+  await provider.execute("volume-box", "ls", {
+    _skillIds: [b.id],
+    _skillManifests: manifest,
+  });
+  await provider.execute("host-box", "ls", {
+    _skillIds: [a.id],
+    _skillManifests: manifest,
+  });
+  assert.deepEqual(calls[0]!.args._hostSkillMounts, []);
+  assert.deepEqual(calls[1]!.args._hostSkillMounts, ["/skills/a/v1"]);
 });

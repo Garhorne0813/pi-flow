@@ -16,7 +16,10 @@ import {
   type SandboxPolicy,
 } from "./sandbox-policy.js";
 import type { Store } from "../store.js";
-import type { SandboxProvider } from "../sandbox/provider.js";
+import {
+  SandboxCreationError,
+  type SandboxProvider,
+} from "../sandbox/provider.js";
 import { remote } from "../sandbox/remote.js";
 import {
   assertLifecycleAvailable,
@@ -82,8 +85,9 @@ export class SandboxManager {
     signal?: AbortSignal,
     late?: (value: T) => Promise<void>,
     timeout = this.limits.remoteTimeoutMs,
+    lateFailure?: (error: unknown) => Promise<void>,
   ) {
-    return remote(start, signal, late, timeout);
+    return remote(start, signal, late, timeout, lateFailure);
   }
   private kill(a: Actor, wid: string, owner: string, sid: string) {
     return this.remote(
@@ -182,6 +186,59 @@ export class SandboxManager {
     } catch {
       await this.capacity.unknown(a.tenantId, wid, owner, sid);
     }
+  }
+  private async creationFailure(
+    a: Actor,
+    wid: string,
+    owner: string,
+    error: unknown,
+  ) {
+    if (!(error instanceof SandboxCreationError)) return false;
+    const updated = error.cleanupConfirmed
+      ? await this.capacity.released(a.tenantId, wid, owner)
+      : await this.capacity.unknown(a.tenantId, wid, owner, error.sandboxId);
+    if (!updated && !error.cleanupConfirmed && error.sandboxId) {
+      const current = await this.capacity.inspect(a.tenantId, wid);
+      if (
+        current?.operation !== owner &&
+        current?.sandboxId !== error.sandboxId
+      )
+        await this.capacity.orphan(
+          a,
+          wid,
+          owner,
+          error.sandboxId,
+          current?.userId ??
+            (await this.store.read(
+              a.tenantId,
+              (s) => s.workspaces[wid]?.ownerId ?? a.userId,
+            )),
+        );
+    }
+    await this.store.tx(a.tenantId, (s) => {
+      const w = s.workspaces[wid];
+      if (
+        updated &&
+        w &&
+        (w.lock?.owner === owner || (!w.lock && !w.sandboxId))
+      ) {
+        if (error.cleanupConfirmed) clearInstance(w);
+        else {
+          w.sandboxState = "unknown";
+          w.sandboxId = error.sandboxId;
+        }
+      }
+      audit(
+        s,
+        a,
+        error.cleanupConfirmed
+          ? "sandbox.creation.cleanup_confirmed"
+          : "sandbox.creation.cleanup_unconfirmed",
+        wid,
+        JSON.stringify({ owner, sandboxId: error.sandboxId, code: error.code }),
+      );
+    });
+    return true;
   }
   private async cancellationCleanup(
     a: Actor,
@@ -371,6 +428,8 @@ export class SandboxManager {
           },
           signal,
           (created) => this.lateSandbox(a, wid, owner, created.sandboxId),
+          this.limits.remoteTimeoutMs,
+          (error) => this.creationFailure(a, wid, owner, error).then(() => {}),
         );
         sid = created.sandboxId;
         activeSid = sid;
@@ -406,6 +465,11 @@ export class SandboxManager {
       await assertOwned();
       return result;
     } catch (e) {
+      if (reserved && !activated && e instanceof SandboxCreationError) {
+        await this.creationFailure(a, wid, owner, e);
+        reserved = false;
+        throw e;
+      }
       if (
         reserved &&
         (signal?.aborted ||
@@ -496,6 +560,7 @@ export class SandboxManager {
           op,
           {
             ...args,
+            _skillIds: [...skillIds],
             _skillManifests: skills,
           },
           trafficToken,
@@ -634,6 +699,9 @@ export class SandboxManager {
         () => this.provider.create(volume!, w.bundle!, [], undefined, owner),
         undefined,
         (created) => this.lateSandbox(a, capacityId, owner, created.sandboxId),
+        this.limits.remoteTimeoutMs,
+        (error) =>
+          this.creationFailure(a, capacityId, owner, error).then(() => {}),
       );
       sid = created.sandboxId;
       await this.capacity.pending(a.tenantId, capacityId, owner, sid);
@@ -656,6 +724,7 @@ export class SandboxManager {
               ...args,
               path,
               _workspaceOnly: true,
+              _skillIds: [],
               _skillManifests: [],
             },
             created.trafficToken,
@@ -666,6 +735,12 @@ export class SandboxManager {
       );
       await assertFileOwned();
       return result;
+    } catch (error) {
+      if (reserved && error instanceof SandboxCreationError) {
+        await this.creationFailure(a, capacityId, owner, error);
+        reserved = false;
+      }
+      throw error;
     } finally {
       clearInterval(heartbeat);
       try {
@@ -1041,6 +1116,8 @@ export class SandboxManager {
           ),
         undefined,
         (created) => this.lateSandbox(a, w.id, owner, created.sandboxId),
+        this.limits.remoteTimeoutMs,
+        (error) => this.creationFailure(a, w.id, owner, error).then(() => {}),
       );
       sid = created.sandboxId;
       await this.capacity.pending(a.tenantId, w.id, owner, sid);
@@ -1055,6 +1132,10 @@ export class SandboxManager {
       await this.capacity.active(a.tenantId, w.id, owner, sid);
       return { sandboxId: sid, state: "active" };
     } catch (e) {
+      if (e instanceof SandboxCreationError) {
+        await this.creationFailure(a, w.id, owner, e);
+        throw e;
+      }
       await this.capacity.unknown(a.tenantId, w.id, owner, sid);
       await this.record(a, w.id, owner, (w) => {
         w.sandboxState = "unknown";

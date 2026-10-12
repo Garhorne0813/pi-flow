@@ -17,7 +17,7 @@ import {
   type SkillVolume,
 } from "../adapters/skill-mounts.js";
 import { remoteScript } from "../adapters/remote-script.js";
-import type { SandboxProvider } from "./provider.js";
+import { SandboxCreationError, type SandboxProvider } from "./provider.js";
 export class CubeProvider implements SandboxProvider {
   readonly requiresTrafficToken = true;
   // Cube snapshot templates inherit their source volume mounts.
@@ -50,7 +50,7 @@ export class CubeProvider implements SandboxProvider {
     }
   }
   scope(bundle: string, skills: readonly Skill[]) {
-    validateSkillBindings(this.skillVolumes, this.hostSkillRoots, false);
+    validateSkillBindings(this.skillVolumes, this.hostSkillRoots);
     const metadata = skillScope(bundle, skills);
     const volumes = [...skills]
       .sort((a, b) => a.id.localeCompare(b.id))
@@ -79,13 +79,23 @@ export class CubeProvider implements SandboxProvider {
     snapshotId?: string,
     operation?: string,
   ) {
-    const scope = this.scope(bundle, skills);
+    let scope: string;
+    try {
+      scope = this.scope(bundle, skills);
+    } catch (error) {
+      throw new SandboxCreationError(error, true);
+    }
     const selected = skills.map((skill) => ({
       skill,
       published: this.skillVolumes[skill.id]!,
     }));
-    for (const { published } of selected)
-      if ("hostPath" in published) validateHostSkillSource(published.hostPath);
+    try {
+      for (const { published } of selected)
+        if ("hostPath" in published)
+          await validateHostSkillSource(published.hostPath);
+    } catch (error) {
+      throw new SandboxCreationError(error, true);
+    }
     // Snapshot templates already include their recorded workspace and skill
     // mounts. Re-declaring them makes CubeMaster reject the create request.
     const volumeMounts: Record<string, Volume | VolumeMount> = {};
@@ -147,12 +157,9 @@ export class CubeProvider implements SandboxProvider {
         try {
           await this.kill(sb.sandboxId);
         } catch (cleanup) {
-          throw new AggregateError(
-            [error, cleanup],
-            `Host mount preflight failed; cleanup unconfirmed for ${sb.sandboxId}`,
-          );
+          throw new SandboxCreationError(error, false, sb.sandboxId, cleanup);
         }
-        throw error;
+        throw new SandboxCreationError(error, true, sb.sandboxId);
       }
     }
     return {
@@ -187,18 +194,24 @@ export class CubeProvider implements SandboxProvider {
     const manifests = Array.isArray(args._skillManifests)
       ? (args._skillManifests as { path: string; digest: string }[])
       : [];
-    const hostMounts = manifests.flatMap((manifest) => {
-      const binding = Object.values(this.skillVolumes).find(
-        (s) => s.path === manifest.path,
-      );
-      if (!binding || !("hostPath" in binding)) return [];
+    const hostMounts: string[] = [];
+    const selectedIds = Array.isArray(args._skillIds)
+      ? (args._skillIds as string[])
+      : [];
+    for (const id of selectedIds) {
+      const binding = Object.hasOwn(this.skillVolumes, id)
+        ? this.skillVolumes[id]
+        : undefined;
+      if (!binding || !("hostPath" in binding)) continue;
+      if (!manifests.some((manifest) => manifest.path === binding.path))
+        throw new Fault(403, "SKILL_VOLUME_NOT_REGISTERED");
       if (
         !this.hostSkillRoots.some((r) => binding.hostPath.startsWith(r + "/"))
       )
         throw new Fault(403, "SKILL_HOST_PATH_DENIED");
-      validateHostSkillSource(binding.hostPath);
-      return [binding.path.slice(0, -"/SKILL.md".length)];
-    });
+      await validateHostSkillSource(binding.hostPath);
+      hostMounts.push(binding.path.slice(0, -"/SKILL.md".length));
+    }
     return this.runRemote(sb, op, { ...args, _hostSkillMounts: hostMounts });
   }
   private async runRemote(
