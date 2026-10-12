@@ -213,6 +213,8 @@ function expireRevokedWaitingTasks(s: State, a: Actor, wid: string) {
           "SKILL_REVOKED",
           "MCP_REVOKED",
           "SKILL_DENIED",
+          "WORKSPACE_NOT_FOUND",
+          "READ_ONLY",
         ].includes(e.code)
       )
         continue;

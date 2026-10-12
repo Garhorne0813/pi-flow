@@ -205,7 +205,7 @@ Agent `mcpServers` 最多 16 项。Worker 将 Run 的 AbortSignal 与 deadline �
 
 `POST /admin/agents` 创建逻辑 Agent 的首个不可变版本，响应增加 `agentId`。`POST /admin/agents/{agentId}/versions` 使用相同 AgentConfig Body 发布并激活后续版本；`PUT /admin/agents/{agentId}/active-version` 接受 `{agentVersionId}`，激活同逻辑 Agent 下已启用的版本（也可回滚）。普通发布和激活不禁用旧版本。`GET /logical-agents` 返回用户可用的 `{id,activeVersionId}`；原 `/agents` 与管理员列表保留版本列表供历史审计。
 
-创建 Session 必须恰好提供 `agentId` 或兼容参数 `agentVersionId`。版本参数解析所属逻辑 Agent 的当前版本，不允许用旧版本选择器绕过生效规则。Session 返回 `agentId`、`effectiveVersionId` 及兼容别名 `agentVersionId`。新独立任务在同一事务中锁定最新版并更新有效版本；响应 Run 含 `agentVersionId`、能力快照 `capabilities`、`taskId`、`rootRunId`。续跑和子任务保留任务身份和版本（子任务使用父配置指定的不可变子版本），不触发 Session 升级。
+创建 Session 必须恰好提供 `agentId` 或兼容参数 `agentVersionId`。版本参数解析所属逻辑 Agent 的当前版本，不允许用旧版本选择器绕过生效规则。Session 返回 `agentId`、`effectiveVersionId` 及兼容别名 `agentVersionId`。新独立任务在同一事务中锁定最新版并更新有效版本；响应 Run 含 `agentVersionId`、`taskId`、`rootRunId` 等执行元数据；完整能力快照 `capabilities` 仅保存在内部 Run 记录供 Worker 执行，不通过 HTTP 响应返回。续跑和子任务保留任务身份和版本（子任务使用父配置指定的不可变子版本），不触发 Session 升级。
 
 `session.version.upgraded` SSE 事件与审计记录包含 `{from,to,timestamp,actor,reason:"new_root_task"}`。幂等重试不产生重复升级事件。未结束后代任务也会阻止原 Session 提交独立新任务。
 
@@ -215,6 +215,10 @@ Agent `mcpServers` 最多 16 项。Worker 将 Run 的 AbortSignal 与 deadline �
 
 显式 `/workspaces/{id}/sandbox/resume` 是生命周期操作，不解析逻辑 Agent 最新版本，也不升级 Session。它在租约获取事务中选择 Workspace 记录的技能；全部仍授权时恢复原环境，任一技能已撤销或不属于当前 bundle 时改为不挂载任何技能的环境并保留 Volume。后续新任务按锁定版本适配技能环境；WAITING_INPUT 的原任务不切换版本，恢复交互仍执行动态撤销检查。此规则避免 Resume 被已撤销的旧技能阻塞，同时不会重新挂载被撤销技能。
 
-创建独立 root task 时，在提交事务内检查该 Workspace 中已释放 checkpoint 租约的 WAITING_INPUT 任务。如果逻辑 ACL、AgentVersion、Skill 或 MCP 已撤销，则将其整个任务链中可安全终结的 QUEUED/WAITING_INPUT Run 标记为 FAILED，记录 run.failed（reason=task_revoked、code、taskId）和 task.revoked 审计。有实际执行或未释放租约的成员只请求停止；不绕过活跃执行环境的兼容性边界。历史 scope 使用与 enabled 状态无关的不可变技能身份计算；有效的旧等待任务仍阻止不兼容新任务。JWT 到期本身不触发失效，允许原主体刷新后响应。失效交互不能再次续跑。
+创建独立 root task 时，在提交事务内检查该 Workspace 中已释放 checkpoint 租约的 WAITING_INPUT 任务。如果逻辑 ACL、AgentVersion、Skill、MCP 或原执行者的 Workspace 成员写权限已撤销，则将其整个任务链中可安全终结的 QUEUED/WAITING_INPUT Run 标记为 FAILED，记录 run.failed（reason=task_revoked、code、taskId）和 task.revoked 审计。有实际执行或未释放租约的成员只请求停止；不绕过活跃执行环境的兼容性边界。历史 scope 使用与 enabled 状态无关的不可变技能身份计算；有效的旧等待任务仍阻止不兼容新任务。JWT 到期本身不触发失效，允许原主体刷新后响应。失效交互不能再次续跑。
 
 `POST /runs/{id}/cancel` 取消该 Run 的完整 `taskId`，包括原 Run 已 COMPLETED 后产生的审批/提问续跑、所有子任务和子任务续跑。QUEUED/WAITING_INPUT 直接 CANCELLED；RUNNING 设置 cancelRequested 并按现有 Worker/远端清理机制异步收敛。重复取消不会重复生成终态事件。兼容旧记录时沿 parentRunId 和 resumedFrom Interaction.runId 恢复任务身份。
+
+Run 查询、任务提交（含幂等重试）、交互续跑和取消响应统一使用公开字段白名单，只返回任务/版本身份、状态、计数和时间等执行元数据。它们不返回 capabilities、systemPrompt、agentsMd、模型/Tools/Skills/MCP 配置、actor、lease 或其他内部字段。Workspace 成员可按原有权限查询执行状态，不因此获得 Agent 配置；配置查询仍通过逻辑 Agent ACL 授权。
+
+等待任务的权限失效包含 WORKSPACE_NOT_FOUND（成员被移除）和 READ_ONLY（降级 viewer）。有未释放 checkpoint 租约的等待 Run 仍不提前失效；新任务返回原有兼容性错误，租约释放后重试即可自动清理被撤销的旧等待任务。

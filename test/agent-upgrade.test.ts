@@ -980,3 +980,213 @@ test("cancel by original root or continuation cancels the entire task, including
     });
   });
 });
+
+test("Run HTTP responses never expose private config to Workspace members outside Agent ACL", async () => {
+  const f = await fixture();
+  const bob = { ...actor, userId: "bob", admin: false };
+  const editor = { ...actor, userId: "editor", admin: false };
+  const secret = "PRIVATE_SYSTEM_PROMPT_49";
+  const privateMd = "PRIVATE_AGENTS_MD_49";
+  const v2 = await f.service.publish(
+    actor,
+    config({
+      systemPrompt: secret,
+      agentsMd: [privateMd],
+      model: { provider: "private-provider", modelId: "private-model" },
+    }),
+    f.v1.agentId,
+  );
+  await f.service.setAccess(actor, v2.id, [actor.userId]);
+  await f.store.tx(actor.tenantId, (s) => {
+    s.workspaces[f.w.id]!.members.bob = "viewer";
+    s.workspaces[f.w.id]!.members.editor = "editor";
+  });
+  const app = buildAPI(
+    f.service,
+    async (header) =>
+      header === "Bearer bob"
+        ? bob
+        : header === "Bearer editor"
+          ? editor
+          : actor,
+    f.sandbox,
+  );
+  const ownerHeaders = {
+    authorization: "Bearer owner",
+    "idempotency-key": "public-response",
+  };
+  const assertSafe = (body: Record<string, unknown>) => {
+    for (const key of [
+      "capabilities",
+      "systemPrompt",
+      "agentsMd",
+      "model",
+      "tools",
+      "skills",
+      "mcpServers",
+      "actor",
+      "lease",
+      "requestDigest",
+    ])
+      assert.equal(Object.hasOwn(body, key), false, `${key} is private`);
+    assert.equal(JSON.stringify(body).includes(secret), false);
+    assert.equal(JSON.stringify(body).includes(privateMd), false);
+    assert.equal(JSON.stringify(body).includes("private-model"), false);
+    assert.equal(body.agentVersionId, v2.id);
+    assert.ok(body.taskId);
+  };
+  const submitted = await app.inject({
+    method: "POST",
+    url: `/api/v1/sessions/${f.ses.id}/runs`,
+    headers: ownerHeaders,
+    payload: { message: "new task" },
+  });
+  assert.equal(submitted.statusCode, 202);
+  assertSafe(submitted.json());
+  const rootId = submitted.json().id;
+  const retry = await app.inject({
+    method: "POST",
+    url: `/api/v1/sessions/${f.ses.id}/runs`,
+    headers: ownerHeaders,
+    payload: { message: "new task" },
+  });
+  assert.equal(retry.json().id, rootId);
+  assertSafe(retry.json());
+  const status = await app.inject({
+    method: "GET",
+    url: `/api/v1/runs/${rootId}`,
+    headers: { authorization: "Bearer bob" },
+  });
+  assert.equal(status.statusCode, 200);
+  assertSafe(status.json());
+  assert.deepEqual(
+    (
+      await app.inject({
+        method: "GET",
+        url: "/api/v1/agents",
+        headers: { authorization: "Bearer bob" },
+      })
+    ).json().items,
+    [],
+  );
+  const iid = await waiting(f, rootId);
+  const responded = await app.inject({
+    method: "POST",
+    url: `/api/v1/interactions/${iid}/response`,
+    headers: { authorization: "Bearer owner" },
+    payload: { response: "answer" },
+  });
+  assert.equal(responded.statusCode, 202);
+  assertSafe(responded.json());
+  const deniedCancel = await app.inject({
+    method: "POST",
+    url: `/api/v1/runs/${rootId}/cancel`,
+    headers: { authorization: "Bearer bob" },
+  });
+  assert.equal(deniedCancel.statusCode, 403);
+  const cancelled = await app.inject({
+    method: "POST",
+    url: `/api/v1/runs/${rootId}/cancel`,
+    headers: { authorization: "Bearer editor" },
+  });
+  assert.equal(cancelled.statusCode, 200);
+  assertSafe(cancelled.json());
+  await f.store.read(actor.tenantId, (s) => {
+    assert.equal(s.runs[rootId]!.capabilities!.systemPrompt, secret);
+    assert.deepEqual(s.runs[responded.json().id]!.capabilities!.agentsMd, [
+      privateMd,
+    ]);
+    assert.equal(s.runs[responded.json().id]!.state, "CANCELLED");
+  });
+  await app.close();
+});
+
+for (const revoke of ["removed", "viewer"] as const) {
+  for (const checkpoint of ["released", "pending"] as const) {
+    test(`Workspace ${revoke} invalidates old waiting task only after checkpoint lease is ${checkpoint}`, async () => {
+      const f = await fixture();
+      const bob = { ...actor, userId: "bob", admin: false };
+      await f.store.tx(actor.tenantId, (s) => {
+        s.workspaces[f.w.id]!.members.bob = "editor";
+        for (const name of ["a", "b"])
+          s.skills[`${name}@1`] = {
+            id: `${name}@1`,
+            name,
+            description: name,
+            bundle: "default",
+            path: `/skills/${name}/SKILL.md`,
+            digest: "a".repeat(64),
+            enabled: true,
+          };
+      });
+      const v1 = await f.service.publish(
+        actor,
+        config({ skills: ["a@1"] }),
+        f.v1.agentId,
+      );
+      const bobSession = await f.service.createSession(bob, f.w.id, v1.id);
+      const root = await f.service.submit(
+        bob,
+        bobSession.id,
+        "old waiting task",
+      );
+      await waiting(f, root.id);
+      if (checkpoint === "pending")
+        await f.store.tx(actor.tenantId, (s) => {
+          s.runs[root.id]!.lease = {
+            owner: "checkpoint",
+            expires: Date.now() + 30000,
+          };
+        });
+      const app = buildAPI(f.service, async () => actor, f.sandbox);
+      const headers = { authorization: "Bearer owner" };
+      const membership = await app.inject({
+        method: "PUT",
+        url: `/api/v1/workspaces/${f.w.id}/members/bob`,
+        headers,
+        payload: { role: revoke === "removed" ? null : "viewer" },
+      });
+      assert.equal(membership.statusCode, 200);
+      const v2 = await f.service.publish(
+        actor,
+        config({ skills: ["b@1"] }),
+        v1.agentId,
+      );
+      const submit = () =>
+        app.inject({
+          method: "POST",
+          url: `/api/v1/sessions/${f.ses.id}/runs`,
+          headers,
+          payload: { message: "new compatible task" },
+        });
+      if (checkpoint === "pending") {
+        const busy = await submit();
+        assert.equal(busy.statusCode, 409);
+        assert.equal(busy.json().error.code, "WORKSPACE_VERSION_BUSY");
+        await f.store.read(actor.tenantId, (s) => {
+          assert.equal(s.runs[root.id]!.state, "WAITING_INPUT");
+          assert.equal(s.runs[root.id]!.lease!.owner, "checkpoint");
+        });
+        await f.store.tx(actor.tenantId, (s) => {
+          delete s.runs[root.id]!.lease;
+        });
+      }
+      const accepted = await submit();
+      assert.equal(accepted.statusCode, 202);
+      assert.equal(accepted.json().agentVersionId, v2.id);
+      await f.store.read(actor.tenantId, (s) => {
+        assert.equal(s.runs[root.id]!.state, "FAILED");
+        assert.equal(
+          s.runs[root.id]!.error,
+          revoke === "removed" ? "WORKSPACE_NOT_FOUND" : "READ_ONLY",
+        );
+        assert.equal(s.runs[accepted.json().id]!.state, "QUEUED");
+        assert.equal(
+          s.audit.filter((a) => a.action === "task.revoked").length,
+          1,
+        );
+      });
+      await app.close();
+    });
+  }
+}

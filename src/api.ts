@@ -14,6 +14,7 @@ import {
   run,
   audit,
   type Actor,
+  type Run,
 } from "./domain.js";
 import type { Auth } from "./auth.js";
 import type { HarnessService } from "./service.js";
@@ -37,6 +38,29 @@ const page = z.object({
   offset: z.coerce.number().int().min(0).default(0),
   limit: z.coerce.number().int().min(1).max(100).default(50),
 });
+// Status APIs expose execution metadata, never the private Worker config snapshot.
+function publicRun(r: Run | undefined) {
+  if (!r) throw new Fault(404, "RUN_NOT_FOUND");
+  return {
+    id: r.id,
+    sessionId: r.sessionId,
+    agentVersionId: r.agentVersionId,
+    taskId: r.taskId,
+    rootRunId: r.rootRunId,
+    parentRunId: r.parentRunId,
+    resumedFrom: r.resumedFrom,
+    state: r.state,
+    cancelRequested: r.cancelRequested,
+    error: r.error,
+    depth: r.depth,
+    steps: r.steps,
+    children: r.children,
+    tokens: r.tokens,
+    createdAt: r.createdAt,
+    startedAt: r.startedAt,
+    endedAt: r.endedAt,
+  };
+}
 export function buildAPI(
   service: HarnessService,
   auth: Auth,
@@ -548,20 +572,22 @@ export function buildAPI(
     const key =
       k === undefined ? undefined : z.string().min(1).max(128).parse(k);
     return reply.code(202).send(
-      await service.submit(
-        actor(req),
-        uuid.parse(params(req.params).id),
-        b.message,
-        key,
-        req.id,
-        (() => {
-          const trace = traceContext(
-            typeof req.headers.traceparent === "string"
-              ? req.headers.traceparent
-              : undefined,
-          );
-          return `00-${trace.traceId}-${trace.spanId}-01`;
-        })(),
+      publicRun(
+        await service.submit(
+          actor(req),
+          uuid.parse(params(req.params).id),
+          b.message,
+          key,
+          req.id,
+          (() => {
+            const trace = traceContext(
+              typeof req.headers.traceparent === "string"
+                ? req.headers.traceparent
+                : undefined,
+            );
+            return `00-${trace.traceId}-${trace.spanId}-01`;
+          })(),
+        ),
       ),
     );
   });
@@ -570,11 +596,13 @@ export function buildAPI(
       rid = uuid.parse(params(req.params).id);
     return service.store.readRun(a.tenantId, rid, (s) => {
       const r = run(s, a, rid);
-      return { ...r, lease: undefined, actor: undefined };
+      return publicRun(r);
     });
   });
   app.post("/api/v1/runs/:id/cancel", async (req) =>
-    service.cancel(actor(req), uuid.parse(params(req.params).id)),
+    publicRun(
+      await service.cancel(actor(req), uuid.parse(params(req.params).id)),
+    ),
   );
   app.post("/api/v1/interactions/:id/response", async (req, reply) => {
     const b = z
@@ -584,10 +612,12 @@ export function buildAPI(
     return reply
       .code(202)
       .send(
-        await service.respond(
-          actor(req),
-          uuid.parse(params(req.params).id),
-          b.response,
+        publicRun(
+          await service.respond(
+            actor(req),
+            uuid.parse(params(req.params).id),
+            b.response,
+          ),
         ),
       );
   });
