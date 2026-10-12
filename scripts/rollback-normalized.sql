@@ -6,8 +6,8 @@ SELECT pg_advisory_xact_lock(134697,13);
 LOCK TABLE harness_tenants,harness_sessions,harness_runs,harness_run_events,
  harness_event_sequences,harness_sandbox_capacity,harness_sandbox_leases IN ACCESS EXCLUSIVE MODE;
 DO $$ BEGIN
- IF (SELECT version FROM harness_schema WHERE id=1) IS DISTINCT FROM 4 THEN
-  RAISE EXCEPTION 'Rollback requires normalized schema version 4';
+ IF (SELECT version FROM harness_schema WHERE id=1) NOT IN (4,5) THEN
+  RAISE EXCEPTION 'Rollback requires normalized schema version 4 or 5';
  END IF;
 END $$;
 UPDATE harness_tenants t SET state=t.state || jsonb_build_object(

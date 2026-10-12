@@ -69,7 +69,7 @@ HTTP 响应审计使用原子追加，不再为了审计加载所有 Run/Event�
 保留 unknown、当前检查点及旧 event ID，并把 schema readiness 降到 1；新运行时因此
 拒绝接流量。保留新表和 marker 供审核，不自动重新导入回滚后的旧写入。
 
-`test/migration-roundtrip.test.ts` 用隔离 PG schema 验证 001–004 升级、重复运行、
+`test/migration-roundtrip.test.ts` 用隔离 PG schema 验证 001–005 升级、重复运行、
 失败时全部 DDL/JSON/marker 回滚，以及切流后变动状态的全字段还原。再次直接 migrate
 会拒绝旧聚合：需要备份、逐字段/数量核验并在独立迁移中处理旧写入与保留表的代次，
 不能删除 marker 后盲目覆盖。尚未在目标部署执行全停、备份恢复或真实 Volume 回滚，

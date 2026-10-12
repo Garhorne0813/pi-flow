@@ -12,6 +12,7 @@ import {
   admin,
   AgentConfig,
   intersect,
+  terminal,
   type Actor,
   type State,
   type Run,
@@ -29,9 +30,6 @@ export function createRun(
   extra: Partial<Run> = {},
 ): Run {
   const ses = session(s, a, sid, true);
-  const av = s.agents[ses.agentVersionId];
-  if (!av || !agentAllowed(av, a))
-    throw new Fault(403, "AGENT_DISABLED_OR_DENIED");
   const hash = digest({ prompt });
   if (key) {
     const old = Object.values(s.runs).find(
@@ -52,8 +50,68 @@ export function createRun(
     )
   )
     throw new Fault(409, "SESSION_BUSY");
+  const inherited = !!(extra.resumedFrom || extra.parentRunId);
+  const agentId =
+    ses.agentId ?? s.agents[ses.agentVersionId]?.agentId ?? ses.agentVersionId;
+  const versionId = inherited
+    ? (extra.agentVersionId ?? ses.agentVersionId)
+    : (s.logicalAgents[agentId]?.activeVersionId ?? ses.agentVersionId);
+  const av = s.agents[versionId];
+  if (!av || !agentAllowed(av, a))
+    throw new Fault(403, "AGENT_DISABLED_OR_DENIED");
+  const config = extra.capabilities ?? av.config;
+  validateConfig(s, config);
+  const w = s.workspaces[ses.workspaceId]!;
+  if (w.bundle && w.bundle !== config.skillBundle)
+    throw new Fault(
+      409,
+      "WORKSPACE_BUNDLE_MIGRATION_REQUIRED",
+      "Create a Workspace for the new skillBundle; automatic bundle migration is unsupported.",
+    );
+  if (!inherited) {
+    const scope = skillScope(
+      config.skillBundle,
+      config.skills.map((k) => s.skills[k]!),
+    );
+    for (const other of Object.values(s.runs)) {
+      if (
+        terminal(other.state) ||
+        s.sessions[other.sessionId]?.workspaceId !== w.id
+      )
+        continue;
+      const otherConfig =
+        other.capabilities ??
+        s.agents[
+          other.agentVersionId ?? s.sessions[other.sessionId]!.agentVersionId
+        ]?.config;
+      if (
+        !otherConfig ||
+        skillScope(
+          otherConfig.skillBundle,
+          otherConfig.skills.map((k) => s.skills[k]!),
+        ) !== scope
+      )
+        throw new Fault(
+          409,
+          "WORKSPACE_VERSION_BUSY",
+          "Retry after the incompatible Workspace task finishes.",
+        );
+    }
+    if (w.lock && w.lock.expires > Date.now() && w.sandboxSkillScope !== scope)
+      throw new Fault(409, "WORKSPACE_BUSY");
+    // A terminal root Run can still have an unfinished descendant/continuation.
+    if (
+      Object.values(s.runs).some(
+        (other) =>
+          !terminal(other.state) &&
+          s.runs[other.rootRunId ?? other.id]?.sessionId === sid,
+      )
+    )
+      throw new Fault(409, "SESSION_BUSY");
+  }
+  const runId = id();
   const r: Run = {
-    id: id(),
+    id: runId,
     sessionId: sid,
     actor: a,
     prompt,
@@ -65,11 +123,43 @@ export function createRun(
     steps: 0,
     children: 0,
     ...extra,
+    agentVersionId: versionId,
+    capabilities: structuredClone(config),
+    taskId: extra.taskId ?? runId,
+    rootRunId: extra.rootRunId ?? runId,
   };
   s.runs[r.id] = r;
+  if (!inherited) {
+    const from = ses.effectiveVersionId ?? ses.agentVersionId;
+    ses.agentId = agentId;
+    ses.agentVersionId = ses.effectiveVersionId = versionId;
+    if (from !== versionId) {
+      const upgrade = {
+        from,
+        to: versionId,
+        actor: a.userId,
+        reason: "new_root_task",
+        timestamp: r.createdAt,
+      };
+      event(s, r, "session.version.upgraded", upgrade);
+      audit(s, a, "session.version.upgraded", ses.id, JSON.stringify(upgrade));
+    }
+  }
   event(s, r, "run.queued");
   audit(s, a, "run.create", r.id);
   return r;
+}
+export function validateConfig(s: State, config: AgentConfig) {
+  skillScope(
+    config.skillBundle,
+    config.skills.map((key) => {
+      const skill = s.skills[key];
+      if (!skill?.enabled) throw new Fault(403, "SKILL_REVOKED");
+      return skill;
+    }),
+  );
+  for (const key of config.mcpServers)
+    if (!s.mcp[key]?.enabled) throw new Fault(403, "MCP_REVOKED");
 }
 export function authorizedRun(s: State, r: Run) {
   let current: Run | undefined = r;
@@ -81,8 +171,11 @@ export function authorizedRun(s: State, r: Run) {
       throw new Fault(401, "ACTOR_TOKEN_EXPIRED");
     const ses = session(s, current.actor, current.sessionId, true);
     if (
-      !s.agents[ses.agentVersionId] ||
-      !agentAllowed(s.agents[ses.agentVersionId]!, current.actor)
+      !s.agents[current.agentVersionId ?? ses.agentVersionId] ||
+      !agentAllowed(
+        s.agents[current.agentVersionId ?? ses.agentVersionId]!,
+        current.actor,
+      )
     )
       throw new Fault(403, "AGENT_REVOKED");
     if (current.cancelRequested || current.state === "CANCELLED")
@@ -90,10 +183,9 @@ export function authorizedRun(s: State, r: Run) {
     current = current.parentRunId ? s.runs[current.parentRunId] : undefined;
   }
   const ses = s.sessions[r.sessionId]!;
-  const config = r.capabilities ?? s.agents[ses.agentVersionId]!.config;
-  for (const sk of config.skills) {
-    if (!s.skills[sk]?.enabled) throw new Fault(403, "SKILL_REVOKED");
-  }
+  const config =
+    r.capabilities ?? s.agents[r.agentVersionId ?? ses.agentVersionId]!.config;
+  validateConfig(s, config);
   return { ses, config };
 }
 export class HarnessService {
@@ -104,7 +196,7 @@ export class HarnessService {
     private models?: { provider: string; modelId: string }[],
     private grants?: Record<string, { bundles: string[]; endpoints: string[] }>,
   ) {}
-  async publish(a: Actor, input: unknown) {
+  async publish(a: Actor, input: unknown, agentId?: string) {
     admin(a);
     const config = AgentConfig.parse(input);
     if (
@@ -136,7 +228,14 @@ export class HarnessService {
           throw new Fault(400, "INVALID_MCP");
       for (const key of config.subagents)
         if (!s.agents[key]?.enabled) throw new Fault(400, "INVALID_SUBAGENT");
+      if (agentId && !s.logicalAgents[agentId]) {
+        const legacy = s.agents[agentId];
+        if (!legacy) throw new Fault(404, "AGENT_NOT_FOUND");
+        s.logicalAgents[agentId] = { id: agentId, activeVersionId: legacy.id };
+      }
+      const logicalId = agentId ?? id();
       const av: AgentVersion = {
+        agentId: logicalId,
         id: id(),
         config,
         digest: digest(config),
@@ -144,8 +243,26 @@ export class HarnessService {
         enabled: true,
       };
       s.agents[av.id] = av;
+      s.logicalAgents[logicalId] = { id: logicalId, activeVersionId: av.id };
       audit(s, a, "agent.publish", av.id);
       return av;
+    });
+  }
+  async activate(a: Actor, agentId: string, versionId: string) {
+    admin(a);
+    return this.store.tx(a.tenantId, (s) => {
+      const av = s.agents[versionId];
+      if (!av || (av.agentId ?? av.id) !== agentId || !av.enabled)
+        throw new Fault(400, "INVALID_AGENT_VERSION");
+      validateConfig(s, av.config);
+      if (!this.hasBundle(av.config.skillBundle, a.tenantId))
+        throw new Fault(403, "BUNDLE_NOT_GRANTED");
+      for (const key of av.config.mcpServers)
+        if (!this.hasEndpoint(s.mcp[key]!.endpointRef, a.tenantId))
+          throw new Fault(403, "MCP_ENDPOINT_NOT_GRANTED");
+      s.logicalAgents[agentId] = { id: agentId, activeVersionId: versionId };
+      audit(s, a, "agent.activate", agentId, versionId);
+      return s.logicalAgents[agentId];
     });
   }
   async createWorkspace(a: Actor, name: string) {
@@ -164,7 +281,8 @@ export class HarnessService {
   async createSession(a: Actor, wid: string, avId: string) {
     return this.store.tx(a.tenantId, (s) => {
       const w = workspace(s, a, wid, true);
-      const av = s.agents[avId];
+      const logicalId = s.agents[avId]?.agentId ?? avId;
+      const av = s.agents[s.logicalAgents[logicalId]?.activeVersionId ?? avId];
       if (!av || !agentAllowed(av, a)) throw new Fault(404, "AGENT_NOT_FOUND");
       if (!this.hasBundle(av.config.skillBundle, a.tenantId))
         throw new Fault(403, "BUNDLE_NOT_GRANTED");
@@ -174,7 +292,9 @@ export class HarnessService {
       const ses = {
         id: id(),
         workspaceId: wid,
-        agentVersionId: avId,
+        agentId: logicalId,
+        agentVersionId: av.id,
+        effectiveVersionId: av.id,
         entries: [],
         createdAt: new Date().toISOString(),
       };
@@ -191,9 +311,23 @@ export class HarnessService {
     requestId?: string,
     traceparent?: string,
   ) {
-    return this.store.tx(a.tenantId, (s) =>
-      createRun(s, a, sid, prompt, key, { requestId, traceparent }),
-    );
+    return this.store.tx(a.tenantId, (s) => {
+      const existing =
+        key &&
+        Object.values(s.runs).some(
+          (r) =>
+            r.sessionId === sid && r.actor.userId === a.userId && r.key === key,
+        );
+      const r = createRun(s, a, sid, prompt, key, { requestId, traceparent });
+      if (existing) return r;
+      const config = r.capabilities!;
+      if (!this.hasBundle(config.skillBundle, a.tenantId))
+        throw new Fault(403, "BUNDLE_NOT_GRANTED");
+      for (const key of config.mcpServers)
+        if (!this.hasEndpoint(s.mcp[key]!.endpointRef, a.tenantId))
+          throw new Fault(403, "MCP_ENDPOINT_NOT_GRANTED");
+      return r;
+    });
   }
   async cancel(a: Actor, rid: string) {
     return this.store.tx(a.tenantId, (s) => {
@@ -246,6 +380,10 @@ export class HarnessService {
         undefined,
         {
           resumedFrom: iid,
+          agentVersionId:
+            r.agentVersionId ?? s.sessions[r.sessionId]!.agentVersionId,
+          taskId: r.taskId ?? r.id,
+          rootRunId: r.rootRunId ?? r.id,
           depth: r.depth,
           parentRunId: r.parentRunId,
           capabilities: r.capabilities,
@@ -298,7 +436,9 @@ export class HarnessService {
       while (root.parentRunId) root = s.runs[root.parentRunId]!;
       const rootConfig =
         root.capabilities ??
-        s.agents[s.sessions[root.sessionId]!.agentVersionId]!.config;
+        s.agents[
+          root.agentVersionId ?? s.sessions[root.sessionId]!.agentVersionId
+        ]!.config;
       if (root.id !== p.id && root.children >= rootConfig.maxSubagents)
         throw new Fault(429, "SUBAGENT_LIMIT");
       p.children++;
@@ -309,11 +449,16 @@ export class HarnessService {
         id: sid,
         workspaceId: ses.workspaceId,
         agentVersionId: avId,
+        agentId: child.agentId ?? child.id,
+        effectiveVersionId: avId,
         entries: [],
         createdAt: new Date().toISOString(),
       };
       const r = createRun(s, p.actor, sid, task, undefined, {
         parentRunId: p.id,
+        agentVersionId: child.id,
+        taskId: p.taskId ?? root.id,
+        rootRunId: p.rootRunId ?? root.id,
         depth: p.depth + 1,
         capabilities: effective,
         deadline: p.deadline,

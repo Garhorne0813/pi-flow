@@ -85,7 +85,7 @@ test(
         "UPDATE harness_schema SET version=999 WHERE id=1",
       );
       await assert.rejects(store.ready(), /SCHEMA_MISMATCH/);
-      await store.pool.query("UPDATE harness_schema SET version=4 WHERE id=1");
+      await store.pool.query("UPDATE harness_schema SET version=5 WHERE id=1");
       await store.workerHeartbeat({
         workerId: "health-test",
         heartbeatAt: Date.now(),
@@ -100,7 +100,7 @@ test(
         2,
       );
     } finally {
-      await store.pool.query("UPDATE harness_schema SET version=4 WHERE id=1");
+      await store.pool.query("UPDATE harness_schema SET version=5 WHERE id=1");
       await store.pool.query(
         "DELETE FROM harness_worker_health WHERE worker_id='health-test'",
       );

@@ -136,9 +136,9 @@ Capacity and idle settings are listed in `.env.example`. Active, reserved, and u
 
 容量与空闲配置见 `.env.example`。active、reserved、unknown 占用配额，暂停实例不计入。Worker 扫描空闲实例并暂停/释放。实例快照不备份持久卷或对话历史，应独立配置数据库与卷备份；Cube 不支持跨工作区快照克隆。
 
-For an existing deployment, stop all old API/Workers, back up, apply migrations 001–004, and upgrade together. Do not mix JSONB-era writers with normalized table writers. Review [Run migration and rollback](run-migration.md) and [capacity migration](capacity-migration.md). Readiness/schema checks are described in [health](health.md).
+For an existing deployment, stop all old API/Workers, back up, apply migrations 001–005, and upgrade together. Do not mix JSONB-era writers with normalized table writers. Review [Run migration and rollback](run-migration.md) and [capacity migration](capacity-migration.md). Readiness/schema checks are described in [health](health.md).
 
-已有部署应先停止全部旧 API/Worker、备份，再执行 001–004 迁移并统一升级；禁止旧 JSONB 写入者与独立表写入者混跑。详见 [Run 迁移与回滚](run-migration.md)、[容量迁移](capacity-migration.md) 和 [健康检查](health.md)。
+已有部署应先停止全部旧 API/Worker、备份，再执行 001–005 迁移并统一升级；禁止旧 JSONB 写入者与独立表写入者混跑。详见 [Run 迁移与回滚](run-migration.md)、[容量迁移](capacity-migration.md) 和 [健康检查](health.md)。
 
 ## Live-model checks / 真实模型测试
 

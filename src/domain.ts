@@ -49,7 +49,9 @@ export const AgentConfig = z
   })
   .strict();
 export type AgentConfig = z.infer<typeof AgentConfig>;
+export type Agent = { id: string; activeVersionId: string };
 export type AgentVersion = {
+  agentId?: string;
   id: string;
   config: AgentConfig;
   digest: string;
@@ -84,7 +86,9 @@ export type Workspace = {
 export type Session = {
   id: string;
   workspaceId: string;
-  agentVersionId: string;
+  agentVersionId: string; // Compatibility alias for effectiveVersionId.
+  agentId?: string;
+  effectiveVersionId?: string;
   entries: unknown[];
   createdAt: string;
 };
@@ -107,6 +111,9 @@ export type RunState =
 export const terminal = (s: RunState) =>
   ["COMPLETED", "FAILED", "CANCELLED"].includes(s);
 export type Run = {
+  agentVersionId?: string;
+  taskId?: string;
+  rootRunId?: string;
   id: string;
   sessionId: string;
   actor: Actor;
@@ -173,6 +180,7 @@ export type Audit = {
 };
 export type State = {
   usage?: import("./usage.js").UsageState;
+  logicalAgents: Record<string, Agent>;
   agents: Record<string, AgentVersion>;
   workspaces: Record<string, Workspace>;
   sessions: Record<string, Session>;
@@ -186,6 +194,7 @@ export type State = {
   sequence: number;
 };
 export const emptyState = (): State => ({
+  logicalAgents: {},
   agents: {},
   workspaces: {},
   sessions: {},

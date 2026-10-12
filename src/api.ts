@@ -174,6 +174,42 @@ export function buildAPI(
   app.post("/api/v1/admin/agents", async (req, reply) =>
     reply.code(201).send(await service.publish(actor(req), req.body)),
   );
+  app.post("/api/v1/admin/agents/:id/versions", async (req, reply) =>
+    reply
+      .code(201)
+      .send(
+        await service.publish(
+          actor(req),
+          req.body,
+          uuid.parse(params(req.params).id),
+        ),
+      ),
+  );
+  app.put("/api/v1/admin/agents/:id/active-version", async (req) => {
+    const b = z.object({ agentVersionId: uuid }).strict().parse(req.body);
+    return service.activate(
+      actor(req),
+      uuid.parse(params(req.params).id),
+      b.agentVersionId,
+    );
+  });
+  app.get("/api/v1/logical-agents", async (req) => {
+    const a = actor(req),
+      p = page.parse(req.query);
+    return service.store.readMetadata(
+      a.tenantId,
+      ["logicalAgents", "agents"],
+      (s) => ({
+        items: Object.values(s.logicalAgents)
+          .filter(
+            (v) =>
+              s.agents[v.activeVersionId] &&
+              agentAllowed(s.agents[v.activeVersionId]!, a),
+          )
+          .slice(p.offset, p.offset + p.limit),
+      }),
+    );
+  });
   app.get("/api/v1/admin/agents", async (req) => {
     const a = actor(req);
     admin(a);
@@ -459,14 +495,21 @@ export function buildAPI(
     },
   );
   app.post("/api/v1/workspaces/:id/sessions", async (req, reply) => {
-    const b = z.object({ agentVersionId: uuid }).strict().parse(req.body);
+    const b = z
+      .object({ agentId: uuid.optional(), agentVersionId: uuid.optional() })
+      .strict()
+      .refine(
+        (b) => !!b.agentId !== !!b.agentVersionId,
+        "Provide exactly one Agent selector",
+      )
+      .parse(req.body);
     return reply
       .code(201)
       .send(
         await service.createSession(
           actor(req),
           uuid.parse(params(req.params).id),
-          b.agentVersionId,
+          (b.agentId ?? b.agentVersionId)!,
         ),
       );
   });

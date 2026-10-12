@@ -41,12 +41,13 @@ curl -N 'http://127.0.0.1:8080/api/v1/runs/<runId>/events' \
 
 | 方法       | 路径                                     | Body / 行为                                             |
 | ---------- | ---------------------------------------- | ------------------------------------------------------- |
+| GET        | `/logical-agents`                        | 可使用逻辑 Agent，`{id,activeVersionId}`，支持分页       |
 | GET        | `/agents`                                | 可使用的已发布版本，`{items:[]}`                        |
 | GET/POST   | `/workspaces`                            | 列表 / 创建 `{name}`；创建 201                          |
 | GET/DELETE | `/workspaces/{id}`                       | 获取 / owner 删除，必须无活跃 Run/租约                  |
 | PUT        | `/workspaces/{id}/members/{userId}`      | owner 设置 `{role:"editor"\|"viewer"\|null}`；null 移除 |
 | POST       | `/workspaces/{id}/sandbox/pause`         | 暂停空闲 Sandbox，204                                   |
-| GET/POST   | `/workspaces/{id}/sessions`              | 列表 / 创建 `{agentVersionId}`，201                     |
+| GET/POST   | `/workspaces/{id}/sessions`              | 列表 / 创建 `{agentId}` 或兼容 `{agentVersionId}`，201                     |
 | GET        | `/sessions/{id}`                         | Session、规范 Pi history entries、todos                 |
 | POST       | `/sessions/{id}/runs`                    | `{message}`；接受 202，可选 Idempotency-Key             |
 | GET        | `/runs/{id}`                             | 状态、错误码、父 Run、预算计数和时间戳                  |
@@ -199,3 +200,13 @@ Run 终态错误在 Run.error / run.failed 中给出，包括 `AGENT_REVOKED`、
 Agent `mcpServers` 最多 16 项。Worker 将 Run 的 AbortSignal 与 deadline 传给 discovery；完整发现预算取剩余 Run 时间与 30 秒上限的较小值。每个 connect/listTools 请求仍最多等待 10 秒，分页最多 10 页，单 Server 白名单工具最多 100 个。发现开始、Server/分页循环和结果返回前检查取消；SDK 请求与实际 HTTPS fetch 都绑定信号，并以本地取消等待兜底。耗尽发现预算返回 `MCP_DISCOVERY_TIMEOUT`，耗尽 Run deadline 为 `RUN_TIMEOUT`；取消仍按 Run 取消状态处理。
 
 连接和传输都尝试关闭，单次 cleanup 最多等待 250 ms；关闭异常不会覆盖原始取消/超时原因。配额相关过期回调不会释放或标记新请求的记录：所有转换绑定持久唯一 operation，CAS 接管失败返回 `CAPACITY_LEASE_LOST`。Sandbox 创建/连接期间取消时不执行工具；已返回 ID 的实例按取消策略确认清理后退还配额，创建无 ID 或 Kill 未确认返回 `REMOTE_CANCEL_UNCONFIRMED` 并保持保守占用。持久 Workspace Volume 不随取消删除。
+
+## 逻辑 Agent 与任务版本
+
+`POST /admin/agents` 创建逻辑 Agent 的首个不可变版本，响应增加 `agentId`。`POST /admin/agents/{agentId}/versions` 使用相同 AgentConfig Body 发布并激活后续版本；`PUT /admin/agents/{agentId}/active-version` 接受 `{agentVersionId}`，激活同逻辑 Agent 下已启用的版本（也可回滚）。普通发布和激活不禁用旧版本。`GET /logical-agents` 返回用户可用的 `{id,activeVersionId}`；原 `/agents` 与管理员列表保留版本列表供历史审计。
+
+创建 Session 必须恰好提供 `agentId` 或兼容参数 `agentVersionId`。版本参数解析所属逻辑 Agent 的当前版本，不允许用旧版本选择器绕过生效规则。Session 返回 `agentId`、`effectiveVersionId` 及兼容别名 `agentVersionId`。新独立任务在同一事务中锁定最新版并更新有效版本；响应 Run 含 `agentVersionId`、能力快照 `capabilities`、`taskId`、`rootRunId`。续跑和子任务保留任务身份和版本（子任务使用父配置指定的不可变子版本），不触发 Session 升级。
+
+`session.version.upgraded` SSE 事件与审计记录包含 `{from,to,timestamp,actor,reason:"new_root_task"}`。幂等重试不产生重复升级事件。未结束后代任务也会阻止原 Session 提交独立新任务。
+
+跨 skillBundle 升级返回 409 `WORKSPACE_BUNDLE_MIGRATION_REQUIRED`，需创建与新 bundle 匹配的 Workspace；不静默迁移持久 Volume。共享 Workspace 中存在技能 scope 不兼容的未结束任务时返回 409 `WORKSPACE_VERSION_BUSY`，结束旧任务后重试。租约冲突返回 `WORKSPACE_BUSY`。相同 bundle 内的 scope 变化由现有 Sandbox 租约保护重建，保留 Volume；ACTIVE、PAUSED、RELEASED 都支持下一次使用配置适配。Sandbox pause/release 不触发升级，WAITING_INPUT 恢复仍使用原版本。
