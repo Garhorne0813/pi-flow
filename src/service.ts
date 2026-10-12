@@ -17,6 +17,7 @@ import {
   type State,
   type Run,
   type AgentVersion,
+  type Skill,
 } from "./domain.js";
 import type { Store } from "./store.js";
 export const digest = (x: unknown) =>
@@ -97,8 +98,18 @@ export function createRun(
           "Retry after the incompatible Workspace task finishes.",
         );
     }
-    if (w.lock && w.lock.expires > Date.now() && w.sandboxSkillScope !== scope)
-      throw new Fault(409, "WORKSPACE_BUSY");
+    if (w.lock && w.lock.expires > Date.now()) {
+      // Provider scopes also hash mount sources. Compare only logical skill
+      // identities here; the provider checks physical mount compatibility when
+      // the tool lease is acquired. Derive legacy records without rewriting them.
+      const mountedSkills = w.sandboxSkills?.map((key) => s.skills[key]);
+      const mountedScope =
+        w.sandboxLogicalSkillScope ??
+        (mountedSkills?.every((sk) => sk?.enabled && sk.bundle === w.bundle)
+          ? skillScope(w.bundle!, mountedSkills as Skill[])
+          : undefined);
+      if (mountedScope !== scope) throw new Fault(409, "WORKSPACE_BUSY");
+    }
     // A terminal root Run can still have an unfinished descendant/continuation.
     if (
       Object.values(s.runs).some(
@@ -234,6 +245,8 @@ export class HarnessService {
         s.logicalAgents[agentId] = { id: agentId, activeVersionId: legacy.id };
       }
       const logicalId = agentId ?? id();
+      const previous =
+        s.agents[s.logicalAgents[logicalId]?.activeVersionId ?? ""];
       const av: AgentVersion = {
         agentId: logicalId,
         id: id(),
@@ -241,6 +254,10 @@ export class HarnessService {
         digest: digest(config),
         publishedAt: new Date().toISOString(),
         enabled: true,
+        // Publication must not broaden access granted to the logical Agent.
+        allowedUsers: previous?.allowedUsers
+          ? [...previous.allowedUsers]
+          : undefined,
       };
       s.agents[av.id] = av;
       s.logicalAgents[logicalId] = { id: logicalId, activeVersionId: av.id };

@@ -450,3 +450,265 @@ test("latest Skill/MCP revocation is checked before acceptance and rolls back Se
     });
   });
 });
+
+test("successor publication inherits current access restrictions without aliasing ACL arrays", async () => {
+  const f = await fixture();
+  const bob = { ...actor, userId: "bob", admin: false };
+  await f.store.tx(actor.tenantId, (s) => {
+    s.workspaces[f.w.id]!.members.bob = "editor";
+    s.agents[f.v1.id]!.allowedUsers = [actor.userId];
+  });
+  const v2 = await f.service.publish(
+    actor,
+    config({ systemPrompt: "V2" }),
+    f.v1.agentId,
+  );
+  assert.deepEqual(v2.allowedUsers, [actor.userId]);
+  await assert.rejects(f.service.createSession(bob, f.w.id, f.v1.id), {
+    code: "AGENT_NOT_FOUND",
+  });
+  await assert.rejects(f.service.submit(bob, f.ses.id, "unauthorized"), {
+    code: "AGENT_DISABLED_OR_DENIED",
+  });
+  const next = await f.service.submit(actor, f.ses.id, "authorized");
+  assert.equal(next.agentVersionId, v2.id);
+  await f.store.tx(actor.tenantId, (s) => {
+    s.agents[f.v1.id]!.allowedUsers!.push("bob");
+  });
+  assert.deepEqual(
+    await f.store.read(actor.tenantId, (s) => s.agents[v2.id]!.allowedUsers),
+    [actor.userId],
+  );
+  await f.store.tx(actor.tenantId, (s) => {
+    s.agents[v2.id]!.allowedUsers = ["charlie"];
+  });
+  const v3 = await f.service.publish(
+    actor,
+    config({ systemPrompt: "V3" }),
+    f.v1.agentId,
+  );
+  assert.deepEqual(v3.allowedUsers, ["charlie"]);
+});
+
+for (const backend of ["volume", "host"] as const) {
+  for (const legacy of [false, true]) {
+    test(`Cube ${backend} scope permits compatible submission during a tool lease (${legacy ? "legacy" : "recorded"} logical scope)`, async (t) => {
+      const f = await fixture();
+      const { CubeProvider } = await import("../src/adapters/sandbox.js");
+      const { skillScope } = await import("../src/adapters/skill-mounts.js");
+      const sk = {
+        id: "s@1",
+        name: "s",
+        description: "s",
+        bundle: "default",
+        path: "/skills/s/SKILL.md",
+        digest: "a".repeat(64),
+        enabled: true,
+      };
+      await f.store.tx(actor.tenantId, (s) => {
+        s.skills[sk.id] = sk;
+      });
+      const v1 = await f.service.publish(
+        actor,
+        config({ skills: [sk.id] }),
+        f.v1.agentId,
+      );
+      const second = await f.service.createSession(actor, f.w.id, v1.agentId!);
+      const root = await f.service.submit(actor, f.ses.id, "holding lease");
+      const binding =
+        backend === "volume"
+          ? { bundle: "default", path: sk.path, volume: "skill-volume" }
+          : { bundle: "default", path: sk.path, hostPath: "/approved/s" };
+      const cube = new CubeProvider({ [sk.id]: binding }, "sandbox", "nfs", [
+        "/approved",
+      ]);
+      // Keep the actual Cube scope algorithm (including Volume/Host binding),
+      // replace only remote operations with a deterministic in-memory transport.
+      t.mock.method(
+        cube,
+        "createVolume",
+        f.provider.createVolume.bind(f.provider),
+      );
+      t.mock.method(
+        cube,
+        "create",
+        async (...args: Parameters<typeof cube.create>) => ({
+          ...(await f.provider.create(args[0], args[1], args[2])),
+          trafficToken: "test-only",
+        }),
+      );
+      t.mock.method(cube, "connect", f.provider.connect.bind(f.provider));
+      t.mock.method(cube, "kill", f.provider.kill.bind(f.provider));
+      const sandbox = new SandboxManager(f.store, cube);
+      await sandbox.withLease(
+        actor,
+        f.w.id,
+        "seed",
+        "default",
+        async () => {},
+        [sk.id],
+      );
+      await f.store.tx(actor.tenantId, (s) => {
+        const w = s.workspaces[f.w.id]!;
+        assert.equal(w.sandboxSkillScope, cube.scope("default", [sk]));
+        assert.notEqual(w.sandboxSkillScope, skillScope("default", [sk]));
+        assert.equal(w.sandboxLogicalSkillScope, skillScope("default", [sk]));
+        if (legacy) delete w.sandboxLogicalSkillScope;
+        s.runs[root.id]!.state = "RUNNING";
+      });
+      let entered!: () => void, release!: () => void;
+      const ready = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const holding = sandbox.withLease(
+        actor,
+        f.w.id,
+        "hold",
+        "default",
+        async () => {
+          entered();
+          await gate;
+        },
+        [sk.id],
+      );
+      await ready;
+      try {
+        const v2 = await f.service.publish(
+          actor,
+          config({ skills: [sk.id], systemPrompt: "V2" }),
+          v1.agentId,
+        );
+        const accepted = await f.service.submit(
+          actor,
+          second.id,
+          "compatible concurrent task",
+        );
+        assert.equal(accepted.agentVersionId, v2.id);
+        assert.equal(accepted.state, "QUEUED");
+      } finally {
+        release();
+        await holding;
+      }
+    });
+  }
+}
+
+for (const state of ["paused", "released"] as const) {
+  test(`explicit Resume after skill revocation restores a skill-free ${state} environment without upgrading Session`, async () => {
+    const f = await fixture();
+    await f.store.tx(actor.tenantId, (s) => {
+      for (const name of ["a", "b"])
+        s.skills[`${name}@1`] = {
+          id: `${name}@1`,
+          name,
+          description: name,
+          bundle: "default",
+          path: `/skills/${name}/SKILL.md`,
+          digest: "a".repeat(64),
+          enabled: true,
+        };
+    });
+    const v1 = await f.service.publish(
+      actor,
+      config({ skills: ["a@1"] }),
+      f.v1.agentId,
+    );
+    await f.service.submit(actor, f.ses.id, "old");
+    await f.store.tx(actor.tenantId, (s) => {
+      for (const r of Object.values(s.runs)) r.state = "COMPLETED";
+    });
+    await f.sandbox.execute(
+      actor,
+      f.w.id,
+      "seed",
+      "default",
+      "write",
+      { path: "file.txt", content: "persistent" },
+      undefined,
+      ["a@1"],
+    );
+    const before = await f.store.read(
+      actor.tenantId,
+      (s) => s.workspaces[f.w.id]!,
+    );
+    if (state === "paused") await f.sandbox.pause(actor, f.w.id);
+    else await f.sandbox.release(actor, f.w.id);
+    const v2 = await f.service.publish(
+      actor,
+      config({ skills: ["b@1"] }),
+      v1.agentId,
+    );
+    await f.store.tx(actor.tenantId, (s) => {
+      s.skills["a@1"]!.enabled = false;
+    });
+    assert.equal((await f.sandbox.resume(actor, f.w.id)).state, "active");
+    await f.store.read(actor.tenantId, (s) => {
+      assert.equal(s.sessions[f.ses.id]!.effectiveVersionId, v1.id);
+      assert.equal(s.workspaces[f.w.id]!.volumeId, before.volumeId);
+      assert.deepEqual(s.workspaces[f.w.id]!.sandboxSkills, []);
+    });
+    const next = await f.service.submit(actor, f.ses.id, "new");
+    assert.equal(next.agentVersionId, v2.id);
+    const result = await f.sandbox.execute(
+      actor,
+      f.w.id,
+      "new",
+      "default",
+      "read",
+      { path: "file.txt" },
+      undefined,
+      ["b@1"],
+    );
+    assert.equal((result as { text: string }).text, "persistent");
+    assert.deepEqual(
+      await f.store.read(
+        actor.tenantId,
+        (s) => s.workspaces[f.w.id]!.sandboxSkills,
+      ),
+      ["b@1"],
+    );
+  });
+}
+
+test("Resume retains authorized skills and never upgrades a WAITING_INPUT task", async () => {
+  const f = await fixture();
+  await f.store.tx(actor.tenantId, (s) => {
+    s.skills["a@1"] = {
+      id: "a@1",
+      name: "a",
+      description: "a",
+      bundle: "default",
+      path: "/skills/a/SKILL.md",
+      digest: "a".repeat(64),
+      enabled: true,
+    };
+  });
+  const v1 = await f.service.publish(
+    actor,
+    config({ skills: ["a@1"] }),
+    f.v1.agentId,
+  );
+  const root = await f.service.submit(actor, f.ses.id, "old");
+  const iid = await waiting(f, root.id);
+  await f.sandbox.withLease(actor, f.w.id, "seed", "default", async () => {}, [
+    "a@1",
+  ]);
+  const before = await f.store.read(
+    actor.tenantId,
+    (s) => s.workspaces[f.w.id]!.sandboxId,
+  );
+  await f.sandbox.pause(actor, f.w.id);
+  await f.service.publish(actor, config(), v1.agentId);
+  await f.sandbox.resume(actor, f.w.id);
+  assert.equal(
+    await f.store.read(actor.tenantId, (s) => s.workspaces[f.w.id]!.sandboxId),
+    before,
+  );
+  assert.equal(
+    (await f.service.respond(actor, iid, "answer"))!.agentVersionId,
+    v1.id,
+  );
+});

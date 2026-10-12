@@ -1,3 +1,4 @@
+import { skillScope } from "./skill-mounts.js";
 import { posix } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { telemetry } from "../telemetry.js";
@@ -36,6 +37,7 @@ function clearInstance(w: Workspace) {
   delete w.sandboxId;
   delete w.sandboxState;
   delete w.sandboxSkillScope;
+  delete w.sandboxLogicalSkillScope;
   delete w.sandboxTrafficToken;
 }
 export class SandboxManager {
@@ -297,7 +299,11 @@ export class SandboxManager {
     fn: (sid: string) => Promise<T>,
     skillIds: readonly string[] = [],
     signal?: AbortSignal,
-    access: { write?: boolean; authorize?: (s: State) => void } = {},
+    access: {
+      write?: boolean;
+      authorize?: (s: State) => void;
+      restoreStoredSkills?: boolean;
+    } = {},
   ): Promise<T> {
     signal?.throwIfAborted();
     owner = `${owner}:${crypto.randomUUID()}`;
@@ -312,7 +318,20 @@ export class SandboxManager {
         throw new Fault(403, "BUNDLE_NOT_GRANTED");
       if (w.bundle && w.bundle !== bundle)
         throw new Fault(403, "SKILL_BUNDLE_MISMATCH");
-      const skills = skillIds.map((id) => {
+      let selected = access.restoreStoredSkills
+        ? (w.sandboxSkills ?? [])
+        : skillIds;
+      // Resume is a lifecycle operation, not a version-selection boundary.
+      // If its recorded selection was revoked, restore a skill-free environment
+      // rather than remounting revoked skills or guessing a Session's version.
+      if (
+        access.restoreStoredSkills &&
+        selected.some(
+          (id) => !s.skills[id]?.enabled || s.skills[id]?.bundle !== bundle,
+        )
+      )
+        selected = [];
+      const skills = selected.map((id) => {
         const sk = s.skills[id];
         if (!sk?.enabled || sk.bundle !== bundle)
           throw new Fault(403, "SKILL_DENIED");
@@ -377,6 +396,11 @@ export class SandboxManager {
         try {
           w = workspace(s, a, wid, access.write);
           access.authorize?.(s);
+          if (
+            access.restoreStoredSkills &&
+            skills.some((sk) => !s.skills[sk.id]?.enabled)
+          )
+            throw new Fault(403, "SKILL_DENIED");
         } catch (e) {
           authorizationFailed = true;
           throw e;
@@ -503,7 +527,7 @@ export class SandboxManager {
         await this.record(a, wid, owner, (w) => {
           w.sandboxId = sid;
           w.sandboxSkillScope = scope;
-          w.sandboxSkills = [...skillIds];
+          w.sandboxSkills = skills.map((sk) => sk.id);
           if (created.trafficToken)
             w.sandboxTrafficToken = created.trafficToken;
           else delete w.sandboxTrafficToken;
@@ -513,6 +537,7 @@ export class SandboxManager {
       await assertOwned();
       await this.record(a, wid, owner, (w) => {
         w.sandboxState = "active";
+        w.sandboxLogicalSkillScope = skillScope(bundle, skills);
         w.sandboxLastUsedAt = Date.now();
       });
       await this.capacity.active(a.tenantId, wid, owner, sid);
@@ -985,7 +1010,9 @@ export class SandboxManager {
       crypto.randomUUID(),
       w.bundle,
       async () => {},
-      w.sandboxSkills ?? [],
+      [],
+      undefined,
+      { write: true, restoreStoredSkills: true },
     );
     await this.store.tx(a.tenantId, (s) => audit(s, a, "sandbox.resume", wid));
     return this.status(a, wid);
@@ -1208,6 +1235,7 @@ export class SandboxManager {
         w.sandboxId = sid;
         w.sandboxState = "active";
         w.sandboxSkillScope = snapshot.skillScope;
+        w.sandboxLogicalSkillScope = skillScope(snapshot.bundle, skills);
         w.sandboxSkills = [...snapshot.skills];
         if (created.trafficToken) w.sandboxTrafficToken = created.trafficToken;
         else delete w.sandboxTrafficToken;

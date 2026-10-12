@@ -99,3 +99,5 @@ API readiness 检查数据库与 schema，Worker 健康独立判断。全部 API
 Sandbox 生命周期独立于版本。pause/release 不更新 Session；等待期间恢复交互仍使用旧版本。同 bundle、同 scope 复用 ACTIVE/PAUSED Sandbox；scope 改变时由 Workspace 独占工具租约保护重建并保留 Volume，RELEASED 时按锁定配置创建。共享 Workspace 有不兼容未结束任务时，新任务返回 WORKSPACE_VERSION_BUSY，等待任务结束后重试；工具或生命周期租约占用时返回 WORKSPACE_BUSY。跨 bundle 不自动迁移，返回 WORKSPACE_BUNDLE_MIGRATION_REQUIRED，需创建匹配 bundle 的 Workspace。
 
 部署前停止旧写入者并执行 migrations/005_agent_task_versions.sql：每个历史版本成为独立逻辑 Agent，旧 Session 补齐 agentId/effectiveVersionId，历史 Run 从原 Session 补齐版本/能力并沿 parentRunId 和交互 resumedFrom 重建任务链。配置、历史和 Volume 不改变；管理员可针对迁移后的逻辑 Agent 发布后续版本。详见 [版本迁移](agent-version-migration.md)。
+
+后续版本继承当前生效版本的 allowedUsers，发布本身不扩大 ACL。Workspace 的逻辑技能 scope 与 Provider 的物理挂载 scope 分别记录：前者用于提交兼容性校验，后者用于租约内执行环境复用判断。显式 Resume 只恢复生命周期；若旧技能选择已撤销则重建为无技能环境并保留 Volume，不选择最新版本或升级 Session。新任务随后按其锁定配置适配环境，旧等待任务仍受动态撤销检查。

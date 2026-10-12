@@ -210,3 +210,7 @@ Agent `mcpServers` 最多 16 项。Worker 将 Run 的 AbortSignal 与 deadline �
 `session.version.upgraded` SSE 事件与审计记录包含 `{from,to,timestamp,actor,reason:"new_root_task"}`。幂等重试不产生重复升级事件。未结束后代任务也会阻止原 Session 提交独立新任务。
 
 跨 skillBundle 升级返回 409 `WORKSPACE_BUNDLE_MIGRATION_REQUIRED`，需创建与新 bundle 匹配的 Workspace；不静默迁移持久 Volume。共享 Workspace 中存在技能 scope 不兼容的未结束任务时返回 409 `WORKSPACE_VERSION_BUSY`，结束旧任务后重试。租约冲突返回 `WORKSPACE_BUSY`。相同 bundle 内的 scope 变化由现有 Sandbox 租约保护重建，保留 Volume；ACTIVE、PAUSED、RELEASED 都支持下一次使用配置适配。Sandbox pause/release 不触发升级，WAITING_INPUT 恢复仍使用原版本。
+
+后续版本发布继承当前生效版本的 `allowedUsers`，不会因缺省 ACL 自动扩大用户访问范围。ACL 数组独立复制；管理员仍通过版本 access API 显式变更访问限制。Workspace 分别保存逻辑技能身份 `sandboxLogicalSkillScope` 与包含实际 Volume/Host 挂载配置的 `sandboxSkillScope`；新任务兼容性只比较逻辑身份，工具获取租约后仍由 Provider 校验实际挂载。旧记录缺少逻辑 scope 时从已有技能身份推导。
+
+显式 `/workspaces/{id}/sandbox/resume` 是生命周期操作，不解析逻辑 Agent 最新版本，也不升级 Session。它在租约获取事务中选择 Workspace 记录的技能；全部仍授权时恢复原环境，任一技能已撤销或不属于当前 bundle 时改为不挂载任何技能的环境并保留 Volume。后续新任务按锁定版本适配技能环境；WAITING_INPUT 的原任务不切换版本，恢复交互仍执行动态撤销检查。此规则避免 Resume 被已撤销的旧技能阻塞，同时不会重新挂载被撤销技能。

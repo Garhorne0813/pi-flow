@@ -66,7 +66,8 @@ export type Workspace = {
   members: Record<string, "owner" | "editor" | "viewer">;
   volumeId?: string;
   sandboxId?: string;
-  sandboxSkillScope?: string;
+  sandboxSkillScope?: string; // Provider identity, including physical mounts.
+  sandboxLogicalSkillScope?: string; // Bundle and immutable Skill identities.
   // Per-sandbox data-plane token returned by Cube create; connect does not
   // re-issue it, so it must survive Worker restarts with the Sandbox record.
   sandboxTrafficToken?: string;
