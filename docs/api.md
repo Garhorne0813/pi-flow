@@ -57,7 +57,7 @@ curl -N 'http://127.0.0.1:8080/api/v1/runs/<runId>/events' \
 | POST       | `/workspaces/{id}/files`                 | UTF-8 `{path,content}`，返回 `{fileId}`，201            |
 | GET        | `/workspaces/{id}/files/{fileId}`        | `{path,text,sha256}`（真实 Cube）；Demo `{text}`             |
 
-幂等键以 Tenant + User + Session 为范围。同键同 message 返回原 Run；同键不同 message 返回 `IDEMPOTENCY_CONFLICT`。新的不同键在 Session 已有活跃 Run 时返回 `SESSION_BUSY`。文件 ID 是路径的 base64url 表示，不承担访问授权；下载仍检查 Workspace ACL 和 Sandbox 内真实路径。File API 只允许工作区路径；Skill 内容通过已授权 Agent 的 remote_read 读取。文件 API 使用单独的临时无 Skill Sandbox，读操作不改变 Agent Sandbox 的 ID、scope、state 或 lastUsedAt，可与 Agent 工具并发；写操作保持工作区工具互斥。临时实例计入 owner/全局活跃配额，请求后确认释放；配额不足返回 429。失败清理保留容量记录，后续文件请求会先清理已知实例再创建；没有 ID 的未知结果仍需运维对账。
+幂等键以 Tenant + User + Session 为范围。同键同 message 返回原 Run；同键不同 message 返回 `IDEMPOTENCY_CONFLICT`。新的不同键在 Session 已有活跃 Run 时返回 `SESSION_BUSY`。文件 ID 是路径的 base64url 表示，不承担访问授权；下载仍检查 Workspace ACL 和 Sandbox 内真实路径。File API 只允许工作区路径；Skill 内容通过已授权 Agent 的 read 读取。文件 API 使用单独的临时无 Skill Sandbox，读操作不改变 Agent Sandbox 的 ID、scope、state 或 lastUsedAt，可与 Agent 工具并发；写操作保持工作区工具互斥。临时实例计入 owner/全局活跃配额，请求后确认释放；配额不足返回 429。失败清理保留容量记录，后续文件请求会先清理已知实例再创建；没有 ID 的未知结果仍需运维对账。
 
 ## SSE 协议
 

@@ -15,7 +15,7 @@
 | `adapters/remote-script.ts` | 仅在 Sandbox 执行的可信文件/命令适配代码                        |
 | `adapters/mcp.ts`           | 官方 Streamable HTTP MCP Client 与 Endpoint 策略                |
 
-Pi 工具使用显式名字 `remote_read` 等，避免与内置工具重名。ResourceLoader 返回空 Extensions/Skills 本地发现结果，远程 Skill 元数据进入受控 Prompt；内容经 remote_read 读取。Worker 不调用 Pi 的本地 read/bash 工厂。
+Pi 工具使用规范名字 `read`、`write`、`edit`、`bash`、`ls`、`find`、`grep`。`createAgentSession` 设置 `noTools: "all"`，仅启用允许的 `customTools`，同名工具不会落到 Pi 的本地实现。ResourceLoader 返回空 Extensions/Skills 本地发现结果，远程 Skill 元数据进入受控 Prompt；内容经 read 读取。Worker 不调用 Pi 的本地 read/bash 工厂。
 
 技能按 Agent `skills` 精确挂载：`SKILL_VOLUMES_JSON` 绑定每个技能版本的独立只读 Volume、Bundle 和 SKILL.md 路径，辅助资源与 SKILL.md 放在同一 Volume 根目录。Cube SDK 没有子目录挂载，因此不再挂载整包 Volume。Sandbox 持久记录技能集合摘要；工具访问切换集合时先确认旧实例 Kill 成功，再重建实例并保留 Workspace Volume。空列表不挂载技能，旧实例缺少摘要时强制重建。重复/重叠挂载目录、共享技能 Volume、Workspace 与技能 Volume 指向同一实际卷均拒绝。发布者必须保证 Volume 只包含该技能且不可变，模板 `/skills` 为空，无其他技能挂载。
 
@@ -42,7 +42,7 @@ MCP 发现只遍历当前 Agent 的 Server 列表；调用与审批前再次检�
 - 审批/拒绝/问答持久状态、新 Run 续跑、审批副作用仅执行一次。
 - 子 Agent 权限交集与独立 Session、工具和 Token 预算。
 - Worker 故障不重放、Run 取消、SSE 终态事件与游标回放。
-- 真实 Pi 0.99.2 对接本地模拟网关：只有 remote_read，规范 Session Entries 恢复后含原工具结果。
+- 真实 Pi 0.99.2 对接本地模拟网关：只有配置的规范工具名，read/bash 调用注册的远程工具，规范 Session Entries 恢复后含原工具结果。
 - 真实 MCP SDK 对接本地 HTTPS Streamable HTTP Server：筛选工具、认证头与实时撤销。
 - Agent 技能挂载计划（Cube SDK 调用替身）、不同 Session/父子 Agent 切换技能范围、工作区保留、旧实例替换、Kill 失败拒绝访问；未授权 MCP Server 不被访问、不被发现、不可调用或申请审批。
 - 真实 UCS JWT/JWKS HTTPS 验证：签名、issuer/audience/expiry/tenant。

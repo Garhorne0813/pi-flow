@@ -303,7 +303,7 @@ export class Worker {
       approved = false,
     ): Promise<unknown> => {
       controller.signal.throwIfAborted();
-      const bare = name.replace(/^remote_/, "");
+      const bare = name;
       const mcpTool = name.startsWith("mcp_");
       if (
         !mcpTool &&

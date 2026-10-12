@@ -151,12 +151,12 @@ test("API auth, RBAC, validation and cross-tenant resource hiding", async () => 
   assert.doesNotMatch(replay.body, /event: run.started/);
   await app.close();
 });
-test("approval checkpoint continues with a new Run and executes the original operation once", async () => {
+test("write approval resumes in a new Run and executes exactly once", async () => {
   let calls = 0;
   const runtime: Runtime = {
     execute: async (c) => {
       if (c.prompt === "write")
-        await c.call("remote_write", { path: "report.txt", content: "saved" });
+        await c.call("write", { path: "report.txt", content: "saved" });
       else await c.emit("message.completed", { message: "done" });
       await c.checkpoint(c.entries);
     },
@@ -174,6 +174,7 @@ test("approval checkpoint continues with a new Run and executes the original ope
     "one",
     (s) => Object.values(s.interactions)[0]!,
   );
+  assert.equal((interaction.payload as { name: string }).name, "write");
   const next = await f.service.respond(alice, interaction.id, "approve");
   assert.notEqual(next!.id, r.id);
   assert.equal(
@@ -192,11 +193,56 @@ test("approval checkpoint continues with a new Run and executes the original ope
     code: "INTERACTION_ALREADY_RESOLVED",
   });
 });
+test("bash requires approval and dispatches to the sandbox provider", async () => {
+  const f = await fixture({
+    execute: async (c) => {
+      if (c.prompt === "shell") await c.call("bash", { command: "exit 73" });
+    },
+  });
+  const agent = await f.service.publish(alice, config({ tools: ["bash"] }));
+  const session = await f.service.createSession(alice, f.w.id, agent.id);
+  let calls = 0;
+  f.provider.execute = async (sandboxId, operation, args) => {
+    assert.ok(f.provider.boxes.has(sandboxId));
+    assert.equal(operation, "bash");
+    assert.equal(args.command, "exit 73");
+    assert.equal(args.timeoutSeconds, 60);
+    calls++;
+    return { text: "sandbox shell result" };
+  };
+  const run = await f.service.submit(alice, session.id, "shell");
+  assert.equal((await drain(f, run.id)).state, "WAITING_INPUT");
+  assert.equal(calls, 0);
+  const interaction = await f.store.tx(
+    "one",
+    (s) => Object.values(s.interactions)[0]!,
+  );
+  assert.equal((interaction.payload as { name: string }).name, "bash");
+  const resumed = await f.service.respond(alice, interaction.id, "approve");
+  assert.equal((await drain(f, resumed!.id)).state, "COMPLETED");
+  assert.equal(calls, 1);
+});
+
+test("bash cannot bypass the configured tool allowlist", async () => {
+  const f = await fixture({
+    execute: async (c) => {
+      await c.call("bash", { command: "exit 73" });
+    },
+  });
+  const run = await f.service.submit(alice, f.ses.id, "shell");
+  assert.equal((await drain(f, run.id)).error, "TOOL_DENIED");
+  assert.equal(f.provider.boxes.size, 0);
+  assert.deepEqual(
+    await f.store.tx("one", (s) => Object.values(s.interactions)),
+    [],
+  );
+});
+
 test("denied approval performs no side effect; a revoked actor cannot approve", async () => {
   const f = await fixture({
     execute: async (c) => {
       if (c.prompt === "write")
-        await c.call("remote_write", { path: "x", content: "a" });
+        await c.call("write", { path: "x", content: "a" });
     },
   });
   const r = await f.service.submit(alice, f.ses.id, "write");
@@ -210,7 +256,7 @@ test("denied approval performs no side effect; a revoked actor cannot approve", 
 test("unknown tool and model supplied sandbox identifiers are rejected", async () => {
   const f = await fixture({
     execute: async (c) => {
-      await c.call("remote_write", {
+      await c.call("write", {
         path: "x",
         content: "a",
         sandboxId: "other",
@@ -279,7 +325,7 @@ test("cancellation and immediate authorization checks stop later tools", async (
   const f = await fixture({
     execute: async (c) => {
       await blocked;
-      await c.call("remote_read", { path: "x" });
+      await c.call("read", { path: "x" });
     },
   });
   const r = await f.service.submit(alice, f.ses.id, "work");
@@ -439,7 +485,7 @@ test("unconfirmed remote cancellation is FAILED rather than claiming the command
   const gate = new Promise<void>((r) => (unblock = r));
   const f = await fixture({
     execute: async (c) => {
-      await c.call("remote_read", { path: "x" });
+      await c.call("read", { path: "x" });
     },
   });
   f.provider.execute = async () => {
