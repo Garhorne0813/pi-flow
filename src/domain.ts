@@ -49,7 +49,11 @@ export const AgentConfig = z
   })
   .strict();
 export type AgentConfig = z.infer<typeof AgentConfig>;
-export type Agent = { id: string; activeVersionId: string };
+export type Agent = {
+  id: string;
+  activeVersionId: string;
+  allowedUsers?: string[];
+};
 export type AgentVersion = {
   agentId?: string;
   id: string;
@@ -57,7 +61,7 @@ export type AgentVersion = {
   digest: string;
   publishedAt: string;
   enabled: boolean;
-  allowedUsers?: string[];
+  allowedUsers?: string[]; // Legacy snapshot; logical Agent ACL governs access.
 };
 export type Workspace = {
   id: string;
@@ -287,8 +291,26 @@ export function intersect(
   };
 }
 
-export function agentAllowed(v: AgentVersion, a: Actor) {
-  return (
-    v.enabled && (!v.allowedUsers?.length || v.allowedUsers.includes(a.userId))
-  );
+// Legacy records use the current active version only until ACL migration.
+export function agentAllowed(v: AgentVersion, a: Actor, s: State) {
+  const logical = s.logicalAgents[v.agentId ?? v.id];
+  const active = logical ? s.agents[logical.activeVersionId] : undefined;
+  if (logical && logical.allowedUsers === undefined && !active) return false;
+  const users = logical
+    ? (logical.allowedUsers ?? active?.allowedUsers)
+    : v.allowedUsers;
+  return v.enabled && (!users?.length || users.includes(a.userId));
+}
+export function logicalAgent(s: State, selector: string): Agent {
+  const version = s.agents[selector];
+  const key = version?.agentId ?? selector;
+  let logical = s.logicalAgents[key];
+  if (!logical) {
+    if (!version) throw new Fault(404, "AGENT_NOT_FOUND");
+    logical = s.logicalAgents[key] = { id: key, activeVersionId: version.id };
+  }
+  logical.allowedUsers ??= [
+    ...(s.agents[logical.activeVersionId]?.allowedUsers ?? []),
+  ];
+  return logical;
 }

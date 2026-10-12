@@ -1,11 +1,12 @@
 import { createHash } from "node:crypto";
-import { skillScope } from "./adapters/skill-mounts.js";
+import { skillScope, skillIdentityScope } from "./adapters/skill-mounts.js";
 import {
   Fault,
   id,
   event,
   audit,
   agentAllowed,
+  logicalAgent,
   session,
   run,
   workspace,
@@ -43,6 +44,8 @@ export function createRun(
       return old;
     }
   }
+  if (!extra.parentRunId && !extra.resumedFrom)
+    expireRevokedWaitingTasks(s, a, ses.workspaceId);
   if (
     Object.values(s.runs).some(
       (r) =>
@@ -58,7 +61,7 @@ export function createRun(
     ? (extra.agentVersionId ?? ses.agentVersionId)
     : (s.logicalAgents[agentId]?.activeVersionId ?? ses.agentVersionId);
   const av = s.agents[versionId];
-  if (!av || !agentAllowed(av, a))
+  if (!av || !agentAllowed(av, a, s))
     throw new Fault(403, "AGENT_DISABLED_OR_DENIED");
   const config = extra.capabilities ?? av.config;
   validateConfig(s, config);
@@ -87,7 +90,8 @@ export function createRun(
         ]?.config;
       if (
         !otherConfig ||
-        skillScope(
+        otherConfig.skills.some((k) => !s.skills[k]) ||
+        skillIdentityScope(
           otherConfig.skillBundle,
           otherConfig.skills.map((k) => s.skills[k]!),
         ) !== scope
@@ -172,13 +176,82 @@ export function validateConfig(s: State, config: AgentConfig) {
   for (const key of config.mcpServers)
     if (!s.mcp[key]?.enabled) throw new Fault(403, "MCP_REVOKED");
 }
-export function authorizedRun(s: State, r: Run) {
+export function taskIdentity(s: State, r: Run): string {
+  if (r.taskId || r.rootRunId) return (r.taskId ?? r.rootRunId)!;
+  const seen = new Set<string>();
+  let current = r;
+  while (true) {
+    if (seen.has(current.id)) throw new Fault(403, "INVALID_RUN_TREE");
+    seen.add(current.id);
+    const predecessor =
+      current.parentRunId ??
+      (current.resumedFrom
+        ? s.interactions[current.resumedFrom]?.runId
+        : undefined);
+    if (!predecessor || !s.runs[predecessor]) return current.id;
+    current = s.runs[predecessor]!;
+    if (current.taskId || current.rootRunId)
+      return (current.taskId ?? current.rootRunId)!;
+  }
+}
+function expireRevokedWaitingTasks(s: State, a: Actor, wid: string) {
+  for (const r of Object.values(s.runs)) {
+    if (
+      r.state !== "WAITING_INPUT" ||
+      r.lease ||
+      s.sessions[r.sessionId]?.workspaceId !== wid
+    )
+      continue;
+    try {
+      // Waiting subjects can refresh their JWT; expiry alone is not revocation.
+      authorizedRun(s, r, { ignoreActorExpiry: true });
+    } catch (e) {
+      if (
+        !(e instanceof Fault) ||
+        ![
+          "AGENT_REVOKED",
+          "SKILL_REVOKED",
+          "MCP_REVOKED",
+          "SKILL_DENIED",
+        ].includes(e.code)
+      )
+        continue;
+      const taskId = taskIdentity(s, r);
+      for (const member of Object.values(s.runs)) {
+        if (terminal(member.state) || taskIdentity(s, member) !== taskId)
+          continue;
+        member.error = e.code;
+        if (member.state === "RUNNING" || member.lease) {
+          member.cancelRequested = true;
+          event(s, member, "task.revoked", { taskId, code: e.code });
+        } else {
+          member.state = "FAILED";
+          event(s, member, "run.failed", {
+            taskId,
+            code: e.code,
+            reason: "task_revoked",
+          });
+        }
+        audit(s, a, "task.revoked", taskId, e.code);
+      }
+    }
+  }
+}
+export function authorizedRun(
+  s: State,
+  r: Run,
+  options: { ignoreActorExpiry?: boolean } = {},
+) {
   let current: Run | undefined = r;
   const seen = new Set<string>();
   while (current) {
     if (seen.has(current.id)) throw new Fault(403, "INVALID_RUN_TREE");
     seen.add(current.id);
-    if (current.actor.expiresAt && current.actor.expiresAt <= Date.now())
+    if (
+      !options.ignoreActorExpiry &&
+      current.actor.expiresAt &&
+      current.actor.expiresAt <= Date.now()
+    )
       throw new Fault(401, "ACTOR_TOKEN_EXPIRED");
     const ses = session(s, current.actor, current.sessionId, true);
     if (
@@ -186,6 +259,7 @@ export function authorizedRun(s: State, r: Run) {
       !agentAllowed(
         s.agents[current.agentVersionId ?? ses.agentVersionId]!,
         current.actor,
+        s,
       )
     )
       throw new Fault(403, "AGENT_REVOKED");
@@ -239,14 +313,10 @@ export class HarnessService {
           throw new Fault(400, "INVALID_MCP");
       for (const key of config.subagents)
         if (!s.agents[key]?.enabled) throw new Fault(400, "INVALID_SUBAGENT");
-      if (agentId && !s.logicalAgents[agentId]) {
-        const legacy = s.agents[agentId];
-        if (!legacy) throw new Fault(404, "AGENT_NOT_FOUND");
-        s.logicalAgents[agentId] = { id: agentId, activeVersionId: legacy.id };
-      }
-      const logicalId = agentId ?? id();
-      const previous =
-        s.agents[s.logicalAgents[logicalId]?.activeVersionId ?? ""];
+      const logical = agentId
+        ? logicalAgent(s, agentId)
+        : { id: id(), activeVersionId: "", allowedUsers: [] };
+      const logicalId = logical.id;
       const av: AgentVersion = {
         agentId: logicalId,
         id: id(),
@@ -254,13 +324,10 @@ export class HarnessService {
         digest: digest(config),
         publishedAt: new Date().toISOString(),
         enabled: true,
-        // Publication must not broaden access granted to the logical Agent.
-        allowedUsers: previous?.allowedUsers
-          ? [...previous.allowedUsers]
-          : undefined,
       };
       s.agents[av.id] = av;
-      s.logicalAgents[logicalId] = { id: logicalId, activeVersionId: av.id };
+      logical.activeVersionId = av.id;
+      s.logicalAgents[logicalId] = logical;
       audit(s, a, "agent.publish", av.id);
       return av;
     });
@@ -277,9 +344,19 @@ export class HarnessService {
       for (const key of av.config.mcpServers)
         if (!this.hasEndpoint(s.mcp[key]!.endpointRef, a.tenantId))
           throw new Fault(403, "MCP_ENDPOINT_NOT_GRANTED");
-      s.logicalAgents[agentId] = { id: agentId, activeVersionId: versionId };
+      const logical = logicalAgent(s, agentId);
+      logical.activeVersionId = versionId;
       audit(s, a, "agent.activate", agentId, versionId);
       return s.logicalAgents[agentId];
+    });
+  }
+  async setAccess(a: Actor, selector: string, allowedUsers: string[]) {
+    admin(a);
+    return this.store.tx(a.tenantId, (s) => {
+      const logical = logicalAgent(s, selector);
+      logical.allowedUsers = [...allowedUsers];
+      audit(s, a, "agent.access", logical.id);
+      return { allowedUsers: logical.allowedUsers };
     });
   }
   async createWorkspace(a: Actor, name: string) {
@@ -300,7 +377,8 @@ export class HarnessService {
       const w = workspace(s, a, wid, true);
       const logicalId = s.agents[avId]?.agentId ?? avId;
       const av = s.agents[s.logicalAgents[logicalId]?.activeVersionId ?? avId];
-      if (!av || !agentAllowed(av, a)) throw new Fault(404, "AGENT_NOT_FOUND");
+      if (!av || !agentAllowed(av, a, s))
+        throw new Fault(404, "AGENT_NOT_FOUND");
       if (!this.hasBundle(av.config.skillBundle, a.tenantId))
         throw new Fault(403, "BUNDLE_NOT_GRANTED");
       if (w.bundle && w.bundle !== av.config.skillBundle)
@@ -349,17 +427,16 @@ export class HarnessService {
   async cancel(a: Actor, rid: string) {
     return this.store.tx(a.tenantId, (s) => {
       const r = run(s, a, rid, true);
-      const cancel = (r: Run) => {
-        if (["COMPLETED", "FAILED", "CANCELLED"].includes(r.state)) return;
-        r.cancelRequested = true;
-        if (r.state !== "RUNNING") {
-          r.state = "CANCELLED";
-          event(s, r, "run.cancelled");
+      const taskId = taskIdentity(s, r);
+      for (const member of Object.values(s.runs)) {
+        if (terminal(member.state) || taskIdentity(s, member) !== taskId)
+          continue;
+        member.cancelRequested = true;
+        if (member.state !== "RUNNING") {
+          member.state = "CANCELLED";
+          event(s, member, "run.cancelled", { taskId });
         }
-        for (const child of Object.values(s.runs))
-          if (child.parentRunId === r.id) cancel(child);
-      };
-      cancel(r);
+      }
       audit(s, a, "run.cancel", rid);
       return r;
     });
@@ -445,7 +522,7 @@ export class HarnessService {
       if (!config.subagents.includes(avId))
         throw new Fault(403, "SUBAGENT_DENIED");
       const child = s.agents[avId];
-      if (!child || !agentAllowed(child, p.actor))
+      if (!child || !agentAllowed(child, p.actor, s))
         throw new Fault(403, "SUBAGENT_REVOKED");
       if (p.depth >= config.maxDepth || p.children >= config.maxSubagents)
         throw new Fault(429, "SUBAGENT_LIMIT");

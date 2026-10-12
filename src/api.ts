@@ -165,11 +165,15 @@ export function buildAPI(
   app.get("/api/v1/agents", async (req) => {
     const a = actor(req),
       p = page.parse(req.query);
-    return service.store.readMetadata(a.tenantId, ["agents"], (s) => ({
-      items: Object.values(s.agents)
-        .filter((v) => agentAllowed(v, a))
-        .slice(p.offset, p.offset + p.limit),
-    }));
+    return service.store.readMetadata(
+      a.tenantId,
+      ["agents", "logicalAgents"],
+      (s) => ({
+        items: Object.values(s.agents)
+          .filter((v) => agentAllowed(v, a, s))
+          .slice(p.offset, p.offset + p.limit),
+      }),
+    );
   });
   app.post("/api/v1/admin/agents", async (req, reply) =>
     reply.code(201).send(await service.publish(actor(req), req.body)),
@@ -204,7 +208,7 @@ export function buildAPI(
           .filter(
             (v) =>
               s.agents[v.activeVersionId] &&
-              agentAllowed(s.agents[v.activeVersionId]!, a),
+              agentAllowed(s.agents[v.activeVersionId]!, a, s),
           )
           .slice(p.offset, p.offset + p.limit),
       }),
@@ -230,21 +234,22 @@ export function buildAPI(
       return s.agents[key];
     });
   });
-  app.put("/api/v1/admin/agents/:id/access", async (req) => {
-    const a = actor(req);
-    admin(a);
-    const key = uuid.parse(params(req.params).id);
-    const b = z
-      .object({ allowedUsers: z.array(z.string().min(1).max(200)).max(1000) })
-      .strict()
-      .parse(req.body);
-    return service.store.tx(a.tenantId, (s) => {
-      if (!s.agents[key]) throw new Fault(404, "AGENT_NOT_FOUND");
-      s.agents[key]!.allowedUsers = b.allowedUsers;
-      audit(s, a, "agent.access", key);
-      return { allowedUsers: b.allowedUsers };
+  for (const path of [
+    "/api/v1/admin/agents/:id/access",
+    "/api/v1/admin/logical-agents/:id/access",
+  ]) {
+    app.put(path, async (req) => {
+      const b = z
+        .object({ allowedUsers: z.array(z.string().min(1).max(200)).max(1000) })
+        .strict()
+        .parse(req.body);
+      return service.setAccess(
+        actor(req),
+        uuid.parse(params(req.params).id),
+        b.allowedUsers,
+      );
     });
-  });
+  }
   app.get("/api/v1/admin/skills", async (req) => {
     const a = actor(req);
     admin(a);

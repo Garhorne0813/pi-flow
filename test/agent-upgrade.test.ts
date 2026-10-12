@@ -451,43 +451,103 @@ test("latest Skill/MCP revocation is checked before acceptance and rolls back Se
   });
 });
 
-test("successor publication inherits current access restrictions without aliasing ACL arrays", async () => {
+test("publication and rollback preserve the logical ACL; historical queries and execution enforce it", async () => {
   const f = await fixture();
   const bob = { ...actor, userId: "bob", admin: false };
   await f.store.tx(actor.tenantId, (s) => {
     s.workspaces[f.w.id]!.members.bob = "editor";
-    s.agents[f.v1.id]!.allowedUsers = [actor.userId];
   });
+  const users = [actor.userId, "bob"];
+  await f.service.setAccess(actor, f.v1.id, users);
+  users.push("unexpected");
+  const bobSession = await f.service.createSession(bob, f.w.id, f.v1.id);
+  const old = await f.service.submit(bob, bobSession.id, "before restriction");
   const v2 = await f.service.publish(
     actor,
     config({ systemPrompt: "V2" }),
     f.v1.agentId,
   );
-  assert.deepEqual(v2.allowedUsers, [actor.userId]);
+  assert.equal(v2.allowedUsers, undefined);
+  await f.service.setAccess(actor, v2.id, [actor.userId]);
+  await f.service.activate(actor, f.v1.agentId!, f.v1.id);
   await assert.rejects(f.service.createSession(bob, f.w.id, f.v1.id), {
     code: "AGENT_NOT_FOUND",
   });
   await assert.rejects(f.service.submit(bob, f.ses.id, "unauthorized"), {
     code: "AGENT_DISABLED_OR_DENIED",
   });
-  const next = await f.service.submit(actor, f.ses.id, "authorized");
-  assert.equal(next.agentVersionId, v2.id);
-  await f.store.tx(actor.tenantId, (s) => {
-    s.agents[f.v1.id]!.allowedUsers!.push("bob");
-  });
-  assert.deepEqual(
-    await f.store.read(actor.tenantId, (s) => s.agents[v2.id]!.allowedUsers),
-    [actor.userId],
-  );
-  await f.store.tx(actor.tenantId, (s) => {
-    s.agents[v2.id]!.allowedUsers = ["charlie"];
+  await f.store.read(actor.tenantId, (s) => {
+    assert.throws(() => authorizedRun(s, s.runs[old.id]!), {
+      code: "AGENT_REVOKED",
+    });
   });
   const v3 = await f.service.publish(
     actor,
     config({ systemPrompt: "V3" }),
     f.v1.agentId,
   );
-  assert.deepEqual(v3.allowedUsers, ["charlie"]);
+  assert.equal(v3.agentId, f.v1.agentId);
+  assert.deepEqual(
+    await f.store.read(
+      actor.tenantId,
+      (s) => s.logicalAgents[f.v1.agentId!]!.allowedUsers,
+    ),
+    [actor.userId],
+  );
+  const app = buildAPI(
+    f.service,
+    async (header) => (header === "Bearer bob" ? bob : actor),
+    f.sandbox,
+  );
+  for (const path of ["/api/v1/agents", "/api/v1/logical-agents"]) {
+    const denied = await app.inject({
+      method: "GET",
+      url: path,
+      headers: { authorization: "Bearer bob" },
+    });
+    assert.deepEqual(denied.json().items, []);
+    const allowed = await app.inject({
+      method: "GET",
+      url: path,
+      headers: { authorization: "Bearer alice" },
+    });
+    assert.ok(allowed.json().items.length > 0);
+  }
+  const access = await app.inject({
+    method: "PUT",
+    url: `/api/v1/admin/logical-agents/${f.v1.agentId}/access`,
+    headers: { authorization: "Bearer alice" },
+    payload: { allowedUsers: [actor.userId, "bob"] },
+  });
+  assert.equal(access.statusCode, 200);
+  assert.equal(
+    (
+      await app.inject({
+        method: "GET",
+        url: "/api/v1/agents",
+        headers: { authorization: "Bearer bob" },
+      })
+    ).json().items.length,
+    3,
+  );
+  // Legacy version access route is an alias for the SAME logical policy.
+  await app.inject({
+    method: "PUT",
+    url: `/api/v1/admin/agents/${f.v1.id}/access`,
+    headers: { authorization: "Bearer alice" },
+    payload: { allowedUsers: [actor.userId] },
+  });
+  assert.deepEqual(
+    (
+      await app.inject({
+        method: "GET",
+        url: "/api/v1/agents",
+        headers: { authorization: "Bearer bob" },
+      })
+    ).json().items,
+    [],
+  );
+  await app.close();
 });
 
 for (const backend of ["volume", "host"] as const) {
@@ -711,4 +771,212 @@ test("Resume retains authorized skills and never upgrades a WAITING_INPUT task",
     (await f.service.respond(actor, iid, "answer"))!.agentVersionId,
     v1.id,
   );
+});
+
+for (const revoke of ["skill", "agent", "acl", "mcp"] as const) {
+  test(`new root invalidates a ${revoke}-revoked waiting task without requiring manual cancellation`, async () => {
+    const f = await fixture();
+    await f.store.tx(actor.tenantId, (s) => {
+      for (const name of ["a", "b"])
+        s.skills[`${name}@1`] = {
+          id: `${name}@1`,
+          name,
+          description: name,
+          bundle: "default",
+          path: `/skills/${name}/SKILL.md`,
+          digest: "a".repeat(64),
+          enabled: true,
+        };
+      s.mcp.m = {
+        id: "m",
+        endpointRef: "endpoint",
+        allowedTools: ["read"],
+        enabled: true,
+      };
+    });
+    const service = new HarnessService(f.store, ["endpoint"], ["default"]);
+    const v1 = await service.publish(
+      actor,
+      config({
+        skills: ["a@1"],
+        ...(revoke === "mcp" ? { mcpServers: ["m"] } : {}),
+      }),
+      f.v1.agentId,
+    );
+    const root = await service.submit(actor, f.ses.id, "old");
+    const iid = await waiting(f, root.id);
+    // Expired UCS token must not hide a true Skill/Agent/MCP revocation.
+    await f.store.tx(actor.tenantId, (s) => {
+      s.runs[root.id]!.actor.expiresAt = Date.now() - 1;
+    });
+    const v2 = await service.publish(
+      actor,
+      config({ skills: ["b@1"] }),
+      v1.agentId,
+    );
+    let target = v2;
+    await f.store.tx(actor.tenantId, (s) => {
+      if (revoke === "skill") s.skills["a@1"]!.enabled = false;
+      if (revoke === "agent") s.agents[v1.id]!.enabled = false;
+      if (revoke === "mcp") s.mcp.m!.enabled = false;
+    });
+    if (revoke === "acl") {
+      await service.setAccess(actor, v1.id, ["other-user"]);
+      target = await service.publish(actor, config({ skills: ["b@1"] }));
+    }
+    const second = await service.createSession(actor, f.w.id, target.agentId!);
+    const next = await service.submit(actor, second.id, "new");
+    assert.equal(next.agentVersionId, target.id);
+    await f.store.read(actor.tenantId, (s) => {
+      assert.equal(s.runs[root.id]!.state, "FAILED");
+      const failed = s.events.find(
+        (e) => e.runId === root.id && e.type === "run.failed",
+      );
+      assert.equal((failed!.data as { reason: string }).reason, "task_revoked");
+      assert.ok(s.audit.some((e) => e.action === "task.revoked"));
+    });
+    await assert.rejects(service.respond(actor, iid, "late answer"), {
+      code: "RUN_NOT_WAITING",
+    });
+  });
+}
+
+test("JWT expiry alone preserves a waiting task; static history identity does not grant revoked Skills", async () => {
+  const f = await fixture();
+  const root = await f.service.submit(actor, f.ses.id, "old");
+  const iid = await waiting(f, root.id);
+  await f.store.tx(actor.tenantId, (s) => {
+    s.runs[root.id]!.actor.expiresAt = Date.now() - 1;
+  });
+  const second = await f.service.createSession(actor, f.w.id, f.v1.id);
+  await f.service.submit(actor, second.id, "other session");
+  assert.equal(
+    await f.store.read(actor.tenantId, (s) => s.runs[root.id]!.state),
+    "WAITING_INPUT",
+  );
+  assert.equal(
+    (await f.service.respond(actor, iid, "refreshed subject"))!.agentVersionId,
+    f.v1.id,
+  );
+  const { skillScope, skillIdentityScope } = await import(
+    "../src/adapters/skill-mounts.js"
+  );
+  const sk = {
+    id: "a@1",
+    name: "a",
+    description: "a",
+    bundle: "default",
+    path: "/skills/a/SKILL.md",
+    digest: "a".repeat(64),
+    enabled: true,
+  };
+  assert.equal(
+    skillIdentityScope("default", [{ ...sk, enabled: false }]),
+    skillScope("default", [sk]),
+  );
+  assert.throws(() => skillScope("default", [{ ...sk, enabled: false }]), {
+    code: "SKILL_DENIED",
+  });
+});
+
+test("revoked waiting task with a running descendant preserves the active lease and retries after the descendant terminates", async () => {
+  const f = await fixture();
+  await f.store.tx(actor.tenantId, (s) => {
+    for (const name of ["a", "b"])
+      s.skills[`${name}@1`] = {
+        id: `${name}@1`,
+        name,
+        description: name,
+        bundle: "default",
+        path: `/skills/${name}/SKILL.md`,
+        digest: "a".repeat(64),
+        enabled: true,
+      };
+  });
+  const v1 = await f.service.publish(
+    actor,
+    config({ skills: ["a@1"] }),
+    f.v1.agentId,
+  );
+  const root = await f.service.submit(actor, f.ses.id, "old");
+  await waiting(f, root.id);
+  const child = id();
+  await f.store.tx(actor.tenantId, (s) => {
+    const sid = id();
+    s.sessions[sid] = { ...s.sessions[f.ses.id]!, id: sid };
+    s.runs[child] = {
+      ...s.runs[root.id]!,
+      id: child,
+      sessionId: sid,
+      parentRunId: root.id,
+      state: "RUNNING",
+      lease: { owner: "live", expires: Date.now() + 30000 },
+    };
+    s.skills["a@1"]!.enabled = false;
+  });
+  const v2 = await f.service.publish(
+    actor,
+    config({ skills: ["b@1"] }),
+    v1.agentId,
+  );
+  const second = await f.service.createSession(actor, f.w.id, v2.id);
+  await assert.rejects(f.service.submit(actor, second.id, "new"), {
+    code: "WORKSPACE_VERSION_BUSY",
+  });
+  assert.equal(
+    await f.store.read(actor.tenantId, (s) => s.runs[child]!.state),
+    "RUNNING",
+  );
+  await f.store.tx(actor.tenantId, (s) => {
+    s.runs[child]!.state = "FAILED";
+    delete s.runs[child]!.lease;
+  });
+  assert.equal(
+    (await f.service.submit(actor, second.id, "retry")).agentVersionId,
+    v2.id,
+  );
+});
+
+test("cancel by original root or continuation cancels the entire task, including continuations and subagents, without touching another task", async () => {
+  const f = await fixture();
+  const root = await f.service.submit(actor, f.ses.id, "old");
+  const iid = await waiting(f, root.id, "approval");
+  const next = (await f.service.respond(actor, iid, "approve"))!;
+  const secondIid = await waiting(f, next.id);
+  const final = (await f.service.respond(actor, secondIid, "answer"))!;
+  const child = id();
+  await f.store.tx(actor.tenantId, (s) => {
+    s.runs[final.id]!.state = "RUNNING";
+    s.runs[final.id]!.lease = { owner: "live", expires: Date.now() + 30000 };
+    const sid = id();
+    s.sessions[sid] = { ...s.sessions[f.ses.id]!, id: sid };
+    s.runs[child] = {
+      ...s.runs[final.id]!,
+      id: child,
+      sessionId: sid,
+      parentRunId: final.id,
+      state: "WAITING_INPUT",
+      lease: undefined,
+    };
+  });
+  const otherSes = await f.service.createSession(actor, f.w.id, f.v1.id);
+  const unrelated = await f.service.submit(actor, otherSes.id, "other task");
+  await f.service.cancel(actor, root.id);
+  await f.service.cancel(actor, next.id);
+  await f.store.read(actor.tenantId, (s) => {
+    assert.equal(s.runs[root.id]!.state, "COMPLETED");
+    assert.equal(s.runs[final.id]!.cancelRequested, true);
+    assert.equal(s.runs[final.id]!.state, "RUNNING");
+    assert.equal(s.runs[child]!.state, "CANCELLED");
+    assert.equal(s.runs[unrelated.id]!.state, "QUEUED");
+    assert.equal(s.runs[unrelated.id]!.cancelRequested, undefined);
+    assert.equal(
+      s.events.filter((e) => e.runId === child && e.type === "run.cancelled")
+        .length,
+      1,
+    );
+    assert.throws(() => authorizedRun(s, s.runs[final.id]!), {
+      code: "RUN_CANCELLED",
+    });
+  });
 });

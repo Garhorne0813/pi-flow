@@ -52,7 +52,7 @@ curl -N 'http://127.0.0.1:8080/api/v1/runs/<runId>/events' \
 | POST       | `/sessions/{id}/runs`                    | `{message}`；接受 202，可选 Idempotency-Key             |
 | GET        | `/runs/{id}`                             | 状态、错误码、父 Run、预算计数和时间戳                  |
 | GET        | `/runs/{id}/events`                      | SSE；`Last-Event-ID` 或 `?after=<eventId>`              |
-| POST       | `/runs/{id}/cancel`                      | 幂等取消；RUNNING 状态会异步收敛                        |
+| POST       | `/runs/{id}/cancel`                      | 取消该 Run 所属完整 taskId 任务链；RUNNING 异步收敛                        |
 | POST       | `/interactions/{id}/response`            | `{response}`；审批为 approve / deny；返回新 Run，202    |
 | GET        | `/workspaces/{id}/files?path=/workspace` | 列出目录，最多 1000 项                                  |
 | POST       | `/workspaces/{id}/files`                 | UTF-8 `{path,content}`，返回 `{fileId}`，201            |
@@ -211,6 +211,10 @@ Agent `mcpServers` 最多 16 项。Worker 将 Run 的 AbortSignal 与 deadline �
 
 跨 skillBundle 升级返回 409 `WORKSPACE_BUNDLE_MIGRATION_REQUIRED`，需创建与新 bundle 匹配的 Workspace；不静默迁移持久 Volume。共享 Workspace 中存在技能 scope 不兼容的未结束任务时返回 409 `WORKSPACE_VERSION_BUSY`，结束旧任务后重试。租约冲突返回 `WORKSPACE_BUSY`。相同 bundle 内的 scope 变化由现有 Sandbox 租约保护重建，保留 Volume；ACTIVE、PAUSED、RELEASED 都支持下一次使用配置适配。Sandbox pause/release 不触发升级，WAITING_INPUT 恢复仍使用原版本。
 
-后续版本发布继承当前生效版本的 `allowedUsers`，不会因缺省 ACL 自动扩大用户访问范围。ACL 数组独立复制；管理员仍通过版本 access API 显式变更访问限制。Workspace 分别保存逻辑技能身份 `sandboxLogicalSkillScope` 与包含实际 Volume/Host 挂载配置的 `sandboxSkillScope`；新任务兼容性只比较逻辑身份，工具获取租约后仍由 Provider 校验实际挂载。旧记录缺少逻辑 scope 时从已有技能身份推导。
+`allowedUsers` 由逻辑 Agent 统一管理，新 AgentVersion 不再保存 ACL。发布、激活/回滚、历史版本列表查询和执行授权均使用当前逻辑策略。`PUT /admin/logical-agents/{id}/access` 接受 `{allowedUsers}`（空数组表示租户内可用）；原 `/admin/agents/{versionId}/access` 保留为所属逻辑 Agent 的策略更新别名。版本回滚不会恢复过期 ACL，旧版本配置也不能通过旧 ACL 被读取。Migration 006 从当前生效版本迁移旧策略，不覆盖已存在的逻辑策略。Workspace 分别保存逻辑技能身份 `sandboxLogicalSkillScope` 与包含实际 Volume/Host 挂载配置的 `sandboxSkillScope`；新任务兼容性只比较逻辑身份，工具获取租约后仍由 Provider 校验实际挂载。旧记录缺少逻辑 scope 时从已有技能身份推导。
 
 显式 `/workspaces/{id}/sandbox/resume` 是生命周期操作，不解析逻辑 Agent 最新版本，也不升级 Session。它在租约获取事务中选择 Workspace 记录的技能；全部仍授权时恢复原环境，任一技能已撤销或不属于当前 bundle 时改为不挂载任何技能的环境并保留 Volume。后续新任务按锁定版本适配技能环境；WAITING_INPUT 的原任务不切换版本，恢复交互仍执行动态撤销检查。此规则避免 Resume 被已撤销的旧技能阻塞，同时不会重新挂载被撤销技能。
+
+创建独立 root task 时，在提交事务内检查该 Workspace 中已释放 checkpoint 租约的 WAITING_INPUT 任务。如果逻辑 ACL、AgentVersion、Skill 或 MCP 已撤销，则将其整个任务链中可安全终结的 QUEUED/WAITING_INPUT Run 标记为 FAILED，记录 run.failed（reason=task_revoked、code、taskId）和 task.revoked 审计。有实际执行或未释放租约的成员只请求停止；不绕过活跃执行环境的兼容性边界。历史 scope 使用与 enabled 状态无关的不可变技能身份计算；有效的旧等待任务仍阻止不兼容新任务。JWT 到期本身不触发失效，允许原主体刷新后响应。失效交互不能再次续跑。
+
+`POST /runs/{id}/cancel` 取消该 Run 的完整 `taskId`，包括原 Run 已 COMPLETED 后产生的审批/提问续跑、所有子任务和子任务续跑。QUEUED/WAITING_INPUT 直接 CANCELLED；RUNNING 设置 cancelRequested 并按现有 Worker/远端清理机制异步收敛。重复取消不会重复生成终态事件。兼容旧记录时沿 parentRunId 和 resumedFrom Interaction.runId 恢复任务身份。

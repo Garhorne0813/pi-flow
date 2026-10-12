@@ -100,4 +100,6 @@ Sandbox 生命周期独立于版本。pause/release 不更新 Session；等待�
 
 部署前停止旧写入者并执行 migrations/005_agent_task_versions.sql：每个历史版本成为独立逻辑 Agent，旧 Session 补齐 agentId/effectiveVersionId，历史 Run 从原 Session 补齐版本/能力并沿 parentRunId 和交互 resumedFrom 重建任务链。配置、历史和 Volume 不改变；管理员可针对迁移后的逻辑 Agent 发布后续版本。详见 [版本迁移](agent-version-migration.md)。
 
-后续版本继承当前生效版本的 allowedUsers，发布本身不扩大 ACL。Workspace 的逻辑技能 scope 与 Provider 的物理挂载 scope 分别记录：前者用于提交兼容性校验，后者用于租约内执行环境复用判断。显式 Resume 只恢复生命周期；若旧技能选择已撤销则重建为无技能环境并保留 Volume，不选择最新版本或升级 Session。新任务随后按其锁定配置适配环境，旧等待任务仍受动态撤销检查。
+allowedUsers 是逻辑 Agent 的动态策略，发布和回滚只改变执行版本、不改变权限；查询历史版本和执行旧任务同样按逻辑策略授权。Migration 006 从当前生效版本迁移 ACL。Workspace 的逻辑技能 scope 与 Provider 的物理挂载 scope 分别记录：前者用于提交兼容性校验，后者用于租约内执行环境复用判断。显式 Resume 只恢复生命周期；若旧技能选择已撤销则重建为无技能环境并保留 Volume，不选择最新版本或升级 Session。新任务随后按其锁定配置适配环境，旧等待任务仍受动态撤销检查。
+
+新 root task 提交时，对同 Workspace 中已完成 checkpoint 的撤销等待任务执行任务链失效，并记录失败原因和审计；JWT 过期本身不失效。历史技能身份计算与实时授权分开，未撤销等待任务的兼容性约束保留。取消任何 Run 时按 taskId 取消完整任务链，覆盖已完成原 Run 之后的审批续跑；实际执行和租约仍按现有停止机制安全收敛。

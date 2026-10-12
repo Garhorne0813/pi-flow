@@ -171,6 +171,7 @@ export async function bootstrap() {
         s.logicalAgents[agentId] ??= {
           id: agentId,
           activeVersionId: version.id,
+          allowedUsers: [...(version.allowedUsers ?? [])],
         };
       }
     });
