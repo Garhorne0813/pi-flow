@@ -379,26 +379,53 @@ test("agent access revocation blocks new sessions and queued work", async () => 
   });
   assert.equal((await drain(f, r.id)).state, "FAILED");
 });
-test("workspace tool lease prevents simultaneous calls even from the same Run", async () => {
-  const f = await fixture();
-  let release!: () => void;
-  const gate = new Promise<void>((r) => (release = r));
-  const held = f.sandbox.withLease(
-    alice,
-    f.w.id,
-    "same-run",
-    "default",
-    async () => {
-      await gate;
+test("parallel grep and find in one Run transparently serialize", async () => {
+  const f = await fixture({
+    execute: async (ctx) => {
+      await Promise.all([
+        ctx.call("remote_grep", { path: "/workspace", pattern: "TODO" }),
+        ctx.call("remote_find", { path: "/workspace" }),
+      ]);
     },
+  });
+  const agent = await f.service.publish(
+    alice,
+    config({ tools: ["grep", "find"] }),
   );
-  await new Promise((r) => setTimeout(r, 20));
-  await assert.rejects(
-    f.sandbox.execute(alice, f.w.id, "same-run", "default", "ls", {}),
-    { code: "WORKSPACE_BUSY" },
-  );
-  release();
-  await held;
+  const session = await f.service.createSession(alice, f.w.id, agent.id);
+  let release!: () => void, entered!: () => void;
+  const gate = new Promise<void>((r) => (release = r));
+  const began = new Promise<void>((r) => (entered = r));
+  const calls: string[] = [];
+  f.provider.execute = async (_sid, op) => {
+    calls.push(op);
+    if (calls.length === 1) {
+      entered();
+      await gate;
+    }
+    return { text: "result" };
+  };
+  const run = await f.service.submit(alice, session.id, "search");
+  try {
+    await f.worker.tick();
+    await began;
+    await new Promise((r) => setTimeout(r, 60));
+    assert.equal(calls.length, 1);
+    await assert.rejects(f.sandbox.release(alice, f.w.id), {
+      code: "WORKSPACE_BUSY",
+    });
+    release();
+    assert.equal((await drain(f, run.id)).state, "COMPLETED");
+    assert.deepEqual(calls.sort(), ["find", "grep"]);
+    const events = await f.store.read(alice.tenantId, (s) =>
+      s.events.filter((e) => e.runId === run.id),
+    );
+    assert.equal(events.filter((e) => e.type === "tool.completed").length, 2);
+    assert.equal(events.filter((e) => e.type === "tool.failed").length, 0);
+  } finally {
+    release();
+    await f.worker.stop();
+  }
 });
 test("token budget terminates model execution", async () => {
   const f = await fixture({

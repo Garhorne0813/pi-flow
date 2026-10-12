@@ -1,4 +1,5 @@
 import { posix } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { telemetry } from "../telemetry.js";
 import {
   Fault,
@@ -43,7 +44,11 @@ export class SandboxManager {
     policy: Partial<SandboxPolicy> = {},
     private canUseBundle: (bundle: string, tenant: string) => boolean = () =>
       true,
-    private limits = { remoteTimeoutMs: 30000, cleanupTimeoutMs: 1000 },
+    private limits: {
+      remoteTimeoutMs: number;
+      cleanupTimeoutMs: number;
+      leaseWaitTimeoutMs?: number;
+    } = { remoteTimeoutMs: 30000, cleanupTimeoutMs: 1000 },
   ) {
     if (Object.values(limits).some((v) => !Number.isFinite(v) || v <= 0))
       throw new Error("Invalid Sandbox time limits");
@@ -238,24 +243,51 @@ export class SandboxManager {
     owner = `${owner}:${crypto.randomUUID()}`;
     if (!this.canUseBundle(bundle, a.tenantId))
       throw new Fault(403, "BUNDLE_NOT_GRANTED");
-    const { skills, scope } = await this.store.tx(a.tenantId, (s) => {
-      signal?.throwIfAborted();
-      const w = workspace(s, a, wid);
-      if (w.lock && w.lock.expires > Date.now())
-        throw new Fault(409, "WORKSPACE_BUSY");
-      if (w.bundle && w.bundle !== bundle)
-        throw new Fault(403, "SKILL_BUNDLE_MISMATCH");
-      const skills = skillIds.map((id) => {
-        const sk = s.skills[id];
-        if (!sk?.enabled || sk.bundle !== bundle)
-          throw new Fault(403, "SKILL_DENIED");
-        return sk;
+    const deadline =
+      performance.now() + (this.limits.leaseWaitTimeoutMs ?? 130000);
+    const acquire = () =>
+      this.store.tx(a.tenantId, (s) => {
+        signal?.throwIfAborted();
+        const w = workspace(s, a, wid);
+        if (!this.canUseBundle(bundle, a.tenantId))
+          throw new Fault(403, "BUNDLE_NOT_GRANTED");
+        if (w.bundle && w.bundle !== bundle)
+          throw new Fault(403, "SKILL_BUNDLE_MISMATCH");
+        const skills = skillIds.map((id) => {
+          const sk = s.skills[id];
+          if (!sk?.enabled || sk.bundle !== bundle)
+            throw new Fault(403, "SKILL_DENIED");
+          return sk;
+        });
+        if (performance.now() >= deadline)
+          throw new Fault(504, "WORKSPACE_QUEUE_TIMEOUT");
+        if (w.lock && w.lock.expires > Date.now()) {
+          if (w.lock.kind === "agent") return undefined;
+          throw new Fault(409, "WORKSPACE_BUSY");
+        }
+        const scope = this.provider.scope(bundle, skills);
+        w.lock = { owner, expires: Date.now() + 180000, kind: "agent" };
+        w.bundle = bundle;
+        return { skills, scope };
       });
-      const scope = this.provider.scope(bundle, skills);
-      w.lock = { owner, expires: Date.now() + 180000, kind: "agent" };
-      w.bundle = bundle;
-      return { skills, scope };
-    });
+    let acquired = await acquire();
+    // Retry the persistent lease, rather than a process-local mutex: competing
+    // Runs on other Workers must serialize too. Never wait inside a transaction
+    // or reserve capacity before acquiring the workspace. No FIFO is promised.
+    while (!acquired) {
+      try {
+        await delay(
+          Math.max(1, Math.min(50, deadline - performance.now())),
+          undefined,
+          { signal },
+        );
+      } catch (e) {
+        signal?.throwIfAborted();
+        throw e;
+      }
+      acquired = await acquire();
+    }
+    const { skills, scope } = acquired;
     let failed = false,
       reserved = false,
       activated = false,

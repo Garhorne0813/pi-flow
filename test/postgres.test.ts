@@ -8,7 +8,95 @@ import {
   SandboxCapacity,
   SandboxPolicySchema,
 } from "../src/adapters/sandbox-policy.js";
+import { DemoSandbox, SandboxManager } from "../src/adapters/sandbox.js";
 const url = process.env.TEST_DATABASE_URL;
+test(
+  "PostgreSQL workspace tool waiters serialize across independent Store clients",
+  { skip: !url },
+  async () => {
+    const actor = {
+      tenantId: "tool-queue-" + id(),
+      userId: "owner",
+      admin: true,
+    };
+    const stores = [new PostgresStore(url!), new PostgresStore(url!)];
+    const provider = new DemoSandbox();
+    const managers = stores.map((store) => new SandboxManager(store, provider));
+    let release!: () => void, entered!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const began = new Promise<void>((r) => (entered = r));
+    let first: Promise<unknown> | undefined,
+      second: Promise<unknown> | undefined;
+    try {
+      await stores[0]!.pool.query(
+        (await readFile("migrations/001_initial.sql", "utf8")) +
+          (await readFile("migrations/002_sandbox_leases.sql", "utf8")) +
+          (await readFile("migrations/003_runs_sessions_events.sql", "utf8")),
+      );
+      const service = new HarnessService(stores[0]!, [], ["default"]);
+      const w = await service.createWorkspace(actor, "tools");
+      let calls = 0;
+      provider.execute = async () => {
+        if (++calls === 1) {
+          entered();
+          await gate;
+        }
+        return { text: "result" };
+      };
+      first = managers[0]!.execute(
+        actor,
+        w.id,
+        "run-one",
+        "default",
+        "grep",
+        {},
+      );
+      await began;
+      // The second client loads the durable lock; it shares no in-memory state.
+      assert.equal(
+        await stores[1]!.read(
+          actor.tenantId,
+          (s) => s.workspaces[w.id]!.lock?.kind,
+        ),
+        "agent",
+      );
+      second = managers[1]!.execute(
+        actor,
+        w.id,
+        "run-two",
+        "default",
+        "find",
+        {},
+      );
+      await new Promise((r) => setTimeout(r, 100));
+      assert.equal(calls, 1);
+      release();
+      assert.deepEqual(await Promise.all([first, second]), [
+        { text: "result" },
+        { text: "result" },
+      ]);
+      assert.equal(calls, 2);
+      assert.equal(provider.boxes.size, 1);
+      assert.equal((await managers[0]!.capacity.usage(actor)).user.active, 1);
+      assert.equal(
+        await stores[1]!.read(actor.tenantId, (s) => s.workspaces[w.id]!.lock),
+        undefined,
+      );
+    } finally {
+      release();
+      await Promise.allSettled([first, second]);
+      await stores[0]!.capacityTx((s) => {
+        for (const [key, entry] of Object.entries(s.entries))
+          if (entry.tenantId === actor.tenantId) delete s.entries[key];
+      });
+      await stores[0]!.pool.query(
+        "DELETE FROM harness_tenants WHERE tenant_id=$1",
+        [actor.tenantId],
+      );
+      await Promise.all(stores.map((store) => store.close()));
+    }
+  },
+);
 test(
   "PostgreSQL restart persistence, multi-client serialization and transaction rollback",
   { skip: !url },

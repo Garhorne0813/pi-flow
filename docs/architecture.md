@@ -48,7 +48,7 @@ PostgreSQL persists sessions, Runs, event logs, and event cursors in `harness_se
 - Session partial uniqueness prevents overlapping `QUEUED`, `RUNNING`, or `WAITING_INPUT` Runs. Idempotency is scoped to Tenant + User + Session + Key.
 - Run claims, heartbeats, and completion check persistent lease ownership and expiry. Ordinary cross-entity writes retain a tenant metadata lock.
 - Capacity admission uses a global transaction advisory lock and indexed counts. `reserved` and `unknown` outcomes remain charged; transitions compare their persistent operation identifier.
-- Different sessions can infer concurrently. Agent tools and file writes serialize within a workspace; file reads use a separate temporary instance and can run alongside agent tools.
+- Different sessions can infer concurrently. Concurrent agent tools (including read-only `read`, `ls`, `grep`, and `find`) transparently wait for the persistent workspace lease and execute exclusively. Acquisition is retried in transactions, so serialization also applies across Runs and Worker processes sharing PostgreSQL; FIFO ordering is not guaranteed. Waiting responds to Run cancellation/deadlines and is bounded to 130 seconds by default (`WORKSPACE_QUEUE_TIMEOUT`); it does not reserve capacity or touch the active sandbox. Authorization is rechecked on each attempt. Active lifecycle or file-write locks still return `WORKSPACE_BUSY`, and lifecycle operations/file writes still reject an active agent lease. File reads use a separate temporary instance and can run alongside agent tools.
 
 These constraints preserve correctness and still create contention boundaries. See [Run migration](run-migration.md), [capacity migration](capacity-migration.md), and [usage budgets](usage-budgets.md).
 

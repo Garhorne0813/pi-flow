@@ -48,7 +48,7 @@ PostgreSQL 将会话、Run、事件与序列持久化到 `harness_sessions`、`h
 - Session 部分唯一索引保证 `QUEUED`、`RUNNING`、`WAITING_INPUT` Run 互斥。幂等键作用域为 Tenant + User + Session + Key。
 - Run 领取、心跳和结束检查持久租约归属与有效期；普通跨实体写事务仍保留租户元数据锁。
 - 容量准入使用全局事务 advisory lock 和索引计数。`reserved`、`unknown` 仍占用配额；状态转换比较持久操作标识。
-- 不同会话可并行推理。同工作区的智能体工具与文件写入串行；文件读取使用独立临时实例，可与智能体工具并行。
+- 不同会话可并行推理。同工作区并发的智能体工具（包括只读的 `read`、`ls`、`grep`、`find`）会透明等待持久化工作区租约，并排他执行。租约获取通过事务重试，因此共享 PostgreSQL 的不同 Run 和 Worker 进程也会串行执行；不保证先进先出。等待响应 Run 的取消和截止时间，默认最多 130 秒（超时返回 `WORKSPACE_QUEUE_TIMEOUT`）；等待期间不占用容量、不操作当前沙箱，每次重试都会重新检查权限。已有的生命周期锁或文件写入锁仍返回 `WORKSPACE_BUSY`，生命周期操作和文件写入也仍会拒绝占有智能体租约的工作区。文件读取使用独立临时实例，可与智能体工具并行。
 
 这些约束保证正确性，也仍存在锁竞争边界。详见 [Run 迁移](run-migration.md)、[容量迁移](capacity-migration.md) 和 [用量预算](usage-budgets.md)。
 
