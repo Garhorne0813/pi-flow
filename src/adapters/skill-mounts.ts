@@ -86,12 +86,18 @@ export function skillMountPath(skill: Skill) {
 }
 
 export function skillScope(bundle: string, skills: readonly Skill[]) {
+  for (const skill of skills)
+    if (!skill.enabled) throw new Fault(403, "SKILL_DENIED");
+  return skillIdentityScope(bundle, skills);
+}
+// Identity is independent of dynamic revocation. Historical task comparison
+// must not remount skills or re-authorize them merely to identify a scope.
+export function skillIdentityScope(bundle: string, skills: readonly Skill[]) {
   const sorted = [...skills].sort((a, b) => a.id.localeCompare(b.id));
   const paths: string[] = [];
   const ids = new Set<string>();
   for (const skill of sorted) {
-    if (!skill.enabled || skill.bundle !== bundle)
-      throw new Fault(403, "SKILL_DENIED");
+    if (skill.bundle !== bundle) throw new Fault(403, "SKILL_DENIED");
     const path = skillMountPath(skill);
     if (
       ids.has(skill.id) ||

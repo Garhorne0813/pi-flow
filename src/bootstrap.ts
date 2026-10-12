@@ -166,6 +166,14 @@ export async function bootstrap() {
             maxDepth: 1,
           },
         };
+      for (const version of Object.values(s.agents)) {
+        const agentId = (version.agentId ??= version.id);
+        s.logicalAgents[agentId] ??= {
+          id: agentId,
+          activeVersionId: version.id,
+          allowedUsers: [...(version.allowedUsers ?? [])],
+        };
+      }
     });
   return { store, service, sandbox, worker };
 }

@@ -14,6 +14,7 @@ import {
   run,
   audit,
   type Actor,
+  type Run,
 } from "./domain.js";
 import type { Auth } from "./auth.js";
 import type { HarnessService } from "./service.js";
@@ -37,6 +38,29 @@ const page = z.object({
   offset: z.coerce.number().int().min(0).default(0),
   limit: z.coerce.number().int().min(1).max(100).default(50),
 });
+// Status APIs expose execution metadata, never the private Worker config snapshot.
+function publicRun(r: Run | undefined) {
+  if (!r) throw new Fault(404, "RUN_NOT_FOUND");
+  return {
+    id: r.id,
+    sessionId: r.sessionId,
+    agentVersionId: r.agentVersionId,
+    taskId: r.taskId,
+    rootRunId: r.rootRunId,
+    parentRunId: r.parentRunId,
+    resumedFrom: r.resumedFrom,
+    state: r.state,
+    cancelRequested: r.cancelRequested,
+    error: r.error,
+    depth: r.depth,
+    steps: r.steps,
+    children: r.children,
+    tokens: r.tokens,
+    createdAt: r.createdAt,
+    startedAt: r.startedAt,
+    endedAt: r.endedAt,
+  };
+}
 export function buildAPI(
   service: HarnessService,
   auth: Auth,
@@ -165,15 +189,55 @@ export function buildAPI(
   app.get("/api/v1/agents", async (req) => {
     const a = actor(req),
       p = page.parse(req.query);
-    return service.store.readMetadata(a.tenantId, ["agents"], (s) => ({
-      items: Object.values(s.agents)
-        .filter((v) => agentAllowed(v, a))
-        .slice(p.offset, p.offset + p.limit),
-    }));
+    return service.store.readMetadata(
+      a.tenantId,
+      ["agents", "logicalAgents"],
+      (s) => ({
+        items: Object.values(s.agents)
+          .filter((v) => agentAllowed(v, a, s))
+          .slice(p.offset, p.offset + p.limit),
+      }),
+    );
   });
   app.post("/api/v1/admin/agents", async (req, reply) =>
     reply.code(201).send(await service.publish(actor(req), req.body)),
   );
+  app.post("/api/v1/admin/agents/:id/versions", async (req, reply) =>
+    reply
+      .code(201)
+      .send(
+        await service.publish(
+          actor(req),
+          req.body,
+          uuid.parse(params(req.params).id),
+        ),
+      ),
+  );
+  app.put("/api/v1/admin/agents/:id/active-version", async (req) => {
+    const b = z.object({ agentVersionId: uuid }).strict().parse(req.body);
+    return service.activate(
+      actor(req),
+      uuid.parse(params(req.params).id),
+      b.agentVersionId,
+    );
+  });
+  app.get("/api/v1/logical-agents", async (req) => {
+    const a = actor(req),
+      p = page.parse(req.query);
+    return service.store.readMetadata(
+      a.tenantId,
+      ["logicalAgents", "agents"],
+      (s) => ({
+        items: Object.values(s.logicalAgents)
+          .filter(
+            (v) =>
+              s.agents[v.activeVersionId] &&
+              agentAllowed(s.agents[v.activeVersionId]!, a, s),
+          )
+          .slice(p.offset, p.offset + p.limit),
+      }),
+    );
+  });
   app.get("/api/v1/admin/agents", async (req) => {
     const a = actor(req);
     admin(a);
@@ -194,21 +258,22 @@ export function buildAPI(
       return s.agents[key];
     });
   });
-  app.put("/api/v1/admin/agents/:id/access", async (req) => {
-    const a = actor(req);
-    admin(a);
-    const key = uuid.parse(params(req.params).id);
-    const b = z
-      .object({ allowedUsers: z.array(z.string().min(1).max(200)).max(1000) })
-      .strict()
-      .parse(req.body);
-    return service.store.tx(a.tenantId, (s) => {
-      if (!s.agents[key]) throw new Fault(404, "AGENT_NOT_FOUND");
-      s.agents[key]!.allowedUsers = b.allowedUsers;
-      audit(s, a, "agent.access", key);
-      return { allowedUsers: b.allowedUsers };
+  for (const path of [
+    "/api/v1/admin/agents/:id/access",
+    "/api/v1/admin/logical-agents/:id/access",
+  ]) {
+    app.put(path, async (req) => {
+      const b = z
+        .object({ allowedUsers: z.array(z.string().min(1).max(200)).max(1000) })
+        .strict()
+        .parse(req.body);
+      return service.setAccess(
+        actor(req),
+        uuid.parse(params(req.params).id),
+        b.allowedUsers,
+      );
     });
-  });
+  }
   app.get("/api/v1/admin/skills", async (req) => {
     const a = actor(req);
     admin(a);
@@ -459,14 +524,21 @@ export function buildAPI(
     },
   );
   app.post("/api/v1/workspaces/:id/sessions", async (req, reply) => {
-    const b = z.object({ agentVersionId: uuid }).strict().parse(req.body);
+    const b = z
+      .object({ agentId: uuid.optional(), agentVersionId: uuid.optional() })
+      .strict()
+      .refine(
+        (b) => !!b.agentId !== !!b.agentVersionId,
+        "Provide exactly one Agent selector",
+      )
+      .parse(req.body);
     return reply
       .code(201)
       .send(
         await service.createSession(
           actor(req),
           uuid.parse(params(req.params).id),
-          b.agentVersionId,
+          (b.agentId ?? b.agentVersionId)!,
         ),
       );
   });
@@ -500,20 +572,22 @@ export function buildAPI(
     const key =
       k === undefined ? undefined : z.string().min(1).max(128).parse(k);
     return reply.code(202).send(
-      await service.submit(
-        actor(req),
-        uuid.parse(params(req.params).id),
-        b.message,
-        key,
-        req.id,
-        (() => {
-          const trace = traceContext(
-            typeof req.headers.traceparent === "string"
-              ? req.headers.traceparent
-              : undefined,
-          );
-          return `00-${trace.traceId}-${trace.spanId}-01`;
-        })(),
+      publicRun(
+        await service.submit(
+          actor(req),
+          uuid.parse(params(req.params).id),
+          b.message,
+          key,
+          req.id,
+          (() => {
+            const trace = traceContext(
+              typeof req.headers.traceparent === "string"
+                ? req.headers.traceparent
+                : undefined,
+            );
+            return `00-${trace.traceId}-${trace.spanId}-01`;
+          })(),
+        ),
       ),
     );
   });
@@ -522,11 +596,13 @@ export function buildAPI(
       rid = uuid.parse(params(req.params).id);
     return service.store.readRun(a.tenantId, rid, (s) => {
       const r = run(s, a, rid);
-      return { ...r, lease: undefined, actor: undefined };
+      return publicRun(r);
     });
   });
   app.post("/api/v1/runs/:id/cancel", async (req) =>
-    service.cancel(actor(req), uuid.parse(params(req.params).id)),
+    publicRun(
+      await service.cancel(actor(req), uuid.parse(params(req.params).id)),
+    ),
   );
   app.post("/api/v1/interactions/:id/response", async (req, reply) => {
     const b = z
@@ -536,10 +612,12 @@ export function buildAPI(
     return reply
       .code(202)
       .send(
-        await service.respond(
-          actor(req),
-          uuid.parse(params(req.params).id),
-          b.response,
+        publicRun(
+          await service.respond(
+            actor(req),
+            uuid.parse(params(req.params).id),
+            b.response,
+          ),
         ),
       );
   });

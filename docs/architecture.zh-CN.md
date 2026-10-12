@@ -41,7 +41,7 @@ Provider 与 Manager 的划分见 [Sandbox 模块边界](sandbox-modules.md)。
 
 ## 数据与并发
 
-Tenant 拥有其智能体、工作区、会话、Run、审计和用量记录。Workspace 以 owner/editor/viewer 控制访问。Session 固定不可变 AgentVersion；Run 表示一次执行或交互续跑。
+Tenant 拥有其智能体、工作区、会话、Run、审计和用量记录。Workspace 以 owner/editor/viewer 控制访问。Session 绑定稳定的逻辑 Agent，并记录最近生效的 AgentVersion。每个独立 root task 在提交事务中解析 activeVersionId、校验能力和 Workspace 兼容性，再更新 Session 的 effectiveVersionId（agentVersionId 为兼容别名）。Run 锁定 agentVersionId、能力快照、taskId 和 rootRunId；审批/提问续跑与子任务继承任务身份，不读取 Session 的可变有效版本来执行。子智能体引用不可变版本 ID，能力取父子交集。
 
 PostgreSQL 将会话、Run、事件与序列持久化到 `harness_sessions`、`harness_runs`、`harness_run_events` 和 `harness_event_sequences`；容量记录位于 `harness_sandbox_leases`。租户元数据与用量账本仍采用 JSONB 聚合；旧版将全部 Run 和容量写入聚合 JSONB 的方式已不是当前存储设计。
 
@@ -91,3 +91,15 @@ MCP 仅发现智能体指定的服务，调用前再次检查白名单、Endpoin
 API readiness 检查数据库与 schema，Worker 健康独立判断。全部 API/Worker 必须使用一致的租户授权、模型、卷映射、容量策略与价格。迁移前停止旧写入者并备份，禁止新旧存储写入者混跑。
 
 本地与协议测试不能证明企业 Cube 隔离、供应商账单精确性或生产容量。费用报表基于记录用量和价格快照进行估算。历史保留与剩余 JSONB 增长需部署策略。详见 [部署](deployment.md)、[健康检查](health.md)、[可观测性](observability.md) 和 [验收要求](acceptance.md)。
+
+## 任务版本与升级
+
+发布后只更新逻辑 Agent 的 activeVersionId，不扫描 Session，不禁用旧版本。已有 QUEUED、RUNNING、WAITING_INPUT Run 保留版本；新任务惰性升级，保留 Session ID、entries、Todo 和 Workspace Volume。幂等重试返回原 Run，不重新解析最新版。整个任务链有未结束子任务时，原 Session 仍返回 SESSION_BUSY。升级记录 session.version.upgraded 事件及审计，包含 from/to、时间、actor/reason。紧急撤销仍通过版本 status/access、Skills/MCP 注册状态和租户授权动态阻断。
+
+Sandbox 生命周期独立于版本。pause/release 不更新 Session；等待期间恢复交互仍使用旧版本。同 bundle、同 scope 复用 ACTIVE/PAUSED Sandbox；scope 改变时由 Workspace 独占工具租约保护重建并保留 Volume，RELEASED 时按锁定配置创建。共享 Workspace 有不兼容未结束任务时，新任务返回 WORKSPACE_VERSION_BUSY，等待任务结束后重试；工具或生命周期租约占用时返回 WORKSPACE_BUSY。跨 bundle 不自动迁移，返回 WORKSPACE_BUNDLE_MIGRATION_REQUIRED，需创建匹配 bundle 的 Workspace。
+
+部署前停止旧写入者并执行 migrations/005_agent_task_versions.sql：每个历史版本成为独立逻辑 Agent，旧 Session 补齐 agentId/effectiveVersionId，历史 Run 从原 Session 补齐版本/能力并沿 parentRunId 和交互 resumedFrom 重建任务链。配置、历史和 Volume 不改变；管理员可针对迁移后的逻辑 Agent 发布后续版本。详见 [版本迁移](agent-version-migration.md)。
+
+allowedUsers 是逻辑 Agent 的动态策略，发布和回滚只改变执行版本、不改变权限；查询历史版本和执行旧任务同样按逻辑策略授权。Migration 006 从当前生效版本迁移 ACL。Workspace 的逻辑技能 scope 与 Provider 的物理挂载 scope 分别记录：前者用于提交兼容性校验，后者用于租约内执行环境复用判断。显式 Resume 只恢复生命周期；若旧技能选择已撤销则重建为无技能环境并保留 Volume，不选择最新版本或升级 Session。新任务随后按其锁定配置适配环境，旧等待任务仍受动态撤销检查。
+
+新 root task 提交时，对同 Workspace 中已完成 checkpoint 的撤销等待任务执行任务链失效，并记录失败原因和审计；JWT 过期本身不失效。历史技能身份计算与实时授权分开，未撤销等待任务的兼容性约束保留。取消任何 Run 时按 taskId 取消完整任务链，覆盖已完成原 Run 之后的审批续跑；实际执行和租约仍按现有停止机制安全收敛。

@@ -418,7 +418,7 @@ test("agent access revocation blocks new sessions and queued work", async () => 
   const f = await fixture();
   const r = await f.service.submit(alice, f.ses.id, "work");
   await f.store.tx("one", (s) => {
-    s.agents[f.agent.id]!.allowedUsers = ["bob"];
+    s.logicalAgents[f.agent.agentId!]!.allowedUsers = ["bob"];
   });
   await assert.rejects(f.service.createSession(alice, f.w.id, f.agent.id), {
     code: "AGENT_NOT_FOUND",

@@ -322,7 +322,9 @@ export class Worker {
         while (root.parentRunId) root = s.runs[root.parentRunId]!;
         const rc =
           root.capabilities ??
-          s.agents[s.sessions[root.sessionId]!.agentVersionId]!.config;
+          s.agents[
+            root.agentVersionId ?? s.sessions[root.sessionId]!.agentVersionId
+          ]!.config;
         if (r.steps >= config.maxSteps || root.steps >= rc.maxSteps)
           throw new Fault(429, "STEP_BUDGET_EXCEEDED");
         r.steps++;
@@ -505,7 +507,10 @@ export class Worker {
               while (root.parentRunId) root = s.runs[root.parentRunId]!;
               const rc =
                 root.capabilities ??
-                s.agents[s.sessions[root.sessionId]!.agentVersionId]!.config;
+                s.agents[
+                  root.agentVersionId ??
+                    s.sessions[root.sessionId]!.agentVersionId
+                ]!.config;
               r.tokens = (r.tokens ?? 0) + tokens;
               if (root.id !== r.id) root.tokens = (root.tokens ?? 0) + tokens;
               if (turn) {

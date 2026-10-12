@@ -41,7 +41,7 @@ See [Sandbox module boundaries](sandbox-modules.md) for the provider/manager spl
 
 ## Data and concurrency
 
-A Tenant owns its agents, workspaces, sessions, Runs, and audit/usage records. Workspace access is controlled by owner/editor/viewer roles. A Session pins an immutable AgentVersion; a Run represents one execution or interaction continuation.
+A Tenant owns its agents, workspaces, sessions, Runs, and audit/usage records. Workspace access is controlled by owner/editor/viewer roles. A Session follows a stable logical Agent. A new independent root task resolves its activeVersionId within the submission transaction, validates capabilities and Workspace compatibility, and updates the Session effectiveVersionId (agentVersionId remains a compatibility alias). Every Run pins agentVersionId, capabilities, taskId and rootRunId; continuations and delegated Runs inherit task identity. Subagents reference immutable version IDs and intersect capabilities with the parent.
 
 PostgreSQL persists sessions, Runs, event logs, and event cursors in `harness_sessions`, `harness_runs`, `harness_run_events`, and `harness_event_sequences`. Capacity records use `harness_sandbox_leases`. Tenant metadata and the usage ledger still use JSONB aggregates; the previous all-in-one Run/capacity aggregates are not the active storage design.
 
@@ -91,3 +91,15 @@ Cube enforces the actual non-root identity, volume isolation, resource limits, a
 API readiness checks database/schema availability separately from Worker health. All API/Worker processes must use consistent grants, model settings, volumes, capacity policy, and pricing. Stop old writers and back up before migrations; mixed old/new storage writers are unsupported.
 
 Local and protocol tests do not establish enterprise Cube isolation, provider billing accuracy, or production capacity. Cost reports are estimates using recorded usage and price snapshots. History retention and remaining JSONB growth need deployment policy. See [deployment](deployment.md), [health](health.md), [observability](observability.md), and [acceptance](acceptance.md).
+
+## Task versions and lazy upgrades
+
+Publication updates only the logical Agent activeVersionId, without scanning Sessions or disabling previous versions. Accepted queued Runs, running tasks and waiting continuations keep their pinned versions. New roots upgrade lazily while preserving history, Todo and Workspace Volume; idempotent retries return the original Run. Unfinished descendants keep the root Session busy. Upgrade events and audits record from/to, time, actor and reason. Emergency revocation remains dynamic through version status/access, Skill/MCP state and tenant grants.
+
+Sandbox pause/release never upgrades a Session. Same bundle and scope reuse the Sandbox; a changed scope rebuilds under the exclusive Workspace tool lease while preserving the Volume. Released Sandboxes are created using the pinned configuration. Incompatible unfinished tasks sharing a Workspace yield WORKSPACE_VERSION_BUSY; retry when they finish. Tool/lifecycle lease conflicts yield WORKSPACE_BUSY. Cross-bundle upgrades yield WORKSPACE_BUNDLE_MIGRATION_REQUIRED: automatic Volume bundle migration is unsupported; create a Workspace for that bundle.
+
+Stop old writers before running migration 005. Each legacy version becomes its own logical Agent; Session identity/effective version and historical Run version/capability/task-chain fields are backfilled without replacing history or Volumes. Task ancestry follows parentRunId and interaction resumedFrom. See [migration guide](agent-version-migration.md).
+
+The logical Agent owns allowedUsers. Publication and rollback change execution versions without changing ACL; historical queries and old-task execution use the same live policy. Migration 006 inherits the current active version policy. Workspace records logical Skill identity separately from the provider scope that includes physical Volume/Host mount bindings: admission compares logical scopes, and tool leases still validate physical scopes. Explicit Resume is a lifecycle operation; if any stored Skill was revoked, it restores a skill-free environment while preserving the Volume and Session version. The next task adapts its environment using its pinned configuration; waiting tasks remain subject to dynamic revocation.
+
+Root admission invalidates revoked waiting tasks that have released checkpoint leases, recording failed task members and audit reasons. Token expiry alone allows subject refresh. Historical Skill identity is independent of live authorization, while compatible admission still respects valid waiting tasks and active leases. Cancellation uses taskId to stop the entire task chain, including continuations of completed Runs; active execution keeps the existing safe stop and lease cleanup behavior.
