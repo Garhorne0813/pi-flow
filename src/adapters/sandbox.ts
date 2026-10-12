@@ -16,6 +16,7 @@ import {
   SandboxCapacity,
   SandboxPolicySchema,
   type SandboxPolicy,
+  type CapacityEntry,
 } from "./sandbox-policy.js";
 import type { Store } from "../store.js";
 import type { SandboxProvider } from "../sandbox/provider.js";
@@ -306,20 +307,29 @@ export class SandboxManager {
       reserved = false,
       activated = false,
       creationStarted = false,
+      instanceTouched = false,
+      authorizationFailed = false,
       connecting = false;
+    let previousCapacity: CapacityEntry | undefined;
     let activeSid: string | undefined, killing: Promise<void> | undefined;
     const assertOwned = async () => {
       signal?.throwIfAborted();
       if (failed) throw new Fault(409, "LEASE_LOST");
       await this.store.read(a.tenantId, (s) => {
-        const w = workspace(s, a, wid, access.write);
-        access.authorize?.(s);
+        let w: Workspace;
+        try {
+          w = workspace(s, a, wid, access.write);
+          access.authorize?.(s);
+        } catch (e) {
+          authorizationFailed = true;
+          throw e;
+        }
         assertLease(w, owner);
       });
       signal?.throwIfAborted();
     };
     const stop = () => {
-      if (activeSid && !killing) {
+      if (activeSid && instanceTouched && !killing) {
         const sid = activeSid;
         killing = (async () => {
           // Keep ownership while deletion is in flight; a late callback cannot
@@ -349,6 +359,7 @@ export class SandboxManager {
       await this.capacity.adoptLegacy();
       const expected = await this.capacity.inspect(a.tenantId, wid);
       await this.capacity.reserve(a.tenantId, w, owner, expected);
+      previousCapacity = expected;
       reserved = true;
       let vid = w.volumeId;
       if (!vid) {
@@ -375,7 +386,10 @@ export class SandboxManager {
         (w.sandboxSkillScope !== scope ||
           (this.provider.requiresTrafficToken && !w.sandboxTrafficToken))
       ) {
-        await this.remote(() => this.kill(a, wid, owner, sid!), signal);
+        await this.remote(() => {
+          instanceTouched = true;
+          return this.kill(a, wid, owner, sid!);
+        }, signal);
         activeSid = sid = undefined;
         await this.record(a, wid, owner, (w) => clearInstance(w));
         await this.capacity.pending(a.tenantId, wid, owner);
@@ -386,7 +400,10 @@ export class SandboxManager {
           connecting = true;
           const connectingSid = sid;
           await this.remote(
-            () => this.provider.connect(connectingSid),
+            () => {
+              instanceTouched = true;
+              return this.provider.connect(connectingSid);
+            },
             signal,
             () => this.lateSandbox(a, wid, owner, connectingSid),
           );
@@ -413,6 +430,7 @@ export class SandboxManager {
         );
         const created = await this.remote(
           () => {
+            instanceTouched = true;
             creationStarted = true;
             return this.provider.create(vid!, bundle, skills, undefined, owner);
           },
@@ -453,15 +471,31 @@ export class SandboxManager {
       await assertOwned();
       return result;
     } catch (e) {
-      if (
+      if (reserved && !instanceTouched && !creationStarted) {
+        // No instance call or unconfirmed creation was dispatched. A denial
+        // here must not poison the workspace or release a pre-existing instance.
+        if (
+          !(await this.capacity.rollbackReservation(
+            a.tenantId,
+            wid,
+            owner,
+            previousCapacity,
+          ))
+        )
+          throw new Fault(409, "CAPACITY_LEASE_LOST");
+        reserved = false;
+      } else if (
         reserved &&
         (signal?.aborted ||
           failed ||
+          (!activated && authorizationFailed) ||
           (e instanceof Fault &&
             [
               "LEASE_LOST",
               "CAPACITY_LEASE_LOST",
               "SANDBOX_REMOTE_TIMEOUT",
+              "RUN_CANCELLED",
+              "RUN_TIMEOUT",
             ].includes(e.code)))
       ) {
         if (connecting) {

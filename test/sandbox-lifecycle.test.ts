@@ -49,6 +49,207 @@ async function fixture(policy: Partial<SandboxPolicy> = {}) {
   return { store, provider, service, sandbox, agent, make, seed };
 }
 
+for (const denial of ["READ_ONLY", "AGENT_REVOKED"] as const)
+  for (const existing of ["fresh", "active", "paused"] as const)
+    test(`${denial} immediately after reserve restores ${existing} capacity without remote side effects`, async () => {
+      const f = await fixture({ maxActivePerUser: 1 });
+      const w = await f.make();
+      if (existing !== "fresh") await f.seed(w.id);
+      if (existing === "paused") await f.sandbox.pause(alice, w.id);
+      const before = await f.sandbox.capacity.get("one", w.id);
+      const oldWorkspace = await f.store.read(
+        "one",
+        (s) => s.workspaces[w.id]!,
+      );
+      const reserve = f.sandbox.capacity.reserve.bind(f.sandbox.capacity);
+      let reservations = 0,
+        commands = 0,
+        calls = 0;
+      f.sandbox.capacity.reserve = async (...args) => {
+        await reserve(...args);
+        reservations++;
+        await f.store.tx("one", (s) => {
+          if (denial === "READ_ONLY")
+            s.workspaces[w.id]!.members.alice = "viewer";
+          else s.agents[f.agent.id]!.enabled = false;
+        });
+      };
+      // Any provider action before rollback would invalidate this safe path.
+      const createVolume = f.provider.createVolume.bind(f.provider),
+        create = f.provider.create.bind(f.provider);
+      const connect = f.provider.connect.bind(f.provider),
+        kill = f.provider.kill.bind(f.provider);
+      f.provider.createVolume = async (...args) => {
+        calls++;
+        return createVolume(...args);
+      };
+      f.provider.create = async (...args) => {
+        calls++;
+        return create(...args);
+      };
+      f.provider.connect = async (...args) => {
+        calls++;
+        return connect(...args);
+      };
+      f.provider.kill = async (...args) => {
+        calls++;
+        return kill(...args);
+      };
+      f.provider.execute = async () => {
+        commands++;
+        return {};
+      };
+      await assert.rejects(
+        f.sandbox.execute(
+          alice,
+          w.id,
+          "denied",
+          "default",
+          "write",
+          {},
+          undefined,
+          [],
+          (s) => {
+            if (!s.agents[f.agent.id]!.enabled)
+              throw new Fault(403, "AGENT_REVOKED");
+          },
+        ),
+        { code: denial },
+      );
+      assert.equal(reservations, 1);
+      assert.equal(calls, 0);
+      assert.equal(commands, 0);
+      const current = await f.sandbox.capacity.get("one", w.id);
+      if (existing === "fresh") {
+        assert.equal(current, undefined);
+        assert.equal((await f.sandbox.capacity.usage(alice)).user.active, 0);
+      } else {
+        assert.equal(current?.state, before!.state);
+        assert.equal(current?.sandboxId, before!.sandboxId);
+        assert.notEqual(current?.operation, before!.operation);
+        assert.equal(f.provider.boxes.has(before!.sandboxId!), true);
+        assert.equal(
+          f.provider.paused.has(before!.sandboxId!),
+          existing === "paused",
+        );
+        assert.equal(
+          (await f.sandbox.capacity.usage(alice)).user.active,
+          existing === "paused" ? 0 : 1,
+        );
+      }
+      const after = await f.store.read("one", (s) => s.workspaces[w.id]!);
+      assert.equal(after.lock, undefined);
+      assert.equal(after.sandboxState, oldWorkspace.sandboxState);
+      f.sandbox.capacity.reserve = reserve;
+      await f.store.tx("one", (s) => {
+        s.workspaces[w.id]!.members.alice = "owner";
+        s.agents[f.agent.id]!.enabled = true;
+      });
+      await f.sandbox.execute(alice, w.id, "retry", "default", "ls", {});
+      assert.equal(commands, 1);
+      assert.equal(
+        (await f.sandbox.capacity.get("one", w.id))?.state,
+        "active",
+      );
+    });
+
+test("reservation rollback cannot overwrite a successor generation", async () => {
+  const f = await fixture();
+  const w = await f.make();
+  await f.sandbox.capacity.reserve("one", w, "old", undefined);
+  await f.sandbox.capacity.released("one", w.id, "old");
+  await f.sandbox.capacity.reserve(
+    "one",
+    w,
+    "successor",
+    await f.sandbox.capacity.inspect("one", w.id),
+  );
+  const current = await f.sandbox.capacity.inspect("one", w.id);
+  assert.equal(
+    await f.sandbox.capacity.rollbackReservation("one", w.id, "old", undefined),
+    false,
+  );
+  assert.deepEqual(await f.sandbox.capacity.inspect("one", w.id), current);
+});
+
+for (const [stage, killFails] of [
+  ["volume", false],
+  ["create", false],
+  ["create", true],
+] as const)
+  test(`Agent revoked after confirmed ${stage} ${killFails ? "retains uncertain cleanup" : "releases unused capacity"}`, async () => {
+    const f = await fixture({ maxActivePerUser: 1 });
+    const w = await f.make();
+    const revoke = () =>
+      f.store.tx("one", (s) => {
+        s.agents[f.agent.id]!.enabled = false;
+      });
+    const createVolume = f.provider.createVolume.bind(f.provider),
+      create = f.provider.create.bind(f.provider);
+    const kill = f.provider.kill.bind(f.provider);
+    let commands = 0,
+      creations = 0;
+    f.provider.createVolume = async (...args) => {
+      const result = await createVolume(...args);
+      if (stage === "volume") await revoke();
+      return result;
+    };
+    f.provider.create = async (...args) => {
+      creations++;
+      const result = await create(...args);
+      if (stage === "create") await revoke();
+      return result;
+    };
+    f.provider.execute = async () => {
+      commands++;
+      return {};
+    };
+    if (killFails)
+      f.provider.kill = async () => {
+        throw new Error("kill unconfirmed");
+      };
+    await assert.rejects(
+      f.sandbox.execute(
+        alice,
+        w.id,
+        "revoked",
+        "default",
+        "ls",
+        {},
+        undefined,
+        [],
+        (s) => {
+          if (!s.agents[f.agent.id]!.enabled)
+            throw new Fault(403, "AGENT_REVOKED");
+        },
+      ),
+      { code: killFails ? "REMOTE_CANCEL_UNCONFIRMED" : "AGENT_REVOKED" },
+    );
+    assert.equal(commands, 0);
+    assert.equal(creations, stage === "create" ? 1 : 0);
+    assert.equal(f.provider.boxes.size, killFails ? 1 : 0);
+    assert.equal(
+      (await f.sandbox.capacity.usage(alice)).user.active,
+      killFails ? 1 : 0,
+    );
+    const current = await f.sandbox.capacity.get("one", w.id);
+    if (killFails) {
+      assert.equal(current?.state, "unknown");
+      assert.ok(current?.sandboxId);
+      // Simulate confirmed operator cleanup before trying again.
+      await kill(current!.sandboxId!);
+      await f.sandbox.capacity.released("one", w.id, current!.operation!);
+    } else assert.equal(current, undefined);
+    f.provider.createVolume = createVolume;
+    f.provider.create = create;
+    f.provider.kill = kill;
+    await f.store.tx("one", (s) => {
+      s.agents[f.agent.id]!.enabled = true;
+    });
+    await f.sandbox.execute(alice, w.id, "retry", "default", "ls", {});
+    assert.equal(commands, 1);
+  });
+
 test("user quota is charged to workspace owner even when a collaborator triggers creation", async () => {
   const f = await fixture({ maxActivePerUser: 1, maxActiveTotal: 2 });
   const w = await f.make(),

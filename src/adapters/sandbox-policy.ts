@@ -153,6 +153,29 @@ export class SandboxCapacity {
       { tenant, workspaceId: wid },
     );
   }
+  // Only the caller that owns an untouched reservation may restore its prior
+  // accounting. Retain the new operation ID so late callbacks from the old
+  // generation cannot regain ownership of the instance.
+  async rollbackReservation(
+    tenant: string,
+    wid: string,
+    operation: string,
+    previous: CapacityEntry | undefined,
+  ) {
+    return this.store.capacityTx(
+      (s) => {
+        const e = s.entries[key(tenant, wid)];
+        if (!e || e.operation !== operation || e.state !== "reserved")
+          return false;
+        e.state = previous?.state ?? "released";
+        if (previous?.sandboxId) e.sandboxId = previous.sandboxId;
+        else delete e.sandboxId;
+        e.updatedAt = Date.now();
+        return true;
+      },
+      { tenant, workspaceId: wid },
+    );
+  }
   async pending(
     tenant: string,
     wid: string,
