@@ -303,6 +303,7 @@ export class Worker {
       approved = false,
     ): Promise<unknown> => {
       controller.signal.throwIfAborted();
+      // Keep legacy pending approvals resumable through the same authorization path.
       const bare = name.replace(/^remote_/, "");
       const mcpTool = name.startsWith("mcp_");
       if (
