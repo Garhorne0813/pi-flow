@@ -6,13 +6,19 @@ Pi-Flow 为智能体应用提供持久化工作区和会话。用户通过 REST 
 
 基于 Pi 运行智能体，使用 CubeSandbox 执行远程工具。当前为 **0.1 后端版本**，可接入自己的对话前端或 API 客户端。
 
-### Agent 配置管理页面
+### 管理控制台
 
-服务启动后访问 [Agent 配置中心](http://127.0.0.1:8080/admin/agents/ui)（路径：`/admin/agents/ui`），在页面顶部输入管理员 Bearer Token 即可连接。支持查看已发布版本、创建 Agent、复制旧版本重新发布、选择内置工具及已登记的 Skills/MCP/子 Agent，以及调整版本的启停状态和允许访问的用户。
+服务启动后访问 [管理控制台](http://127.0.0.1:8080/admin/ui)（兼容 `/admin/agents/ui`），输入管理员 Bearer Token 即可连接。
 
-页面与 API 同源，不需要独立前端构建；HTML 外壳无需认证，但所有管理数据操作仍通过 `/api/v1/admin/*` 检查管理员权限。令牌仅在页面内存中使用，不会保存到浏览器存储或 URL。刷新页面需重新输入。生产使用具备 `harness-admin` 角色的 UCS JWT；本地 Demo 可输入 `DEV_TOKEN`。
+- **Agents**：创建、查看、复制与发布不可变版本，选择工具、Skills、MCP 和子 Agent，管理启停和用户访问范围。
+- **Skills**：登记不可变 Skill 版本、查看 Bundle / 路径 / 摘要，以及启用和禁用版本。更新内容需登记新版本 ID。
+- **MCP Servers**：从租户已获授权的 Endpoint 中登记服务，设置工具白名单、启停和检查连接。检查仅发现白名单工具，不执行工具；空白名单不授权任何工具。
+- **子 Agent 委派**：查看版本之间的委派关系、并发上限和最大深度，打开父 Agent 复制为新版本以调整委派配置。
+- **全局配置**：查看当前租户获批模型、可用 Bundles / Endpoints 和 Sandbox 策略；保存租户范围的新建 Agent 默认模型、工具和运行限制。默认值仅用于新草稿，不修改已发布版本或历史会话。
 
-**注意**：页面不能代替服务器的 `LLM_*`、`SKILL_VOLUMES_JSON`、`MCP_ENDPOINTS_JSON`、`TENANT_CAPABILITIES_JSON` 等部署配置。模型需要提前获批、Skill 和 MCP 需要预先登记。配置修改会发布新的不可变 AgentVersion，不会修改已有 Session。页面不是聊天前端。
+页面与 API 同源，不需要独立前端构建；HTML 外壳无需认证，所有管理数据操作仍检查管理员权限。令牌仅在页面内存中使用，不保存到浏览器存储或 URL。断开连接会取消未完成请求并清除页面数据。生产使用具备 `harness-admin` 角色的 UCS JWT；本地 Demo 使用 `DEV_TOKEN`。
+
+部署配置（模型凭证、Skill 卷、MCP Endpoint、租户授权与 Sandbox 策略）在控制台中只读，由服务端配置后重启相关 API / Worker 生效；控制台不返回凭证或 Endpoint URL。Skill 文件需先部署，MCP Endpoint 需先配置。租户默认值在生产中保存在数据库，Demo 中保存在内存，重启后重置。配置修改通过新 AgentVersion 发布，页面不是聊天前端。
 
 [English](README.md)
 

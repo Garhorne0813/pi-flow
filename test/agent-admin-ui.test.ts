@@ -38,7 +38,7 @@ test("unauthenticated access serves only the public UI shell, not admin APIs", a
     const nonce = csp.match(/script-src 'nonce-([^']+)'/)?.[1];
     assert.ok(nonce, "each response must specify a script nonce");
     assert.ok(page.body.includes('<script nonce="' + nonce + '">'));
-    assert.match(page.body, /Agent 配置中心/);
+    assert.match(page.body, /Pi-Flow 管理控制台/);
 
     const data = await app.inject({ method: "GET", url: "/api/v1/admin/agents" });
     assert.equal(data.statusCode, 401);
@@ -90,7 +90,7 @@ test("disconnect aborts requests and late responses cannot restore the old conne
   }));
   get("token").value = "test-admin-token";
   const connecting = get("connect").dispatch();
-  assert.equal(pending.length, 3);
+  assert.equal(pending.length, 4);
   assert.equal(get("disconnect").disabled, false);
   await get("disconnect").dispatch();
   for (const request of pending) {

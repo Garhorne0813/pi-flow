@@ -1,11 +1,11 @@
-/** Minimal standalone admin console served by the Fastify API. */
+/** Standalone management console served by the Fastify API. */
 export const agentAdminHTML = String.raw`<!doctype html>
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="referrer" content="no-referrer">
-  <title>Agent 管理 · Pi-Flow</title>
+  <title>管理控制台 · Pi-Flow</title>
   <style>
     :root { font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #1e293b; background: #f5f7fb; }
     * { box-sizing: border-box; }
@@ -76,11 +76,27 @@ export const agentAdminHTML = String.raw`<!doctype html>
     code { font-size: 11px; overflow-wrap: anywhere; }
     @media(max-width:1150px) { .layout { grid-template-columns: 260px minmax(0,1fr); } .side-detail { grid-column: 2; } }
     @media(max-width:750px) { .layout { display:block; } .layout > .panel { margin-bottom: 16px; } .agent-list { max-height: 260px; } .grid2, .grid3 { grid-template-columns: 1fr; } .auth input { width: 200px; } }
+    [hidden] { display:none !important; }
+    .tabs { display:flex; gap:8px; flex-wrap:wrap; margin:0 0 22px; }
+    .tabs .active { background:#111b35; color:white; border-color:#111b35; }
+    .console-grid { display:grid; grid-template-columns:minmax(0,1.4fr) minmax(300px,1fr); gap:20px; align-items:start; }
+    .resource-list { display:grid; gap:14px; }
+    .resource-card { background:white; border:1px solid #e2e8f0; border-radius:12px; padding:20px; overflow-wrap:anywhere; }
+    .resource-card .toolbar { margin-top:14px; }
+    .resource-card h3 { margin:0; }
+    .resource-card p { white-space:pre-wrap; }
+    .summary { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:14px; margin-bottom:20px; }
+    .summary .resource-card strong { font-size:26px; display:block; margin-top:8px; }
+    select { font:inherit; padding:10px 12px; border:1px solid #d3dce9; border-radius:9px; background:white; color:#17243b; max-width:100%; }
+    .config-table { width:100%; border-collapse:collapse; font-size:13px; }
+    .config-table td { padding:12px 0; border-bottom:1px solid #edf0f5; overflow-wrap:anywhere; }
+    .config-table td:last-child { text-align:right; }
+    @media(max-width:850px) { .console-grid { grid-template-columns:1fr; } .summary { grid-template-columns:1fr; } }
   </style>
 </head>
 <body>
   <header class="topbar">
-    <div class="brand">◆ Pi-Flow <span>Agent Configuration</span></div>
+    <div class="brand">◆ Pi-Flow <span>Admin Console</span></div>
     <div class="auth">
       <input id="token" type="password" autocomplete="off" placeholder="输入管理员 Bearer Token" aria-label="管理员令牌">
       <button class="btn primary btn-sm" id="connect" type="button">连接</button>
@@ -90,11 +106,19 @@ export const agentAdminHTML = String.raw`<!doctype html>
   </header>
   <main class="shell">
     <div class="intro">
-      <div><h1>Agent 配置中心</h1><p class="muted">创建智能体、管理能力与发布不可变版本。修改配置需要发布新版本。</p></div>
+      <div><h1>Pi-Flow 管理控制台</h1><p class="muted">管理 Agent、能力登记、委派关系与租户默认配置。</p></div>
       <button id="new" class="btn primary" type="button" disabled>＋ 新建 Agent</button>
     </div>
     <div id="message" role="status" aria-live="polite" class="message"></div>
-    <div class="layout">
+    <nav class="tabs" aria-label="控制台导航">
+      <button id="tab-agents" class="btn active" type="button" aria-pressed="true">Agents</button>
+      <button id="tab-skills" class="btn" type="button" aria-pressed="false">Skills</button>
+      <button id="tab-mcp" class="btn" type="button" aria-pressed="false">MCP Servers</button>
+      <button id="tab-delegation" class="btn" type="button" aria-pressed="false">子 Agent 委派</button>
+      <button id="tab-settings" class="btn" type="button" aria-pressed="false">全局配置</button>
+      <button id="refresh-console" class="btn" type="button" disabled>刷新数据</button>
+    </nav>
+    <div id="view-agents" class="layout">
       <aside class="panel">
         <div class="panel-head"><h2>已发布版本</h2><span id="count" class="pill">0</span></div>
         <div class="pad" style="padding-bottom:0"><input class="full" id="search" placeholder="搜索 Agent 名称…" aria-label="搜索 Agent" type="search"></div>
@@ -112,8 +136,8 @@ export const agentAdminHTML = String.raw`<!doctype html>
           <div class="section">
             <h3>模型配置</h3>
             <div class="grid2">
-              <div class="field-wrap"><label class="field" for="provider">Provider</label><input class="full" id="provider" required placeholder="enterprise / demo"></div>
-              <div class="field-wrap"><label class="field" for="model">Model ID</label><input class="full" id="model" required placeholder="coding-model / demo"></div>
+              <div class="field-wrap"><label class="field" for="provider">Provider</label><input class="full" id="provider" list="provider-options" required placeholder="enterprise / demo"></div>
+              <div class="field-wrap"><label class="field" for="model">Model ID</label><input class="full" id="model" list="model-options" required placeholder="coding-model / demo"></div>
             </div>
             <p class="section-note">模型必须与服务端 LLM_PROVIDER / LLM_MODEL_ID 的获批配置一致。此页面不管理密钥。</p>
           </div>
@@ -172,6 +196,65 @@ export const agentAdminHTML = String.raw`<!doctype html>
         </div>
       </aside>
     </div>
+    <section id="view-skills" hidden>
+      <div class="console-grid">
+        <div><div class="panel-head"><h2>已登记 Skills</h2><span id="skill-count" class="pill">0</span></div><div id="skill-registry" class="resource-list"></div></div>
+        <section class="panel"><div class="panel-head"><h2>登记 Skill 版本</h2></div><form id="skill-form" class="pad">
+          <p class="note">Skill 版本不可变。更新内容需登记新的版本 ID；Skill 文件和卷需先部署到服务器。</p>
+          <div class="field-wrap"><label class="field" for="skill-id">版本 ID</label><input id="skill-id" class="full" required pattern="[a-zA-Z0-9_\-]+@[a-zA-Z0-9_\-]+" placeholder="code-review@v1"></div>
+          <div class="field-wrap"><label class="field" for="skill-name">名称</label><input id="skill-name" class="full" required maxlength="100"></div>
+          <div class="field-wrap"><label class="field" for="skill-description">描述</label><textarea id="skill-description" class="full" maxlength="2000"></textarea></div>
+          <div class="field-wrap"><label class="field" for="skill-bundle">Bundle</label><select id="skill-bundle" class="full" required></select></div>
+          <div class="field-wrap"><label class="field" for="skill-path">文件路径</label><input id="skill-path" class="full" required pattern="/skills/([a-zA-Z0-9_\-]+/)+SKILL\.md" placeholder="/skills/code-review/SKILL.md"></div>
+          <div class="field-wrap"><label class="field" for="skill-digest">SHA-256 摘要</label><input id="skill-digest" class="full" required pattern="[a-f0-9]{64}" minlength="64" maxlength="64" placeholder="Skill 文件的 SHA-256"></div>
+          <button id="register-skill" class="btn primary" type="submit" disabled>登记版本</button>
+        </form></section>
+      </div>
+    </section>
+    <section id="view-mcp" hidden>
+      <div class="console-grid">
+        <div><div class="panel-head"><h2>已登记 MCP Servers</h2><span id="mcp-count" class="pill">0</span></div><div id="mcp-registry" class="resource-list"></div></div>
+        <section class="panel"><div class="panel-head"><h2>登记 MCP Server</h2></div><form id="mcp-form" class="pad">
+          <p class="note">选择服务器已配置并授权给当前租户的 Endpoint。连接检查只发现白名单工具，不执行工具。</p>
+          <div class="field-wrap"><label class="field" for="mcp-id">Server ID</label><input id="mcp-id" class="full" required maxlength="20" pattern="[a-zA-Z0-9_\-]{1,20}" placeholder="docs"></div>
+          <div class="field-wrap"><label class="field" for="mcp-endpoint">Endpoint</label><select id="mcp-endpoint" class="full" required></select></div>
+          <div class="field-wrap"><label class="field" for="mcp-tools">允许的工具 <small>每行一个工具名；留空不授权任何工具</small></label><textarea id="mcp-tools" class="full" rows="5" placeholder="search
+fetch"></textarea></div>
+          <button id="register-mcp" class="btn primary" type="submit" disabled>登记服务</button>
+          <p id="mcp-check-result" class="note" role="status" aria-live="polite"></p>
+        </form></section>
+      </div>
+    </section>
+    <section id="view-delegation" hidden>
+      <div class="summary" id="delegation-summary"></div>
+      <section class="panel"><div class="panel-head"><h2>Agent 版本与委派关系</h2></div><div class="pad">
+        <p class="note">子 Agent 复用已发布的 AgentVersion。选择父 Agent 后，复制为新版本即可调整子 Agent、并发上限和委派深度。实际委派能力取父子权限交集。</p>
+        <div id="delegation-registry" class="resource-list"></div>
+      </div></section>
+    </section>
+    <section id="view-settings" hidden>
+      <div class="console-grid">
+        <section class="panel"><div class="panel-head"><h2>部署配置与租户授权</h2><span class="pill">只读</span></div><div class="pad">
+          <p class="note">模型、Sandbox、Skill Bundle 和 MCP Endpoint 由服务端部署配置管理，修改后需重启相关 API / Worker。此处展示当前租户可用资源，不显示凭证或 Endpoint URL。</p>
+          <table class="config-table"><tbody id="deployment-settings"></tbody></table>
+        </div></section>
+        <section class="panel"><div class="panel-head"><h2>新建 Agent 默认值</h2><span class="pill">租户范围</span></div><form id="defaults-form" class="pad">
+          <p class="note">保存后应用于新建草稿，不修改已发布 Agent 或已有会话。Demo 默认值保存在内存中，生产默认值保存在数据库中。</p>
+          <div class="grid2"><div class="field-wrap"><label class="field" for="default-provider">Provider</label><input id="default-provider" class="full" required list="provider-options"></div><div class="field-wrap"><label class="field" for="default-model">Model ID</label><input id="default-model" class="full" required list="model-options"></div></div>
+          <div class="field-wrap"><label class="field" for="default-bundle">Bundle</label><select id="default-bundle" class="full" required></select></div>
+          <div class="field-wrap"><label class="field">默认工具</label><div id="default-tools" class="choices"></div></div>
+          <div class="grid2">
+            <div class="field-wrap"><label class="field" for="default-steps">最大步骤</label><input id="default-steps" class="full" required type="number" min="1" max="100"></div>
+            <div class="field-wrap"><label class="field" for="default-tokens">Token 预算</label><input id="default-tokens" class="full" required type="number" min="100" max="1000000"></div>
+            <div class="field-wrap"><label class="field" for="default-timeout">超时（秒）</label><input id="default-timeout" class="full" required type="number" min="1" max="1800"></div>
+            <div class="field-wrap"><label class="field" for="default-subagents">子 Agent 上限</label><input id="default-subagents" class="full" required type="number" min="0" max="5"></div>
+            <div class="field-wrap"><label class="field" for="default-depth">最大委派深度</label><input id="default-depth" class="full" required type="number" min="0" max="3"></div>
+          </div>
+          <button id="save-defaults" class="btn primary" type="submit" disabled>保存默认值</button>
+        </form></section>
+      </div>
+    </section>
+    <datalist id="provider-options"></datalist><datalist id="model-options"></datalist>
   </main>
   <script nonce="__AGENT_UI_NONCE__">
     "use strict";
@@ -186,6 +269,7 @@ export const agentAdminHTML = String.raw`<!doctype html>
     let connection = new AbortController();
     let agents = [], skills = [], mcps = [], selected = null, draft = null, busy = false;
     let formMode = "new";
+    let configuration = null;
     function notify(message, error) {
       $("message").textContent = message;
       $("message").className = "message " + (error ? "error" : "show");
@@ -197,10 +281,11 @@ export const agentAdminHTML = String.raw`<!doctype html>
     function endConnection() {
       connection.abort();
       connection = new AbortController();
-      token = "";agents = [];skills = [];mcps = [];selected = null;
+      token = "";agents = [];skills = [];mcps = [];selected = null;configuration = null;
+      $("mcp-check-result").textContent = "";
       $("token").value = "";
       $("disconnect").disabled = true;$("connection").textContent = "未连接";
-      newDraft();setBusy(false);
+      newDraft();renderConsole();setBusy(false);
     }
     async function api(path, method, body, session = connection) {
       current(session);
@@ -332,16 +417,20 @@ export const agentAdminHTML = String.raw`<!doctype html>
     function newDraft() {
       selected = null;
       renderList();renderDetails();
-      loadForm(defaults,"new");
+      loadForm({...defaults,...(configuration && configuration.agentDefaults || {})},"new");
       resetMessage();
     }
-    async function refresh(preferredId, session = connection) {
-      const [a,s,m] = await Promise.all([allPages("/admin/agents",session),allPages("/admin/skills",session),api("/admin/mcp-servers",undefined,undefined,session)]);
+    async function refresh(preferredId, session = connection, preserveDraft = false) {
+      const savedDraft = preserveDraft && formMode !== "view" ? collect() : null;
+      const savedMode = formMode;
+      const [a,s,m,c] = await Promise.all([allPages("/admin/agents",session),allPages("/admin/skills",session),api("/admin/mcp-servers",undefined,undefined,session),api("/admin/configuration",undefined,undefined,session)]);
       current(session);
       agents = a.sort((x,y)=>String(y.publishedAt).localeCompare(String(x.publishedAt)));
-      skills = s;mcps = m.items || [];
+      skills = s;mcps = m.items || [];configuration = c;
+      renderConsole();
       const pick = agents.find(v=>v.id === preferredId);
-      if (pick) selectAgent(pick);
+      if (savedDraft) {renderList();renderDetails();loadForm(savedDraft,savedMode);}
+      else if (pick) selectAgent(pick);
       else if (selected && agents.some(v=>v.id === selected.id)) selectAgent(agents.find(v=>v.id === selected.id));
       else newDraft();
     }
@@ -362,6 +451,9 @@ export const agentAdminHTML = String.raw`<!doctype html>
       $("clone").disabled = value || !token || !selected;
       $("toggle").disabled = value || !token || !selected;
       $("save-access").disabled = value || !token || !selected;
+      for (const id of ["refresh-console","register-skill","register-mcp","save-defaults"]) $(id).disabled = value || !token;
+      for (const button of document.querySelectorAll("button[data-admin-action]")) button.disabled = value || !token || button.dataset.disabledServer === "true";
+      for (const input of $("default-tools").querySelectorAll("input")) input.disabled = value || !token;
     }
     $("connect").addEventListener("click",async()=>{
       const candidate = $("token").value.trim().replace(/^Bearer\s+/i,"");
@@ -437,6 +529,116 @@ export const agentAdminHTML = String.raw`<!doctype html>
       } catch(e) { if (session === connection) notify("更新失败：" + e.message,true); }
       finally {if (session === connection) setBusy(false);}
     });
+    function switchTab(tab) {
+      for (const name of ["agents","skills","mcp","delegation","settings"]) {
+        $("view-" + name).hidden = name !== tab;
+        $("tab-" + name).className = "btn" + (name === tab ? " active" : "");
+        $("tab-" + name).setAttribute("aria-pressed",String(name === tab));
+      }
+      $("new").hidden = tab !== "agents";
+    }
+    function options(id, values) {
+      const root = $(id);const value = root.value;root.replaceChildren();
+      for (const ref of values) {const option = el("option",ref);option.value = ref;root.append(option);}
+      if (values.includes(value)) root.value = value;
+    }
+    function resourceCard(name, enabled, detail) {
+      const card = el("article",undefined,"resource-card");
+      const title = el("div",undefined,"toolbar");title.append(el("h3",name),el("span",enabled ? "启用" : "禁用","pill" + (enabled ? "" : " off")));
+      card.append(title,el("p",detail,"note"));return card;
+    }
+    function action(label, callback) {
+      const button = el("button",label,"btn btn-sm");button.type = "button";
+      button.dataset.adminAction = "true";button.disabled = !token || busy;
+      button.addEventListener("click",callback);return button;
+    }
+    async function consoleMutation(path, method, body, message, onSuccess) {
+      if (!token || busy) return;
+      const session = connection;setBusy(true);
+      try {
+        const result = await api(path,method,body,session);
+        if (onSuccess) onSuccess(result);
+        renderConsole();
+        try {await refresh(undefined,session,true);notify(message);}
+        catch(e) {if (session === connection) notify(message + "\n列表刷新失败：" + e.message + "。可重新连接以刷新数据。");}
+      } catch(e) {if (session === connection) notify("操作失败：" + e.message,true);}
+      finally {if (session === connection) setBusy(false);}
+    }
+    function renderConsole() {
+      $("skill-count").textContent = String(skills.length);$("mcp-count").textContent = String(mcps.length);
+      for (const [id,items,kind] of [["skill-registry",skills,"skills"],["mcp-registry",mcps,"mcp-servers"]]) {
+        const root = $(id);root.replaceChildren();
+        if (!items.length) root.append(el("div",token ? "暂无已登记条目" : "连接管理员令牌后查看","empty"));
+        for (const item of items) {
+          const detail = kind === "skills" ? item.id + "\n" + item.description + "\nBundle：" + item.bundle + "\n" + item.path + "\nSHA-256：" + item.digest : "Endpoint：" + item.endpointRef + "\n允许工具：" + (item.allowedTools.join("、") || "无");
+          const card = resourceCard(kind === "skills" ? item.name : item.id,item.enabled,detail);
+          const toolbar = el("div",undefined,"toolbar");
+          toolbar.append(action(item.enabled ? "禁用" : "启用",()=>{
+            if (!window.confirm("确认" + (item.enabled ? "禁用" : "启用") + " " + item.id + "？")) return;
+            const enabled = !item.enabled;
+            return consoleMutation("/admin/" + kind + "/" + encodeURIComponent(item.id) + "/status","PUT",{enabled},"状态已更新。",()=>{item.enabled = enabled;});
+          }));
+          if (kind === "mcp-servers") {
+            const check = action("检查连接",()=>checkMCP(item));check.dataset.disabledServer = String(!item.enabled);check.disabled = !item.enabled || !token || busy;toolbar.append(check);
+          }
+          card.append(toolbar);root.append(card);
+        }
+      }
+      const deployment = configuration && configuration.deployment || {};
+      options("skill-bundle",deployment.bundles || []);options("mcp-endpoint",deployment.endpoints || []);options("default-bundle",deployment.bundles || []);
+      options("provider-options",[...new Set((deployment.models || []).map(m=>m.provider))]);options("model-options",[...new Set((deployment.models || []).map(m=>m.modelId))]);
+      const rows = $("deployment-settings");rows.replaceChildren();
+      const policy = deployment.sandbox || {};
+      const entries = [["当前租户",configuration && configuration.tenantId || "未连接"],["获批模型",(deployment.models || []).map(m=>m.provider + " / " + m.modelId).join("、") || (token ? "Demo / 自定义模型" : "—")],["可用 Bundles",(deployment.bundles || []).join("、") || "—"],["可用 Endpoints",(deployment.endpoints || []).join("、") || "—"],["每用户活跃 Sandbox",policy.maxActivePerUser],["全局活跃 Sandbox",policy.maxActiveTotal],["空闲暂停（秒）",policy.idlePauseSeconds],["空闲释放（秒）",policy.idleReleaseSeconds],["扫描间隔（秒）",policy.sweepIntervalSeconds],["每工作区快照上限",policy.maxSnapshotsPerWorkspace]];
+      for (const [name,value] of entries) {const row = el("tr");row.append(el("td",name),el("td",value === undefined ? "—" : String(value)));rows.append(row);}
+      const d = configuration && configuration.agentDefaults || defaults;
+      setField("default-provider",d.model.provider);setField("default-model",d.model.modelId);setField("default-bundle",d.skillBundle);
+      for (const [field,key] of [["steps","maxSteps"],["tokens","maxTokens"],["timeout","timeoutSeconds"],["subagents","maxSubagents"],["depth","maxDepth"]]) setField("default-" + field,d[key]);
+      checkboxGroup("default-tools",toolNames.map(t=>({value:t,label:t})),d.tools || []);
+      for (const input of $("default-tools").querySelectorAll("input")) input.disabled = !token || busy;
+      const summary = $("delegation-summary");summary.replaceChildren();
+      for (const [name,count] of [["Agent 版本",agents.length],["委派关系",agents.reduce((sum,a)=>sum + a.config.subagents.length,0)],["允许委派的父 Agent",agents.filter(a=>a.config.tools.includes("delegate_to_agent")).length]]) {
+        const card = el("div",name,"resource-card");card.append(el("strong",String(count)));summary.append(card);
+      }
+      const relations = $("delegation-registry");relations.replaceChildren();
+      if (!agents.length) relations.append(el("div",token ? "发布 Agent 后查看委派关系" : "连接管理员令牌后查看","empty"));
+      for (const a of agents) {
+        const children = a.config.subagents.map(id=>{const child = agents.find(v=>v.id === id);return child ? child.config.name + " · " + id + (child.enabled ? "" : "（禁用）") : id + "（未找到）";});
+        const card = resourceCard(a.config.name,a.enabled,a.id + "\n子 Agent：" + (children.join("\n") || "无") + "\n并发上限：" + a.config.maxSubagents + " · 最大深度：" + a.config.maxDepth + (a.config.tools.includes("delegate_to_agent") ? "" : "\n未启用 delegate_to_agent 工具"));
+        card.append(action("查看 / 配置新版本",()=>{switchTab("agents");selectAgent(a);}));relations.append(card);
+      }
+    }
+    async function checkMCP(item) {
+      if (!token || busy || !item.enabled) return;
+      const session = connection;setBusy(true);$("mcp-check-result").textContent = "正在检查 " + item.id + "…";
+      try {
+        const result = await api("/admin/mcp-servers/" + encodeURIComponent(item.id) + "/check","POST",{},session);
+        $("mcp-check-result").textContent = item.id + " 连接正常。白名单工具：" + (result.tools.map(t=>t.name).join("、") || "无匹配工具");
+        notify("MCP 连接检查完成。");
+      } catch(e) {if (session === connection) {$("mcp-check-result").textContent = "检查失败：" + e.message;notify("MCP 检查失败：" + e.message,true);}}
+      finally {if (session === connection) setBusy(false);}
+    }
+    for (const tab of ["agents","skills","mcp","delegation","settings"]) $("tab-" + tab).addEventListener("click",()=>switchTab(tab));
+    $("refresh-console").addEventListener("click",async()=>{
+      if (!token || busy) return;const session = connection;setBusy(true);
+      try {await refresh(undefined,session,true);notify("数据已刷新。");}
+      catch(e) {if (session === connection) notify("刷新失败：" + e.message,true);}
+      finally {if (session === connection) setBusy(false);}
+    });
+    $("skill-form").addEventListener("submit",event=>{
+      event.preventDefault();
+      return consoleMutation("/admin/skills","POST",{id:$("skill-id").value.trim(),name:$("skill-name").value.trim(),description:$("skill-description").value,bundle:$("skill-bundle").value,path:$("skill-path").value.trim(),digest:$("skill-digest").value.trim()},"Skill 版本已登记。",created=>{skills.push(created);$("skill-form").reset();});
+    });
+    $("mcp-form").addEventListener("submit",event=>{
+      event.preventDefault();
+      return consoleMutation("/admin/mcp-servers","POST",{id:$("mcp-id").value.trim(),endpointRef:$("mcp-endpoint").value,allowedTools:[...new Set($("mcp-tools").value.split("\n").map(s=>s.trim()).filter(Boolean))]},"MCP Server 已登记。",created=>{mcps.push(created);$("mcp-form").reset();});
+    });
+    $("defaults-form").addEventListener("submit",event=>{
+      event.preventDefault();
+      const d = {model:{provider:$("default-provider").value.trim(),modelId:$("default-model").value.trim()},skillBundle:$("default-bundle").value,tools:selectedValues("default-tools"),maxSteps:numberValue("default-steps"),maxTokens:numberValue("default-tokens"),timeoutSeconds:numberValue("default-timeout"),maxSubagents:numberValue("default-subagents"),maxDepth:numberValue("default-depth")};
+      return consoleMutation("/admin/configuration/defaults","PUT",d,"默认值已保存，将用于新建 Agent 草稿。",saved=>{configuration.agentDefaults = saved;});
+    });
+    renderConsole();
     newDraft();
   </script>
 </body>
