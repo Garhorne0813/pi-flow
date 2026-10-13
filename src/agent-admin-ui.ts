@@ -173,7 +173,7 @@ export const agentAdminHTML = String.raw`<!doctype html>
       </aside>
     </div>
   </main>
-  <script>
+  <script nonce="__AGENT_UI_NONCE__">
     "use strict";
     const $ = (id) => document.getElementById(id);
     const toolNames = ["read","write","edit","bash","ls","grep","find","todo","ask_user_question","delegate_to_agent"];
