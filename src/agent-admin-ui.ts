@@ -183,6 +183,7 @@ export const agentAdminHTML = String.raw`<!doctype html>
       skillBundle:"default",maxSteps:30,maxTokens:100000,timeoutSeconds:600,maxSubagents:2,maxDepth:1
     };
     let token = "";
+    let connection = new AbortController();
     let agents = [], skills = [], mcps = [], selected = null, draft = null, busy = false;
     let formMode = "new";
     function notify(message, error) {
@@ -190,26 +191,40 @@ export const agentAdminHTML = String.raw`<!doctype html>
       $("message").className = "message " + (error ? "error" : "show");
     }
     function resetMessage() { $("message").className = "message"; }
-    async function api(path, method, body) {
+    function current(session) {
+      if (session !== connection || session.signal.aborted) throw new DOMException("连接已结束", "AbortError");
+    }
+    function endConnection() {
+      connection.abort();
+      connection = new AbortController();
+      token = "";agents = [];skills = [];mcps = [];selected = null;
+      $("token").value = "";
+      $("disconnect").disabled = true;$("connection").textContent = "未连接";
+      newDraft();setBusy(false);
+    }
+    async function api(path, method, body, session = connection) {
+      current(session);
       if (!token) throw new Error("请先连接管理员令牌");
       const response = await fetch("/api/v1" + path, {
         method: method || "GET",
         headers: {Authorization: "Bearer " + token, ...(body === undefined ? {} : {"Content-Type":"application/json"})},
         ...(body === undefined ? {} : {body:JSON.stringify(body)}),
         cache:"no-store",
-        credentials:"omit"
+        credentials:"omit",
+        signal:session.signal
       });
       const data = await response.json().catch(() => ({}));
+      current(session);
       if (!response.ok) {
         const err = data.error || {};
         throw new Error((err.code || "HTTP_" + response.status) + ": " + (err.message || response.statusText));
       }
       return data;
     }
-    async function allPages(path) {
+    async function allPages(path, session) {
       const output = [];
       for (let offset = 0; offset < 10000; offset += 100) {
-        const data = await api(path + "?offset=" + offset + "&limit=100");
+        const data = await api(path + "?offset=" + offset + "&limit=100", undefined, undefined, session);
         output.push(...(data.items || []));
         if (!data.items || data.items.length < 100) return output;
       }
@@ -320,14 +335,24 @@ export const agentAdminHTML = String.raw`<!doctype html>
       loadForm(defaults,"new");
       resetMessage();
     }
-    async function refresh(preferredId) {
-      const [a,s,m] = await Promise.all([allPages("/admin/agents"),allPages("/admin/skills"),api("/admin/mcp-servers")]);
+    async function refresh(preferredId, session = connection) {
+      const [a,s,m] = await Promise.all([allPages("/admin/agents",session),allPages("/admin/skills",session),api("/admin/mcp-servers",undefined,undefined,session)]);
+      current(session);
       agents = a.sort((x,y)=>String(y.publishedAt).localeCompare(String(x.publishedAt)));
       skills = s;mcps = m.items || [];
       const pick = agents.find(v=>v.id === preferredId);
       if (pick) selectAgent(pick);
       else if (selected && agents.some(v=>v.id === selected.id)) selectAgent(agents.find(v=>v.id === selected.id));
       else newDraft();
+    }
+    async function refreshAfterMutation(message, id, session) {
+      try {
+        await refresh(id, session);
+        notify(message);
+      } catch(e) {
+        if (session !== connection) return;
+        notify(message + "\n列表刷新失败：" + e.message + "。可重新连接以刷新数据。");
+      }
     }
     function setBusy(value) {
       busy = value;
@@ -341,22 +366,23 @@ export const agentAdminHTML = String.raw`<!doctype html>
     $("connect").addEventListener("click",async()=>{
       const candidate = $("token").value.trim().replace(/^Bearer\s+/i,"");
       if (!candidate) return notify("请输入管理员令牌",true);
+      endConnection();
+      const session = connection;
       token = candidate; $("token").value = ""; setBusy(true);
+      $("disconnect").disabled = false;
       try {
-        await refresh();
+        await refresh(undefined, session);
         $("disconnect").disabled = false;
         $("connection").textContent = "已连接";
         notify("已连接管理 API，可创建或管理 Agent 版本。");
       } catch(e) {
-        token = "";agents = [];skills = [];mcps = [];newDraft();
-        $("connection").textContent = "未连接";
+        if (session !== connection) return;
+        endConnection();
         notify("连接失败：" + e.message,true);
-      } finally { setBusy(false); }
+      } finally { if (session === connection) setBusy(false); }
     });
     $("disconnect").addEventListener("click",()=>{
-      token = "";agents = [];skills = [];mcps = [];selected = null;
-      $("disconnect").disabled = true;$("connection").textContent = "未连接";
-      newDraft();setBusy(false);notify("已断开，令牌已从页面状态中清除。");
+      endConnection();notify("已断开，令牌已从页面状态中清除。");
     });
     $("new").addEventListener("click",newDraft);
     $("search").addEventListener("input",renderList);
@@ -371,38 +397,45 @@ export const agentAdminHTML = String.raw`<!doctype html>
       const config = collect();
       if (!config.name || !config.model.provider || !config.model.modelId || !config.skillBundle) return notify("请填写必填字段",true);
       if (!window.confirm("确认发布新的不可变 Agent 版本？")) return;
+      const session = connection;
       setBusy(true);
       try {
-        const created = await api("/admin/agents","POST",config);
-        await refresh(created.id);
-        notify("发布成功，AgentVersion ID：" + created.id);
-      } catch(e) {notify("发布失败：" + e.message,true);}
-      finally {setBusy(false);}
+        const created = await api("/admin/agents","POST",config,session);
+        agents.unshift(created);
+        selectAgent(created);
+        await refreshAfterMutation("发布成功，AgentVersion ID：" + created.id,created.id,session);
+      } catch(e) {if (session === connection) notify("发布失败：" + e.message,true);}
+      finally {if (session === connection) setBusy(false);}
     });
     $("save-access").addEventListener("click",async()=>{
       if (!selected || !token || busy) return;
       const id = selected.id;
       const allowedUsers = [...new Set($("allowed-users").value.split("\n").map(s=>s.trim()).filter(Boolean))];
+      const session = connection;
       setBusy(true);
       try {
-        await api("/admin/agents/" + encodeURIComponent(id) + "/access","PUT",{allowedUsers});
-        await refresh(id);
-        notify("访问权限已保存。");
-      } catch(e) { notify("保存失败：" + e.message,true); }
-      finally {setBusy(false);}
+        await api("/admin/agents/" + encodeURIComponent(id) + "/access","PUT",{allowedUsers},session);
+        const version = agents.find(a=>a.id === id);
+        version.allowedUsers = allowedUsers;
+        selectAgent(version);
+        await refreshAfterMutation("访问权限已保存。",id,session);
+      } catch(e) { if (session === connection) notify("保存失败：" + e.message,true); }
+      finally {if (session === connection) setBusy(false);}
     });
     $("toggle").addEventListener("click",async()=>{
       if (!selected || !token || busy) return;
       const id = selected.id;
       const enabled = !selected.enabled;
       if (!window.confirm("确认" + (enabled ? "启用" : "禁用") + "该 Agent 版本？")) return;
+      const session = connection;
       setBusy(true);
       try {
-        await api("/admin/agents/" + encodeURIComponent(id) + "/status","PUT",{enabled});
-        await refresh(id);
-        notify("Agent 已" + (enabled ? "启用" : "禁用") + "。");
-      } catch(e) { notify("更新失败：" + e.message,true); }
-      finally {setBusy(false);}
+        const version = await api("/admin/agents/" + encodeURIComponent(id) + "/status","PUT",{enabled},session);
+        agents = agents.map(a=>a.id === id ? version : a);
+        selectAgent(version);
+        await refreshAfterMutation("Agent 已" + (enabled ? "启用" : "禁用") + "。",id,session);
+      } catch(e) { if (session === connection) notify("更新失败：" + e.message,true); }
+      finally {if (session === connection) setBusy(false);}
     });
     newDraft();
   </script>

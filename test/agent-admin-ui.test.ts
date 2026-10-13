@@ -47,3 +47,88 @@ test("unauthenticated access serves only the public UI shell, not admin APIs", a
     await app.close();
   }
 });
+
+/** Small DOM adapter to execute the actual embedded controller without a browser dependency. */
+function consoleController(fetch: typeof globalThis.fetch) {
+  class Element {
+    value = "";
+    textContent = "";
+    className = "";
+    disabled = false;
+    style: Record<string, string> = {};
+    dataset: Record<string, string> = {};
+    children: Element[] = [];
+    listeners = new Map<string, (event: { preventDefault(): void }) => unknown>();
+    append(...children: Element[]) { this.children.push(...children); }
+    replaceChildren() { this.children = []; }
+    querySelectorAll() { return []; }
+    addEventListener(name: string, callback: (event: { preventDefault(): void }) => unknown) {
+      this.listeners.set(name, callback);
+    }
+    async dispatch(name = "click") {
+      await this.listeners.get(name)?.({ preventDefault() {} });
+    }
+  }
+  const elements = new Map<string, Element>();
+  const get = (id: string) => {
+    if (!elements.has(id)) elements.set(id, new Element());
+    return elements.get(id)!;
+  };
+  const script = agentAdminHTML.match(/<script[^>]*>([\s\S]*?)<\/script>/)![1]!;
+  new Script(script).runInNewContext({
+    document: { getElementById: get, createElement: () => new Element(), querySelectorAll: () => [] },
+    fetch, AbortController, DOMException, structuredClone,
+    window: { confirm: () => true },
+  });
+  return get;
+}
+
+test("disconnect aborts requests and late responses cannot restore the old connection", async () => {
+  const pending: { resolve: (response: Response) => void; signal: AbortSignal }[] = [];
+  const get = consoleController(async (_url, options) => new Promise<Response>((resolve) => {
+    pending.push({ resolve, signal: options!.signal! });
+  }));
+  get("token").value = "test-admin-token";
+  const connecting = get("connect").dispatch();
+  assert.equal(pending.length, 3);
+  assert.equal(get("disconnect").disabled, false);
+  await get("disconnect").dispatch();
+  for (const request of pending) {
+    assert.equal(request.signal.aborted, true);
+    request.resolve(Response.json({ items: [] }));
+  }
+  await connecting;
+  assert.equal(get("connection").textContent, "未连接");
+  assert.equal(get("count").textContent, "0");
+  assert.match(get("message").textContent, /已断开/);
+  assert.equal(get("publish").disabled, true);
+});
+
+test("successful publish stays read-only when refresh fails and cannot be submitted twice", async () => {
+  let publications = 0;
+  const get = consoleController(async (url, options) => {
+    if (options?.method === "POST") {
+      publications++;
+      return Response.json({
+        id: "new-version", config: JSON.parse(options.body as string),
+        enabled: true, publishedAt: new Date().toISOString(), digest: "test",
+      });
+    }
+    if (publications && String(url).includes("/skills"))
+      return Response.json({ error: { code: "UNAVAILABLE" } }, { status: 503 });
+    return Response.json({ items: [] });
+  });
+  get("token").value = "test-admin-token";
+  await get("connect").dispatch();
+  get("name").value = "Regression agent";
+  get("prompt").value = "Test prompt";
+  get("provider").value = "demo";
+  get("model").value = "demo";
+  await get("form").dispatch("submit");
+  assert.match(get("message").textContent, /发布成功/);
+  assert.match(get("message").textContent, /列表刷新失败/);
+  assert.equal(get("version-id").textContent, "new-version");
+  assert.equal(get("publish").disabled, true);
+  await get("form").dispatch("submit");
+  assert.equal(publications, 1);
+});
