@@ -17,7 +17,7 @@ flowchart LR
     Worker --> Pi[Pi 运行时]
     Pi --> Gateway[模型网关]
     Worker --> Manager
-    Manager --> Cube[CubeSandbox 与工作区卷 / 技能挂载]
+    Manager --> Cube[CubeSandbox 与工作区卷 / 宿主机技能]
     Worker --> MCP[Streamable HTTP MCP 服务]
     API -->|连接检查 / 工具发现| MCP
     API --> SSE[SSE 回放]
@@ -143,12 +143,12 @@ Pi ResourceLoader 禁用本地技能、扩展自动发现和默认本地文件/S
 
 ### 工作区与技能来源
 
-每个工作区挂载独立可写 `/workspace` 卷。`SKILL_VOLUMES_JSON` 将技能版本绑定到清单路径和唯一的 `volume` 或 `hostPath` 来源；两种来源均只读挂载到注册的 `/skills/.../SKILL.md` 所在目录。Bundle 是租户权限分组，不是挂载卷名。工具访问校验清单身份与 SHA-256；授权技能集合或物理挂载 scope 变化时，先确认旧实例销毁，再保留工作区卷重建实例。
+每个工作区挂载独立可写 `/workspace` 卷。`SKILL_VOLUMES_JSON` 将技能版本绑定到清单路径和唯一来源：默认使用 `hostPath` 目录，也支持显式配置 `volume`；两种来源均只读挂载到注册的 `/skills/.../SKILL.md` 所在目录。Bundle 是租户权限分组，不是挂载卷名。工具访问校验清单身份与 SHA-256；授权技能集合或物理挂载 scope 变化时，先确认旧实例销毁，再保留工作区卷重建实例。
 
 | 来源 | 约束 |
 | --- | --- |
 | Volume | 每个技能版本使用独立卷，不能与工作区卷混用 |
-| Host | 默认 `SKILL_HOST_ROOTS_JSON=[]`，拒绝所有宿主机来源；显式授权后，来源必须是获批规范绝对目录的严格子目录，拒绝重叠来源、符号链接和特殊文件 |
+| Host | `SKILL_HOST_ROOTS_JSON` 默认值为 `["/data/agent-skills"]`，显式列表替换默认值，`[]` 禁用 Host 源；来源必须是获批规范绝对目录的严格子目录，拒绝重叠来源、符号链接和特殊文件 |
 
 Host 模式要求所有 API / Worker 和可调度 Cubelet 节点在相同规范绝对路径访问**同一文件系统**；远程节点需使用共享存储，复制一份文件不能满足此约束。控制进程无法访问或校验来源时拒绝操作。CubeMaster 也需允许相应宿主机目录。API 请求不能选择来源或挂载目标，具体部署要求见 [宿主机技能目录](deployment.md#local-host-skills--cubelet-宿主机技能目录)。
 

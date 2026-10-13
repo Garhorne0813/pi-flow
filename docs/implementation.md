@@ -17,7 +17,7 @@
 
 Pi 工具使用规范名字 `read`、`write`、`edit`、`bash`、`ls`、`find`、`grep`。`createAgentSession` 设置 `noTools: "all"`，仅启用允许的 `customTools`，同名工具不会落到 Pi 的本地实现。ResourceLoader 返回空 Extensions/Skills 本地发现结果，远程 Skill 元数据进入受控 Prompt；内容经 read 读取。Worker 不调用 Pi 的本地 read/bash 工厂。
 
-技能按 Agent `skills` 精确挂载：`SKILL_VOLUMES_JSON` 绑定每个技能版本的独立只读 Volume、Bundle 和 SKILL.md 路径，辅助资源与 SKILL.md 放在同一 Volume 根目录。Cube SDK 没有子目录挂载，因此不再挂载整包 Volume。Sandbox 持久记录技能集合摘要；工具访问切换集合时先确认旧实例 Kill 成功，再重建实例并保留 Workspace Volume。空列表不挂载技能，旧实例缺少摘要时强制重建。重复/重叠挂载目录、共享技能 Volume、Workspace 与技能 Volume 指向同一实际卷均拒绝。发布者必须保证 Volume 只包含该技能且不可变，模板 `/skills` 为空，无其他技能挂载。
+技能按 Agent `skills` 精确挂载：`SKILL_VOLUMES_JSON` 默认绑定每个技能版本的独立只读 hostPath 目录、Bundle 和 SKILL.md 路径，辅助资源与 SKILL.md 放在同一目录。`SKILL_HOST_ROOTS_JSON` 默认允许 `/data/agent-skills` 的严格子目录，显式列表替换默认值，`[]` 禁用 Host 源。仍支持显式 Volume 及混合后端；Cube SDK 没有 Volume 子目录挂载，因此不挂载整包 Volume。Sandbox 持久记录技能集合摘要；工具访问切换集合时先确认旧实例 Kill 成功，再重建实例并保留 Workspace Volume。空列表不挂载技能，旧实例缺少摘要时强制重建。重复/重叠挂载目录、共享技能 Volume、Workspace 与技能 Volume 指向同一实际卷均拒绝。发布者必须保证技能源只包含该技能且不可变，模板 `/skills` 为空，无其他技能挂载。
 
 MCP 发现只遍历当前 Agent 的 Server 列表；调用与审批前再次检查工具映射、Server 授权、实时撤销和 Endpoint 一致性。子 Agent 的 skills、MCP 和工具权限取父子交集。管理面目录不属于模型的可见工具集合。
 

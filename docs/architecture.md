@@ -17,7 +17,7 @@ flowchart LR
     Worker --> Pi[Pi runtime]
     Pi --> Gateway[Model gateway]
     Worker --> Manager
-    Manager --> Cube[CubeSandbox + workspace volumes / skill mounts]
+    Manager --> Cube[CubeSandbox + workspace volumes / host skills]
     Worker --> MCP[Streamable HTTP MCP servers]
     API -->|Connection check / discovery| MCP
     API --> SSE[SSE replay]
@@ -143,12 +143,12 @@ Pi's resource loader disables automatic local skill/extension discovery and defa
 
 ### Workspace and skill sources
 
-Each workspace mounts its own writable `/workspace` volume. `SKILL_VOLUMES_JSON` maps a skill version to its manifest path and exactly one `volume` or `hostPath` source. Both backends mount read-only at the directory containing the registered `/skills/.../SKILL.md`. Bundle names are tenant authorization groups, not mounted volume names. Tool access verifies manifest identity and SHA-256. A change to the authorized skill set or physical mount scope rebuilds the instance after confirming the previous instance is killed, retaining the workspace volume.
+Each workspace mounts its own writable `/workspace` volume. `SKILL_VOLUMES_JSON` maps a skill version to its manifest path and exactly one source: a `hostPath` directory by default, or an explicitly configured `volume`. Both backends mount read-only at the directory containing the registered `/skills/.../SKILL.md`. Bundle names are tenant authorization groups, not mounted volume names. Tool access verifies manifest identity and SHA-256. A change to the authorized skill set or physical mount scope rebuilds the instance after confirming the previous instance is killed, retaining the workspace volume.
 
 | Source | Constraints |
 | --- | --- |
 | Volume | Each skill version uses an independent volume, distinct from the workspace volume |
-| Host | `SKILL_HOST_ROOTS_JSON=[]` denies all host sources by default; opt-in sources must be strict descendants of approved canonical absolute roots, without overlapping sources, symlinks, or special files |
+| Host | `SKILL_HOST_ROOTS_JSON` defaults to `["/data/agent-skills"]`; an explicit list replaces it, and `[]` disables host sources. Sources must be strict descendants of approved canonical absolute roots, without overlapping sources, symlinks, or special files |
 
 Host mode requires **the same filesystem at the same canonical absolute path** on every API/Worker and eligible Cubelet node. Remote nodes need shared storage; a copy of the files does not satisfy this requirement. Unavailable or unverifiable sources are rejected by control processes. CubeMaster must also allow the host directories. API requests cannot select sources or mount destinations. See [host skill deployment](deployment.md#local-host-skills--cubelet-宿主机技能目录).
 
