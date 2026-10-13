@@ -1,4 +1,5 @@
 import { alerts } from "./alerts.js";
+import { agentAdminHTML } from "./agent-admin-ui.js";
 import Fastify from "fastify";
 import { usageReport, policyFromEnv } from "./usage.js";
 import { telemetry, traceContext } from "./telemetry.js";
@@ -79,6 +80,8 @@ export function buildAPI(
   });
   app.addHook("onRequest", async (req, reply) => {
     reply.header("X-Request-ID", req.id);
+    // Only the static shell is public; all data and mutations still require admin auth.
+    if (req.method === "GET" && req.url.split("?")[0] === "/admin/agents/ui") return;
     if (
       ["/health", "/health/live", "/health/ready"].includes(
         req.url.split("?")[0]!,
@@ -100,6 +103,15 @@ export function buildAPI(
       });
   });
   app.get("/health", async () => ({ status: "ok" }));
+  app.get("/admin/agents/ui", async (_req, reply) =>
+    reply
+      .header("Cache-Control", "no-store")
+      .header("X-Content-Type-Options", "nosniff")
+      .header("Referrer-Policy", "no-referrer")
+      .header("Content-Security-Policy", "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
+      .type("text/html; charset=utf-8")
+      .send(agentAdminHTML),
+  );
   app.get("/api/v1/admin/usage", async (req) => {
     const a = actor(req);
     admin(a);
