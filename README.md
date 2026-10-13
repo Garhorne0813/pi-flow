@@ -6,6 +6,14 @@ Pi-Flow lets you build agent applications around persistent workspaces and conve
 
 Built on Pi, with CubeSandbox for remote execution. The current release is a **0.1 backend**; bring your own chat UI or API client.
 
+### Agent configuration page
+
+After starting the API, open [Agent Configuration](http://127.0.0.1:8080/admin/agents/ui) (`/admin/agents/ui`). Enter an administrator Bearer token to browse published agents, publish new immutable versions, clone an existing configuration, select built-in tools and registered Skills/MCP servers/subagents, and manage version status and allowed users.
+
+The standalone page is served by the API without an extra frontend build. Its HTML shell is public, but every data request still uses authenticated `/api/v1/admin/*` endpoints. The token is kept only in page memory, not browser storage or the URL. For production, use a UCS JWT with the `harness-admin` role; Demo accepts the configured `DEV_TOKEN`.
+
+The page does not provision model credentials, skill volumes, MCP endpoints, or tenant grants: configure those server-side first. Publishing a configuration creates a new AgentVersion and does not change existing sessions. This page is not a chat frontend.
+
 [简体中文](README.zh-CN.md)
 
 ## Features
@@ -164,7 +172,7 @@ The smoke check starts and stops its own demo on port `18081`, covering a conver
 | [Implementation](docs/implementation.md) · [Acceptance](docs/acceptance.md) | Implementation notes, evidence, and outstanding production gates |
 | [Integration notes](docs/local-deployment.md) | Real-service deployment findings |
 
-This release is a runnable integration baseline; enterprise production acceptance is still pending. It has no bundled frontend, long-term memory, or session branching API. File APIs do not support binary files. MCP uses deployment service credentials; delegated user OAuth is pending. Budget reports estimate costs rather than reconcile provider invoices, and instance snapshots do not back up workspace volumes.
+This release is a runnable integration baseline; enterprise production acceptance is still pending. It has no bundled chat frontend, long-term memory, or session branching API. File APIs do not support binary files. MCP uses deployment service credentials; delegated user OAuth is pending. Budget reports estimate costs rather than reconcile provider invoices, and instance snapshots do not back up workspace volumes.
 
 ## License
 
