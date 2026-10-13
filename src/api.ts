@@ -1,5 +1,6 @@
 import { alerts } from "./alerts.js";
 import { agentAdminHTML } from "./agent-admin-ui.js";
+import { randomBytes } from "node:crypto";
 import Fastify from "fastify";
 import { usageReport, policyFromEnv } from "./usage.js";
 import { telemetry, traceContext } from "./telemetry.js";
@@ -103,15 +104,19 @@ export function buildAPI(
       });
   });
   app.get("/health", async () => ({ status: "ok" }));
-  app.get("/admin/agents/ui", async (_req, reply) =>
-    reply
+  app.get("/admin/agents/ui", async (_req, reply) => {
+    const nonce = randomBytes(16).toString("base64");
+    return reply
       .header("Cache-Control", "no-store")
       .header("X-Content-Type-Options", "nosniff")
       .header("Referrer-Policy", "no-referrer")
-      .header("Content-Security-Policy", "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
+      .header(
+        "Content-Security-Policy",
+        `default-src 'none'; script-src 'nonce-${nonce}'; style-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`,
+      )
       .type("text/html; charset=utf-8")
-      .send(agentAdminHTML),
-  );
+      .send(agentAdminHTML.replace("__AGENT_UI_NONCE__", nonce));
+  });
   app.get("/api/v1/admin/usage", async (req) => {
     const a = actor(req);
     admin(a);
