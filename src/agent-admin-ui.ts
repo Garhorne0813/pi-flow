@@ -131,7 +131,7 @@ export const agentAdminHTML = String.raw`<!doctype html>
             <h3>基本信息</h3>
             <div class="field-wrap"><label class="field" for="name">Agent 名称</label><input class="full" id="name" required maxlength="100" placeholder="例如：企业代码助手"></div>
             <div class="field-wrap"><label class="field" for="prompt">System Prompt <small>定义角色、职责与行为边界</small></label><textarea class="full" id="prompt" required maxlength="32000" rows="6" placeholder="你是一位…"></textarea></div>
-            <div class="field-wrap"><label class="field" for="agents-md">AGENTS.md 指令 <small>每行一条指令；会被转换为 agentsMd 数组，而不是文件路径</small></label><textarea class="full" id="agents-md" rows="3" placeholder="遵循项目编码规范"></textarea></div>
+            <div class="field-wrap"><label class="field">AGENTS.md 指令 <small>每个条目可包含完整的多行 Markdown，按原样保存；不是文件路径。</small></label><div id="agents-md"></div><button id="add-agents-md" class="btn btn-sm" type="button" disabled>＋ 添加指令条目</button></div>
           </div>
           <div class="section">
             <h3>模型配置</h3>
@@ -270,6 +270,7 @@ fetch"></textarea></div>
     let agents = [], skills = [], mcps = [], selected = null, draft = null, busy = false;
     let formMode = "new";
     let configuration = null;
+    let defaultsFormInitialized = false;
     function notify(message, error) {
       $("message").textContent = message;
       $("message").className = "message " + (error ? "error" : "show");
@@ -281,7 +282,7 @@ fetch"></textarea></div>
     function endConnection() {
       connection.abort();
       connection = new AbortController();
-      token = "";agents = [];skills = [];mcps = [];selected = null;configuration = null;
+      token = "";agents = [];skills = [];mcps = [];selected = null;configuration = null;defaultsFormInitialized = false;
       $("mcp-check-result").textContent = "";
       $("token").value = "";
       $("disconnect").disabled = true;$("connection").textContent = "未连接";
@@ -347,7 +348,7 @@ fetch"></textarea></div>
     function collect() {
       return {
         name:$("name").value.trim(), systemPrompt:$("prompt").value,
-        agentsMd:$("agents-md").value.split("\n").map(s => s.trim()).filter(Boolean),
+        agentsMd:agentsMdValues(),
         model:{provider:$("provider").value.trim(),modelId:$("model").value.trim()},
         tools:selectedValues("tools"),skills:selectedValues("skills"),
         mcpServers:selectedValues("mcps"),subagents:selectedValues("subagents"),
@@ -355,6 +356,28 @@ fetch"></textarea></div>
         maxTokens:numberValue("tokens"),timeoutSeconds:numberValue("timeout"),
         maxSubagents:numberValue("max-subagents"),maxDepth:numberValue("depth")
       };
+    }
+    function agentsMdValues() {
+      return [...$("agents-md").querySelectorAll("textarea[data-agents-md]")].map(input=>input.value);
+    }
+    function renderAgentsMd(values) {
+      const root = $("agents-md");root.replaceChildren();
+      if (!values.length) root.append(el("p","暂无指令条目","note"));
+      values.forEach((value,index)=>{
+        const row = el("div",undefined,"field-wrap");
+        const label = el("label","指令条目 " + (index + 1),"field");
+        const input = el("textarea");input.id = "agents-md-" + index;label.htmlFor = input.id;
+        input.className = "full";input.rows = 4;input.maxLength = 32000;
+        input.dataset.agentsMd = "true";input.value = value;input.disabled = formMode === "view";
+        const remove = el("button","移除条目","btn btn-sm");remove.type = "button";
+        remove.dataset.agentsMdAction = "true";remove.disabled = formMode === "view" || busy || !token;
+        remove.addEventListener("click",()=>{
+          if (formMode === "view" || busy || !token) return;
+          renderAgentsMd(agentsMdValues().filter((_,i)=>i !== index));
+        });
+        row.append(label,input,remove);root.append(row);
+      });
+      $("add-agents-md").disabled = formMode === "view" || busy || !token;
     }
     function renderChoices(c) {
       checkboxGroup("tools",toolNames.map(s=>({value:s,label:s})),c.tools || []);
@@ -366,7 +389,7 @@ fetch"></textarea></div>
       draft = structuredClone(c);
       formMode = mode;
       setField("name",c.name);setField("prompt",c.systemPrompt);
-      setField("agents-md",(c.agentsMd || []).join("\n"));
+      renderAgentsMd(c.agentsMd || []);
       setField("provider",c.model.provider);setField("model",c.model.modelId);
       setField("bundle",c.skillBundle);setField("steps",c.maxSteps);
       setField("tokens",c.maxTokens);setField("timeout",c.timeoutSeconds);
@@ -449,6 +472,8 @@ fetch"></textarea></div>
       $("new").disabled = value || !token;
       $("publish").disabled = value || !token || formMode === "view";
       $("clone").disabled = value || !token || !selected;
+      $("add-agents-md").disabled = value || !token || formMode === "view";
+      for (const button of $("agents-md").querySelectorAll("button")) button.disabled = value || !token || formMode === "view";
       $("toggle").disabled = value || !token || !selected;
       $("save-access").disabled = value || !token || !selected;
       for (const id of ["refresh-console","register-skill","register-mcp","save-defaults"]) $(id).disabled = value || !token;
@@ -475,6 +500,10 @@ fetch"></textarea></div>
     });
     $("disconnect").addEventListener("click",()=>{
       endConnection();notify("已断开，令牌已从页面状态中清除。");
+    });
+    $("add-agents-md").addEventListener("click",()=>{
+      if (formMode === "view" || busy || !token) return;
+      renderAgentsMd([...agentsMdValues(),""]);
     });
     $("new").addEventListener("click",newDraft);
     $("search").addEventListener("input",renderList);
@@ -585,16 +614,22 @@ fetch"></textarea></div>
         }
       }
       const deployment = configuration && configuration.deployment || {};
-      options("skill-bundle",deployment.bundles || []);options("mcp-endpoint",deployment.endpoints || []);options("default-bundle",deployment.bundles || []);
+      options("skill-bundle",deployment.bundles || []);options("mcp-endpoint",deployment.endpoints || []);
       options("provider-options",[...new Set((deployment.models || []).map(m=>m.provider))]);options("model-options",[...new Set((deployment.models || []).map(m=>m.modelId))]);
       const rows = $("deployment-settings");rows.replaceChildren();
       const policy = deployment.sandbox || {};
       const entries = [["当前租户",configuration && configuration.tenantId || "未连接"],["获批模型",(deployment.models || []).map(m=>m.provider + " / " + m.modelId).join("、") || (token ? "Demo / 自定义模型" : "—")],["可用 Bundles",(deployment.bundles || []).join("、") || "—"],["可用 Endpoints",(deployment.endpoints || []).join("、") || "—"],["每用户活跃 Sandbox",policy.maxActivePerUser],["全局活跃 Sandbox",policy.maxActiveTotal],["空闲暂停（秒）",policy.idlePauseSeconds],["空闲释放（秒）",policy.idleReleaseSeconds],["扫描间隔（秒）",policy.sweepIntervalSeconds],["每工作区快照上限",policy.maxSnapshotsPerWorkspace]];
       for (const [name,value] of entries) {const row = el("tr");row.append(el("td",name),el("td",value === undefined ? "—" : String(value)));rows.append(row);}
-      const d = configuration && configuration.agentDefaults || defaults;
-      setField("default-provider",d.model.provider);setField("default-model",d.model.modelId);setField("default-bundle",d.skillBundle);
-      for (const [field,key] of [["steps","maxSteps"],["tokens","maxTokens"],["timeout","timeoutSeconds"],["subagents","maxSubagents"],["depth","maxDepth"]]) setField("default-" + field,d[key]);
-      checkboxGroup("default-tools",toolNames.map(t=>({value:t,label:t})),d.tools || []);
+      // Preserve the live form across refreshes and unrelated mutations, including
+      // edits made while a request is pending. Reset only for a new connection/save.
+      if (!defaultsFormInitialized) {
+        options("default-bundle",deployment.bundles || []);
+        const d = configuration && configuration.agentDefaults || defaults;
+        setField("default-provider",d.model.provider);setField("default-model",d.model.modelId);setField("default-bundle",d.skillBundle);
+        for (const [field,key] of [["steps","maxSteps"],["tokens","maxTokens"],["timeout","timeoutSeconds"],["subagents","maxSubagents"],["depth","maxDepth"]]) setField("default-" + field,d[key]);
+        checkboxGroup("default-tools",toolNames.map(t=>({value:t,label:t})),d.tools || []);
+        defaultsFormInitialized = !!configuration;
+      }
       for (const input of $("default-tools").querySelectorAll("input")) input.disabled = !token || busy;
       const summary = $("delegation-summary");summary.replaceChildren();
       for (const [name,count] of [["Agent 版本",agents.length],["委派关系",agents.reduce((sum,a)=>sum + a.config.subagents.length,0)],["允许委派的父 Agent",agents.filter(a=>a.config.tools.includes("delegate_to_agent")).length]]) {
@@ -636,7 +671,7 @@ fetch"></textarea></div>
     $("defaults-form").addEventListener("submit",event=>{
       event.preventDefault();
       const d = {model:{provider:$("default-provider").value.trim(),modelId:$("default-model").value.trim()},skillBundle:$("default-bundle").value,tools:selectedValues("default-tools"),maxSteps:numberValue("default-steps"),maxTokens:numberValue("default-tokens"),timeoutSeconds:numberValue("default-timeout"),maxSubagents:numberValue("default-subagents"),maxDepth:numberValue("default-depth")};
-      return consoleMutation("/admin/configuration/defaults","PUT",d,"默认值已保存，将用于新建 Agent 草稿。",saved=>{configuration.agentDefaults = saved;});
+      return consoleMutation("/admin/configuration/defaults","PUT",d,"默认值已保存，将用于新建 Agent 草稿。",saved=>{configuration.agentDefaults = saved;defaultsFormInitialized = false;});
     });
     renderConsole();
     newDraft();

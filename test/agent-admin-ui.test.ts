@@ -51,6 +51,8 @@ test("unauthenticated access serves only the public UI shell, not admin APIs", a
 /** Small DOM adapter to execute the actual embedded controller without a browser dependency. */
 function consoleController(fetch: typeof globalThis.fetch) {
   class Element {
+    constructor(readonly tagName = "div") {}
+    checked = false;
     value = "";
     textContent = "";
     className = "";
@@ -61,7 +63,23 @@ function consoleController(fetch: typeof globalThis.fetch) {
     listeners = new Map<string, (event: { preventDefault(): void }) => unknown>();
     append(...children: Element[]) { this.children.push(...children); }
     replaceChildren() { this.children = []; }
-    querySelectorAll() { return []; }
+    querySelectorAll(selector: string): Element[] {
+      const descendants = this.children.flatMap(child => [child, ...child.querySelectorAll("*")]);
+      return descendants.filter(child => selector.split(",").some(part => {
+        const query = part.trim();
+        if (query === "*") return true;
+        const tag = query.match(/^[a-z]+/)?.[0];
+        if (tag && child.tagName !== tag) return false;
+        if (query.endsWith(":checked") && !child.checked) return false;
+        const attribute = query.match(/\[data-([a-z-]+)(?:="([^"]*)")?\]/);
+        if (attribute) {
+          const key = attribute[1]!.replace(/-([a-z])/g, (_, letter: string) => letter.toUpperCase());
+          if (!(key in child.dataset) || (attribute[2] !== undefined && child.dataset[key] !== attribute[2])) return false;
+        }
+        return true;
+      }));
+    }
+    setAttribute() {}
     addEventListener(name: string, callback: (event: { preventDefault(): void }) => unknown) {
       this.listeners.set(name, callback);
     }
@@ -76,7 +94,7 @@ function consoleController(fetch: typeof globalThis.fetch) {
   };
   const script = agentAdminHTML.match(/<script[^>]*>([\s\S]*?)<\/script>/)![1]!;
   new Script(script).runInNewContext({
-    document: { getElementById: get, createElement: () => new Element(), querySelectorAll: () => [] },
+    document: { getElementById: get, createElement: (tag: string) => new Element(tag), querySelectorAll: (selector: string) => [...elements.values()].flatMap(root => root.querySelectorAll(selector)) },
     fetch, AbortController, DOMException, structuredClone,
     window: { confirm: () => true },
   });
@@ -131,4 +149,75 @@ test("successful publish stays read-only when refresh fails and cannot be submit
   assert.equal(get("publish").disabled, true);
   await get("form").dispatch("submit");
   assert.equal(publications, 1);
+});
+
+
+test("clone/publish preserves Markdown entry boundaries, whitespace and empty entries", async () => {
+  for (const agentsMd of [
+    ["# Rules\n- Use TypeScript\n- Keep formatting", "  ```ts\n  const value = 1;\n  ```\n\n"],
+    [],
+    ["", "\n", "  indentation matters  "],
+  ]) {
+    const config = {
+      name:"Original",systemPrompt:"Test",agentsMd,model:{provider:"demo",modelId:"demo"},
+      tools:["read"],skills:[],mcpServers:[],subagents:[],skillBundle:"default",
+      maxSteps:30,maxTokens:100000,timeoutSeconds:600,maxSubagents:2,maxDepth:1,
+    };
+    const original = {id:"original",config,enabled:true,publishedAt:new Date().toISOString(),digest:"test"};
+    let published: typeof config | undefined;
+    const get = consoleController(async (url,options) => {
+      if (options?.method === "POST") {
+        published = JSON.parse(options.body as string);
+        return Response.json({...original,id:"clone",config:published});
+      }
+      return Response.json({items:String(url).includes("/admin/agents?") ? [original] : []});
+    });
+    get("token").value = "test-admin-token";
+    await get("connect").dispatch();
+    await get("list").children[0]!.dispatch();
+    assert.deepEqual(get("agents-md").querySelectorAll("textarea").map(input=>input.value),agentsMd);
+    assert.ok(get("agents-md").querySelectorAll("textarea").every(input=>input.disabled));
+    assert.equal(get("add-agents-md").disabled,true);
+    await get("clone").dispatch();
+    assert.ok(get("agents-md").querySelectorAll("textarea").every(input=>!input.disabled));
+    await get("form").dispatch("submit");
+    assert.deepEqual(published?.agentsMd,agentsMd);
+  }
+});
+
+test("defaults edits survive refresh and unrelated mutations, then reset on save/reconnect", async () => {
+  let saved = {
+    model:{provider:"demo",modelId:"demo"},tools:["read"],skillBundle:"default",
+    maxSteps:30,maxTokens:100000,timeoutSeconds:600,maxSubagents:2,maxDepth:1,
+  };
+  let failSave = true;
+  const skill = {id:"review@v1",name:"Review",description:"",bundle:"default",path:"/skills/review/SKILL.md",digest:"a".repeat(64),enabled:true};
+  const get = consoleController(async (url,options) => {
+    if (String(url).endsWith("/configuration/defaults")) {
+      if (failSave) return Response.json({error:{code:"INVALID_REQUEST"}},{status:400});
+      saved = JSON.parse(options!.body as string);return Response.json(saved);
+    }
+    if (options?.method === "PUT") {skill.enabled = !skill.enabled;return Response.json(skill);}
+    if (String(url).endsWith("/configuration")) return Response.json({agentDefaults:saved,deployment:{bundles:["default","other"],models:[],endpoints:[]}});
+    return Response.json({items:String(url).includes("/skills?") ? [skill] : []});
+  });
+  get("token").value = "test-admin-token";await get("connect").dispatch();
+  const edits = {"default-provider":"  enterprise  ","default-model":"coding","default-bundle":"other","default-steps":"51","default-tokens":"123456","default-timeout":"321","default-subagents":"4","default-depth":"3"};
+  for (const [id,value] of Object.entries(edits)) get(id).value = value;
+  const tools = get("default-tools").querySelectorAll("input");
+  for (const input of tools) input.checked = input.value === "bash";
+  const assertDraft = () => {
+    for (const [id,value] of Object.entries(edits)) assert.equal(get(id).value,value,id);
+    assert.deepEqual(get("default-tools").querySelectorAll("input:checked").map(input=>input.value),["bash"]);
+  };
+  await get("refresh-console").dispatch();assertDraft();
+  await get("skill-registry").querySelectorAll("button")[0]!.dispatch();assertDraft();
+  await get("defaults-form").dispatch("submit");assertDraft();assert.match(get("message").textContent,/操作失败/);
+  failSave = false;await get("defaults-form").dispatch("submit");
+  assert.equal(get("default-provider").value,"enterprise");assert.equal(saved.maxSteps,51);
+  assert.deepEqual(saved.tools,["bash"]);assert.equal(saved.skillBundle,"other");
+  get("default-steps").value = "99";
+  await get("disconnect").dispatch();
+  get("token").value = "test-admin-token";await get("connect").dispatch();
+  assert.equal(get("default-steps").value,"51");
 });
