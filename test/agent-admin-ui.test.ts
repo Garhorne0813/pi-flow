@@ -49,10 +49,11 @@ test("unauthenticated access serves only the public UI shell, not admin APIs", a
 });
 
 /** Small DOM adapter to execute the actual embedded controller without a browser dependency. */
-function consoleController(fetch: typeof globalThis.fetch) {
+function consoleController(fetch: typeof globalThis.fetch, confirm = () => true) {
   class Element {
     constructor(readonly tagName = "div") {}
     checked = false;
+    hidden = false;
     value = "";
     textContent = "";
     className = "";
@@ -96,7 +97,7 @@ function consoleController(fetch: typeof globalThis.fetch) {
   new Script(script).runInNewContext({
     document: { getElementById: get, createElement: (tag: string) => new Element(tag), querySelectorAll: (selector: string) => [...elements.values()].flatMap(root => root.querySelectorAll(selector)) },
     fetch, AbortController, DOMException, structuredClone,
-    window: { confirm: () => true },
+    window: { confirm },
   });
   return get;
 }
@@ -220,4 +221,59 @@ test("defaults edits survive refresh and unrelated mutations, then reset on save
   await get("disconnect").dispatch();
   get("token").value = "test-admin-token";await get("connect").dispatch();
   assert.equal(get("default-steps").value,"51");
+});
+
+test("clearing restricted users never broadens access; all-tenant transitions require confirmation", async () => {
+  let approve = false, confirmations = 0;
+  const changes: string[][] = [];
+  const version = {
+    id:"access-version",enabled:true,publishedAt:new Date().toISOString(),digest:"test",allowedUsers:["alice"],
+    config:{name:"Test",systemPrompt:"",agentsMd:[],model:{provider:"demo",modelId:"demo"},tools:[],skills:[],mcpServers:[],subagents:[],skillBundle:"default",maxSteps:30,maxTokens:100000,timeoutSeconds:600,maxSubagents:2,maxDepth:1},
+  };
+  const get = consoleController(async (url,options) => {
+    if (options?.method === "PUT") {
+      version.allowedUsers = JSON.parse(options.body as string).allowedUsers;
+      changes.push(version.allowedUsers);return Response.json({allowedUsers:version.allowedUsers});
+    }
+    return Response.json({items:String(url).includes("/agents?") ? [version] : []});
+  },()=>{confirmations++;return approve;});
+  get("token").value = "test-admin-token";await get("connect").dispatch();
+  await get("list").children[0]!.dispatch();
+  assert.equal(get("access-mode").value,"restricted");
+  get("allowed-users").value = "";await get("save-access").dispatch();
+  assert.equal(changes.length,0);assert.equal(confirmations,0);
+  assert.match(get("message").textContent,/至少需要一个用户/);
+  get("access-mode").value = "all";await get("access-mode").dispatch("change");
+  assert.equal(get("allowed-users").disabled,true);
+  await get("save-access").dispatch();assert.equal(changes.length,0);assert.equal(confirmations,1);
+  approve = true;await get("save-access").dispatch();assert.deepEqual(changes,[[]]);
+  get("access-mode").value = "restricted";await get("access-mode").dispatch("change");
+  assert.equal(get("allowed-users").disabled,false);
+  get("allowed-users").value = "bob\nbob";await get("save-access").dispatch();
+  assert.deepEqual(changes,[[],["bob"]]);
+});
+
+test("refresh updates pristine defaults and warns/preserves dirty drafts after another client's update", async () => {
+  let server = {model:{provider:"demo",modelId:"demo"},tools:["read"],skillBundle:"default",maxSteps:30,maxTokens:100000,timeoutSeconds:600,maxSubagents:2,maxDepth:1};
+  let saves=0, approve=true;
+  const get = consoleController(async (url,options) => {
+    if (options?.method === "PUT") {saves++;return Response.json(server);}
+    if (String(url).endsWith("/configuration")) return Response.json({agentDefaults:server,deployment:{bundles:["default"]}});
+    return Response.json({items:[]});
+  },()=>approve);
+  get("token").value = "test-admin-token";await get("connect").dispatch();
+  server = {...server,maxSteps:40,tools:["bash"]};await get("refresh-console").dispatch();
+  assert.equal(get("default-steps").value,"40");
+  assert.deepEqual(get("default-tools").querySelectorAll("input:checked").map(input=>input.value),["bash"]);
+  assert.equal(get("defaults-conflict").hidden,true);
+  get("default-steps").value = "51";
+  server = {...server,maxSteps:42};await get("refresh-console").dispatch();
+  assert.equal(get("default-steps").value,"51");assert.match(get("defaults-conflict").textContent,/其他管理员更新/);
+  approve=false;await get("defaults-form").dispatch("submit");assert.equal(saves,0);
+  await get("reload-defaults").dispatch();assert.equal(get("default-steps").value,"51");
+  approve=true;await get("reload-defaults").dispatch();assert.equal(get("default-steps").value,"42");
+  assert.equal(get("defaults-conflict").hidden,true);
+  // Editing and reverting is pristine again, so a subsequent refresh loads new server values.
+  get("default-steps").value="55";get("default-steps").value="42";
+  server={...server,maxSteps:43};await get("refresh-console").dispatch();assert.equal(get("default-steps").value,"43");
 });

@@ -130,7 +130,7 @@ export const agentAdminHTML = String.raw`<!doctype html>
           <div class="section">
             <h3>基本信息</h3>
             <div class="field-wrap"><label class="field" for="name">Agent 名称</label><input class="full" id="name" required maxlength="100" placeholder="例如：企业代码助手"></div>
-            <div class="field-wrap"><label class="field" for="prompt">System Prompt <small>定义角色、职责与行为边界</small></label><textarea class="full" id="prompt" required maxlength="32000" rows="6" placeholder="你是一位…"></textarea></div>
+            <div class="field-wrap"><label class="field" for="prompt">System Prompt <small>定义角色、职责与行为边界</small></label><textarea class="full" id="prompt" maxlength="32000" rows="6" placeholder="你是一位…"></textarea></div>
             <div class="field-wrap"><label class="field">AGENTS.md 指令 <small>每个条目可包含完整的多行 Markdown，按原样保存；不是文件路径。</small></label><div id="agents-md"></div><button id="add-agents-md" class="btn btn-sm" type="button" disabled>＋ 添加指令条目</button></div>
           </div>
           <div class="section">
@@ -181,7 +181,9 @@ export const agentAdminHTML = String.raw`<!doctype html>
             <div class="detail-row"><span>状态</span><strong id="enabled-label"></strong></div>
             <div class="detail-row"><span>摘要</span><strong><code id="digest"></code></strong></div>
             <div class="field-wrap" style="margin-top:24px">
-              <label class="field" for="allowed-users">允许访问的用户 ID <small>每行一个 UCS Subject，留空表示租户内所有用户可使用</small></label>
+              <label class="field" for="access-mode">访问范围</label>
+              <select id="access-mode" class="full"><option value="restricted">仅指定用户</option><option value="all">租户内所有用户</option></select>
+              <label class="field" for="allowed-users" style="margin-top:12px">允许访问的用户 ID <small>指定用户模式至少填写一个 UCS Subject，每行一个。拒绝所有用户访问请禁用版本。</small></label>
               <textarea class="full" id="allowed-users" rows="5"></textarea>
             </div>
             <div class="toolbar">
@@ -250,6 +252,8 @@ fetch"></textarea></div>
             <div class="field-wrap"><label class="field" for="default-subagents">子 Agent 上限</label><input id="default-subagents" class="full" required type="number" min="0" max="5"></div>
             <div class="field-wrap"><label class="field" for="default-depth">最大委派深度</label><input id="default-depth" class="full" required type="number" min="0" max="3"></div>
           </div>
+          <p id="defaults-conflict" class="note" role="status" aria-live="polite" hidden></p>
+          <button id="reload-defaults" class="btn" type="button" hidden disabled>放弃草稿并载入服务器默认值</button>
           <button id="save-defaults" class="btn primary" type="submit" disabled>保存默认值</button>
         </form></section>
       </div>
@@ -271,6 +275,7 @@ fetch"></textarea></div>
     let formMode = "new";
     let configuration = null;
     let defaultsFormInitialized = false;
+    let defaultsBaseline = "", defaultsServerBaseline = "", defaultsConflict = false;
     function notify(message, error) {
       $("message").textContent = message;
       $("message").className = "message " + (error ? "error" : "show");
@@ -426,7 +431,10 @@ fetch"></textarea></div>
       $("published-at").textContent = new Date(selected.publishedAt).toLocaleString();
       $("enabled-label").textContent = selected.enabled ? "已启用" : "已禁用";
       $("digest").textContent = (selected.digest || "").slice(0,16) + "…";
+      setField("access-mode",selected.allowedUsers && selected.allowedUsers.length ? "restricted" : "all");
       setField("allowed-users",(selected.allowedUsers || []).join("\n"));
+      $("allowed-users").disabled = $("access-mode").value === "all" || busy || !token;
+      $("access-mode").disabled = busy || !token;
       $("toggle").textContent = selected.enabled ? "禁用版本" : "启用版本";
       $("toggle").className = "btn btn-sm " + (selected.enabled ? "danger" : "primary");
       $("toggle").disabled = !token || busy;
@@ -476,6 +484,9 @@ fetch"></textarea></div>
       for (const button of $("agents-md").querySelectorAll("button")) button.disabled = value || !token || formMode === "view";
       $("toggle").disabled = value || !token || !selected;
       $("save-access").disabled = value || !token || !selected;
+      $("access-mode").disabled = value || !token || !selected;
+      $("allowed-users").disabled = value || !token || !selected || $("access-mode").value === "all";
+      $("reload-defaults").disabled = value || !token;
       for (const id of ["refresh-console","register-skill","register-mcp","save-defaults"]) $(id).disabled = value || !token;
       for (const button of document.querySelectorAll("button[data-admin-action]")) button.disabled = value || !token || button.dataset.disabledServer === "true";
       for (const input of $("default-tools").querySelectorAll("input")) input.disabled = value || !token;
@@ -528,10 +539,16 @@ fetch"></textarea></div>
       } catch(e) {if (session === connection) notify("发布失败：" + e.message,true);}
       finally {if (session === connection) setBusy(false);}
     });
+    $("access-mode").addEventListener("change",()=>{
+      $("allowed-users").disabled = $("access-mode").value === "all" || busy || !token;
+    });
     $("save-access").addEventListener("click",async()=>{
       if (!selected || !token || busy) return;
       const id = selected.id;
-      const allowedUsers = [...new Set($("allowed-users").value.split("\n").map(s=>s.trim()).filter(Boolean))];
+      const allUsers = $("access-mode").value === "all";
+      const allowedUsers = allUsers ? [] : [...new Set($("allowed-users").value.split("\n").map(s=>s.trim()).filter(Boolean))];
+      if (!allUsers && !allowedUsers.length) return notify("指定用户模式至少需要一个用户 ID。若要拒绝所有用户访问，请禁用版本。",true);
+      if (allUsers && selected.allowedUsers && selected.allowedUsers.length && !window.confirm("此操作将扩大访问范围，允许租户内所有用户使用该版本。确认继续？")) return;
       const session = connection;
       setBusy(true);
       try {
@@ -593,6 +610,12 @@ fetch"></textarea></div>
       } catch(e) {if (session === connection) notify("操作失败：" + e.message,true);}
       finally {if (session === connection) setBusy(false);}
     }
+    function collectDefaults() {
+      return {model:{provider:$("default-provider").value.trim(),modelId:$("default-model").value.trim()},skillBundle:$("default-bundle").value,tools:selectedValues("default-tools"),maxSteps:numberValue("default-steps"),maxTokens:numberValue("default-tokens"),timeoutSeconds:numberValue("default-timeout"),maxSubagents:numberValue("default-subagents"),maxDepth:numberValue("default-depth")};
+    }
+    function defaultsKey(d) {
+      return JSON.stringify({model:d.model,skillBundle:d.skillBundle,tools:[...(d.tools || [])].sort(),maxSteps:d.maxSteps,maxTokens:d.maxTokens,timeoutSeconds:d.timeoutSeconds,maxSubagents:d.maxSubagents,maxDepth:d.maxDepth});
+    }
     function renderConsole() {
       $("skill-count").textContent = String(skills.length);$("mcp-count").textContent = String(mcps.length);
       for (const [id,items,kind] of [["skill-registry",skills,"skills"],["mcp-registry",mcps,"mcp-servers"]]) {
@@ -620,16 +643,22 @@ fetch"></textarea></div>
       const policy = deployment.sandbox || {};
       const entries = [["当前租户",configuration && configuration.tenantId || "未连接"],["获批模型",(deployment.models || []).map(m=>m.provider + " / " + m.modelId).join("、") || (token ? "Demo / 自定义模型" : "—")],["可用 Bundles",(deployment.bundles || []).join("、") || "—"],["可用 Endpoints",(deployment.endpoints || []).join("、") || "—"],["每用户活跃 Sandbox",policy.maxActivePerUser],["全局活跃 Sandbox",policy.maxActiveTotal],["空闲暂停（秒）",policy.idlePauseSeconds],["空闲释放（秒）",policy.idleReleaseSeconds],["扫描间隔（秒）",policy.sweepIntervalSeconds],["每工作区快照上限",policy.maxSnapshotsPerWorkspace]];
       for (const [name,value] of entries) {const row = el("tr");row.append(el("td",name),el("td",value === undefined ? "—" : String(value)));rows.append(row);}
-      // Preserve the live form across refreshes and unrelated mutations, including
-      // edits made while a request is pending. Reset only for a new connection/save.
-      if (!defaultsFormInitialized) {
+      const serverDefaults = configuration && configuration.agentDefaults || defaults;
+      const dirty = defaultsFormInitialized && defaultsKey(collectDefaults()) !== defaultsBaseline;
+      defaultsConflict = dirty && defaultsKey(serverDefaults) !== defaultsServerBaseline;
+      if (!dirty) {
         options("default-bundle",deployment.bundles || []);
         const d = configuration && configuration.agentDefaults || defaults;
         setField("default-provider",d.model.provider);setField("default-model",d.model.modelId);setField("default-bundle",d.skillBundle);
         for (const [field,key] of [["steps","maxSteps"],["tokens","maxTokens"],["timeout","timeoutSeconds"],["subagents","maxSubagents"],["depth","maxDepth"]]) setField("default-" + field,d[key]);
         checkboxGroup("default-tools",toolNames.map(t=>({value:t,label:t})),d.tools || []);
         defaultsFormInitialized = !!configuration;
+        defaultsBaseline = defaultsKey(collectDefaults());
+        defaultsServerBaseline = defaultsKey(serverDefaults);
       }
+      $("defaults-conflict").hidden = !defaultsConflict;
+      $("defaults-conflict").textContent = defaultsConflict ? "服务器默认值已被其他管理员更新。当前草稿已保留；保存将覆盖服务器值，也可放弃草稿并载入新值。" : "";
+      $("reload-defaults").hidden = !defaultsConflict;
       for (const input of $("default-tools").querySelectorAll("input")) input.disabled = !token || busy;
       const summary = $("delegation-summary");summary.replaceChildren();
       for (const [name,count] of [["Agent 版本",agents.length],["委派关系",agents.reduce((sum,a)=>sum + a.config.subagents.length,0)],["允许委派的父 Agent",agents.filter(a=>a.config.tools.includes("delegate_to_agent")).length]]) {
@@ -668,9 +697,16 @@ fetch"></textarea></div>
       event.preventDefault();
       return consoleMutation("/admin/mcp-servers","POST",{id:$("mcp-id").value.trim(),endpointRef:$("mcp-endpoint").value,allowedTools:[...new Set($("mcp-tools").value.split("\n").map(s=>s.trim()).filter(Boolean))]},"MCP Server 已登记。",created=>{mcps.push(created);$("mcp-form").reset();});
     });
+    $("reload-defaults").addEventListener("click",()=>{
+      if (!token || busy) return;
+      if (!window.confirm("确认放弃未保存的草稿并载入服务器默认值？")) return;
+      defaultsFormInitialized = false;renderConsole();notify("已载入服务器默认值。");
+    });
     $("defaults-form").addEventListener("submit",event=>{
       event.preventDefault();
-      const d = {model:{provider:$("default-provider").value.trim(),modelId:$("default-model").value.trim()},skillBundle:$("default-bundle").value,tools:selectedValues("default-tools"),maxSteps:numberValue("default-steps"),maxTokens:numberValue("default-tokens"),timeoutSeconds:numberValue("default-timeout"),maxSubagents:numberValue("default-subagents"),maxDepth:numberValue("default-depth")};
+      if (!token || busy) return;
+      if (defaultsConflict && !window.confirm("服务器默认值已更新，确认用当前草稿覆盖服务器值？")) return;
+      const d = collectDefaults();
       return consoleMutation("/admin/configuration/defaults","PUT",d,"默认值已保存，将用于新建 Agent 草稿。",saved=>{configuration.agentDefaults = saved;defaultsFormInitialized = false;});
     });
     renderConsole();
