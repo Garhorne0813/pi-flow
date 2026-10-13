@@ -14,6 +14,7 @@ import {
   skillScope,
   validateSkillBindings,
   validateHostSkillSource,
+  DEFAULT_HOST_SKILL_ROOTS,
   type SkillVolume,
 } from "../adapters/skill-mounts.js";
 import { remoteScript } from "../adapters/remote-script.js";
@@ -27,7 +28,7 @@ export class CubeProvider implements SandboxProvider {
     private skillVolumes: Record<string, SkillVolume>,
     private user: string,
     private driver: string,
-    private hostSkillRoots: readonly string[] = [],
+    private hostSkillRoots: readonly string[] = DEFAULT_HOST_SKILL_ROOTS,
   ) {
     if (/^(root(?::|$)|0(?::|$))/.test(user) || !user)
       throw new Error("Cube execution user must be non-root");

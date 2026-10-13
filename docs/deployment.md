@@ -42,21 +42,21 @@ Cube templates need Python 3, Bash, a non-root execution user without passwordle
 
 Cube 模板需预装 Python 3、Bash，使用非 root 且无免密 sudo 的执行用户，并授予工作区写权限。模板 `/skills` 应为空，无预置共享技能或额外技能挂载。持久存储、资源限制和出口网络策略由 Cube 基础设施强制执行。`allowPublicTraffic=false` 限制入站访问，不代表出口隔离；需在目标集群验证，见 [联调记录](local-deployment.md)。
 
-Each skill version uses an independent immutable volume. Its root contains that skill's `SKILL.md`, scripts, and resources. Example `SKILL_VOLUMES_JSON`:
+Skills default to read-only `hostPath` mounts from independent immutable directories under `/data/agent-skills`. Each directory contains one version's `SKILL.md`, scripts, and resources. Configure each binding explicitly in `SKILL_VOLUMES_JSON` (the existing variable name is retained):
 
-每个技能版本使用独立不可变卷，根目录只包含该技能的 `SKILL.md`、脚本和资源。例如：
+技能默认通过 `hostPath` 只读挂载 `/data/agent-skills` 下的独立不可变目录，根目录只包含该技能版本的 `SKILL.md`、脚本和资源。每个绑定仍需在 `SKILL_VOLUMES_JSON` 中显式配置（保留现有变量名），例如：
 
 ```json
-{"review@v1":{"bundle":"default","path":"/skills/review/v1/SKILL.md","volume":"skill-review-v1"}}
+{"review@v1":{"bundle":"default","path":"/skills/review/v1/SKILL.md","hostPath":"/data/agent-skills/review"}}
 ```
 
-Register matching metadata through the admin API, then select `review@v1` in the agent's `skills`. Only selected volumes mount read-only. `SKILL_BUNDLES_JSON` defines authorization groups, not shared mount sources. Publishers must preserve volume immutability; manifest hashing cannot replace storage enforcement.
+Register matching metadata through the admin API, then select `review@v1` in the agent's `skills`. Only selected skill directories mount read-only. Explicit `volume` bindings remain supported, including mixed deployments. `SKILL_BUNDLES_JSON` defines authorization groups, not shared mount sources. Publishers must preserve skill source immutability; manifest hashing cannot replace storage enforcement.
 
-通过管理 API 登记一致的元数据，再在智能体 `skills` 中选择 `review@v1`。仅选定卷只读挂载。`SKILL_BUNDLES_JSON` 是授权分组，不是共享挂载源。发布者需保证卷不可变，清单哈希不能代替存储层约束。
+通过管理 API 登记一致的元数据，再在智能体 `skills` 中选择 `review@v1`。仅选定技能目录只读挂载，也可显式配置 `volume` 或混用两种后端。`SKILL_BUNDLES_JSON` 是授权分组，不是共享挂载源。发布者需保证技能源不可变，清单哈希不能代替存储层约束。
 
 ### Local host skills / Cubelet 宿主机技能目录
 
-`SKILL_VOLUMES_JSON` also accepts `hostPath` instead of `volume`. Exactly one backend is required for each ID. Host mode is opt-in through `SKILL_HOST_ROOTS_JSON` (default `[]`, denies all host sources); each source must be a strict descendant of an approved canonical absolute root. Duplicate/nested host sources are rejected at startup. Target conflicts are checked only within the selected Skill set, preserving existing Volume deployments where mutually exclusive Skills use the same target. Targets are always the parent of the registered `/skills/.../SKILL.md`; requests cannot specify sources or mount destinations.
+`SKILL_VOLUMES_JSON` uses `hostPath` in the default deployment example; explicit `volume` bindings remain supported. Exactly one backend is required for each ID. `SKILL_HOST_ROOTS_JSON` defaults to `["/data/agent-skills"]` when unset; an explicit list replaces this default, and `[]` denies all host sources. No skill bindings are generated automatically; each source must be a strict descendant of an approved canonical absolute root. Duplicate/nested host sources are rejected at startup. Target conflicts are checked only within the selected Skill set, preserving existing Volume deployments where mutually exclusive Skills use the same target. Targets are always the parent of the registered `/skills/.../SKILL.md`; requests cannot specify sources or mount destinations.
 
 Host mode requires **the same filesystem, at the same canonical absolute path, on every API/Worker and the eligible Cubelet nodes**. For a single machine this can be a local directory; containers must receive that directory at the same path, read-only in API/Worker containers. For remote nodes use shared storage at that path, not a copy of its files. A source unavailable to the control processes is rejected (`SKILL_HOST_SOURCE_UNSAFE`); this release does not support opaque node-local directories on remote Cubelets. The metadata protocol cannot attest a remote realpath, so trusting a local mirror would not safely enforce the source boundary. Source roots, ancestors and contents must be administrator-owned and unavailable for writes by API/Worker users, sandbox users or tenants. All symlinks and special files in host skill trees are rejected. The validator bounds each tree to 10,000 entries and uses asynchronous filesystem operations at startup, creation and before tools, so shared-storage I/O does not synchronously block the Worker event loop. Validation is not cached: source mutations must still be rejected before tools.
 

@@ -91,7 +91,7 @@ flowchart LR
     Worker[Worker] <--> DB
     Worker --> Pi[Pi runtime]
     Pi --> Gateway[模型网关]
-    API --> Cube[CubeSandbox / 工作区与技能卷]
+    API --> Cube[CubeSandbox / 工作区卷与宿主机技能]
     Worker --> Cube
     Worker --> MCP[Streamable HTTP MCP]
 ```
@@ -152,7 +152,7 @@ node --env-file=.env dist/main.js
 node --env-file=.env dist/worker-main.js
 ```
 
-API 与所有 Worker 必须使用相同数据库和能力策略。启动后，先通过管理 API 发布智能体，再创建会话。部署要求、技能卷、凭证和真实模型测试见 [部署文档](docs/deployment.md)。
+API 与所有 Worker 必须使用相同数据库和能力策略。启动后，先通过管理 API 发布智能体，再创建会话。部署要求、技能宿主机目录（默认）或卷、凭证和真实模型测试见 [部署文档](docs/deployment.md)。
 
 ## 当前状态与限制
 

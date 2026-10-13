@@ -16,7 +16,7 @@ flowchart LR
     Worker --> Pi[Pi runtime]
     Pi --> Gateway[Model gateway]
     Worker --> Manager
-    Manager --> Cube[CubeSandbox + workspace / skill volumes]
+    Manager --> Cube[CubeSandbox + workspace volumes / host skills]
     Worker --> MCP[Streamable HTTP MCP servers]
     API --> SSE[SSE replay]
     DB --> SSE
@@ -78,7 +78,7 @@ SSE ends at a terminal state or `WAITING_INPUT`. A response to an interaction re
 
 Pi's resource loader disables automatic local skill/extension discovery and default local file/shell tools. The Worker exposes remote tools and build-time interaction tools. Production file and shell execution happens inside CubeSandbox; UCS, model, and MCP credentials are not injected into that Sandbox.
 
-Each workspace mounts its own writable `/workspace` volume. `SKILL_VOLUMES_JSON` maps each selected skill version to an independent read-only volume and manifest path. Bundle names are tenant authorization groups. Tool access verifies manifest identity and SHA-256. Changing the authorized skill set rebuilds the instance after confirming the previous instance is killed, retaining the workspace volume.
+Each workspace mounts its own writable `/workspace` volume. `SKILL_VOLUMES_JSON` maps each selected skill version to an independent read-only host directory and manifest path by default; explicit volume bindings remain supported. `SKILL_HOST_ROOTS_JSON` defaults to `["/data/agent-skills"]`; an explicit list replaces it, and `[]` disables host sources. Bundle names are tenant authorization groups. Tool access verifies manifest identity and SHA-256. Changing the authorized skill set rebuilds the instance after confirming the previous instance is killed, retaining the workspace volume.
 
 File API requests use temporary instances with only the workspace volume. They consume owner/global capacity and require confirmed cleanup. Default policy permits three active instances per workspace owner within a tenant and 100 across the deployment; idle instances pause after 15 minutes and release after 24 hours, with Worker scans every minute.
 

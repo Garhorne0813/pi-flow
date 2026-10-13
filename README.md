@@ -91,7 +91,7 @@ flowchart LR
     Worker[Worker] <--> DB
     Worker --> Pi[Pi runtime]
     Pi --> Gateway[Model gateway]
-    API --> Cube[CubeSandbox / workspace and skill volumes]
+    API --> Cube[CubeSandbox / workspace volumes and host skills]
     Worker --> Cube
     Worker --> MCP[Streamable HTTP MCP]
 ```
@@ -152,7 +152,7 @@ node --env-file=.env dist/main.js
 node --env-file=.env dist/worker-main.js
 ```
 
-API and Workers must share the database and capability policies. After startup, publish an agent through the admin API before creating a session. Deployment requirements, skill volumes, credentials, and live-model checks are covered in [Deployment](docs/deployment.md).
+API and Workers must share the database and capability policies. After startup, publish an agent through the admin API before creating a session. Deployment requirements, skill host directories (default) or volumes, credentials, and live-model checks are covered in [Deployment](docs/deployment.md).
 
 ## Current status and limits
 

@@ -50,6 +50,45 @@ const decode = (cmd: string) =>
     args: Record<string, unknown>;
   };
 
+test("default host root permits skill directories, while explicit roots replace or disable it", () => {
+  const binding = {
+    bundle: a.bundle,
+    path: a.path,
+    hostPath: "/data/agent-skills/a",
+  };
+  const bindings = { [a.id]: binding };
+  validateSkillBindings(bindings);
+  const provider = new CubeProvider(bindings, "sandbox", "nfs");
+  assert.equal(typeof provider.scope("default", [a]), "string");
+  for (const hostPath of [
+    "/data/agent-skills",
+    "/data/agent-skills-sibling/a",
+    "/etc/a",
+  ])
+    assert.throws(
+      () => validateSkillBindings({ [a.id]: { ...binding, hostPath } }),
+      { code: "SKILL_HOST_PATH_DENIED" },
+    );
+  for (const roots of [[], ["/custom/skills"]]) {
+    assert.throws(() => validateSkillBindings(bindings, roots), {
+      code: "SKILL_HOST_PATH_DENIED",
+    });
+    assert.throws(() => new CubeProvider(bindings, "sandbox", "nfs", roots), {
+      code: "SKILL_HOST_PATH_DENIED",
+    });
+  }
+  const custom = {
+    [a.id]: { ...binding, hostPath: "/custom/skills/a" },
+  };
+  validateSkillBindings(custom, ["/custom/skills"]);
+  new CubeProvider(custom, "sandbox", "nfs", ["/custom/skills"]);
+  const volumes = {
+    [a.id]: { bundle: a.bundle, path: a.path, volume: "skill-a-v1" },
+  };
+  validateSkillBindings(volumes, []);
+  new CubeProvider(volumes, "sandbox", "nfs", []);
+});
+
 test("host schema and allowlist reject missing/ambiguous backends and non-canonical paths", (t) => {
   const root = source(t);
   const binding = { bundle: "default", path: a.path, hostPath: root + "/a" };

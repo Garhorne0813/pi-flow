@@ -16,7 +16,7 @@ flowchart LR
     Worker --> Pi[Pi 运行时]
     Pi --> Gateway[模型网关]
     Worker --> Manager
-    Manager --> Cube[CubeSandbox 与工作区 / 技能卷]
+    Manager --> Cube[CubeSandbox 与工作区卷 / 宿主机技能]
     Worker --> MCP[Streamable HTTP MCP 服务]
     API --> SSE[SSE 回放]
     DB --> SSE
@@ -78,7 +78,7 @@ Run 进入终态或 `WAITING_INPUT` 时结束 SSE。交互响应返回新 Run ID
 
 Pi ResourceLoader 禁用本地技能、扩展自动发现和默认本地文件/Shell 工具。Worker 显式提供远程工具及构建期交互工具。生产文件和 Shell 操作在 CubeSandbox 内执行，不向 Sandbox 注入 UCS、模型或 MCP 凭证。
 
-每个工作区挂载独立可写 `/workspace` 卷。`SKILL_VOLUMES_JSON` 将选定技能版本绑定到独立只读卷及清单路径，Bundle 是租户权限分组。工具访问校验清单身份与 SHA-256；授权技能集合变化时，先确认旧实例销毁，再保留工作区卷重建实例。
+每个工作区挂载独立可写 `/workspace` 卷。`SKILL_VOLUMES_JSON` 默认将选定技能版本绑定到独立只读宿主机目录及清单路径，也支持显式 Volume。`SKILL_HOST_ROOTS_JSON` 默认值为 `["/data/agent-skills"]`，显式列表替换默认值，`[]` 禁用 Host 源。Bundle 是租户权限分组。工具访问校验清单身份与 SHA-256；授权技能集合变化时，先确认旧实例销毁，再保留工作区卷重建实例。
 
 文件 API 使用仅挂载工作区卷的临时实例，计入 owner/全局容量，并需确认清理。默认每租户内工作区 owner 最多 3 个活跃实例，部署全局最多 100 个；空闲 15 分钟暂停、24 小时释放，由 Worker 每分钟扫描。
 

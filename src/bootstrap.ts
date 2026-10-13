@@ -2,6 +2,7 @@ import { z } from "zod";
 import {
   SkillVolumeSchema,
   HostSkillRootsSchema,
+  DEFAULT_HOST_SKILL_ROOTS,
   validateSkillBindings,
   validateHostSkillSource,
 } from "./adapters/skill-mounts.js";
@@ -53,7 +54,10 @@ export async function bootstrap() {
   if (!Object.keys(bundles).length)
     throw new Error("Skill bundle mapping required");
   const hostSkillRoots = HostSkillRootsSchema.parse(
-    JSON.parse(process.env.SKILL_HOST_ROOTS_JSON ?? "[]"),
+    JSON.parse(
+      process.env.SKILL_HOST_ROOTS_JSON ??
+        JSON.stringify(DEFAULT_HOST_SKILL_ROOTS),
+    ),
   );
   const skillVolumes = z
     .record(z.string(), SkillVolumeSchema)
