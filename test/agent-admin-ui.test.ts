@@ -32,7 +32,12 @@ test("unauthenticated access serves only the public UI shell, not admin APIs", a
     assert.equal(page.statusCode, 200);
     assert.match(page.headers["content-type"] as string, /text\/html/);
     assert.match(page.headers["cache-control"] as string, /no-store/);
-    assert.match(page.headers["content-security-policy"] as string, /frame-ancestors 'none'/);
+    const csp = page.headers["content-security-policy"] as string;
+    assert.match(csp, /frame-ancestors 'none'/);
+    assert.doesNotMatch(csp, /script-src 'unsafe-inline'/);
+    const nonce = csp.match(/script-src 'nonce-([^']+)'/)?.[1];
+    assert.ok(nonce, "each response must specify a script nonce");
+    assert.ok(page.body.includes('<script nonce="' + nonce + '">'));
     assert.match(page.body, /Agent 配置中心/);
 
     const data = await app.inject({ method: "GET", url: "/api/v1/admin/agents" });
