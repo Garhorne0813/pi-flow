@@ -8,6 +8,8 @@ Built on Pi, with CubeSandbox for remote execution. The current release is a **0
 
 ### Management console
 
+The Agent editor groups logical versions, separates configuration into keyboard-navigable panels, and shows a summary and diff before publication. Unsaved drafts are protected when navigating or changing connections. See the [delivery plan](docs/agent-console-roadmap.md) and [Studio isolation RFC](docs/agent-studio-rfc.md) for subsequent increments.
+
 After starting the API, open the [Management Console](http://127.0.0.1:8080/admin/ui) (`/admin/agents/ui` remains supported) and enter an administrator Bearer token.
 
 - **Agents**: publish immutable configurations, clone versions, select capabilities, and manage status and allowed users. Access scope is explicit: restricted mode requires at least one user, and widening access to all tenant users requires confirmation. Disable a version to deny everyone access.

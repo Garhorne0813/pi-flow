@@ -8,6 +8,8 @@ Pi-Flow 为智能体应用提供持久化工作区和会话。用户通过 REST 
 
 ### 管理控制台
 
+Agent 编辑器按逻辑 Agent 分组版本，使用支持键盘操作的配置标签页，发布前展示摘要与差异；切换 Agent 或连接时保护未保存草稿。后续增量见[交付计划](docs/agent-console-roadmap.md)和 [Studio 隔离 RFC](docs/agent-studio-rfc.md)。
+
 服务启动后访问 [管理控制台](http://127.0.0.1:8080/admin/ui)（兼容 `/admin/agents/ui`），输入管理员 Bearer Token 即可连接。
 
 - **Agents**：创建、查看、复制与发布不可变版本，选择工具、Skills、MCP 和子 Agent，管理启停和用户访问范围。指定用户模式至少填写一个用户；扩大到全租户访问需要确认。拒绝所有用户访问请禁用版本。
