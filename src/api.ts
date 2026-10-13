@@ -132,10 +132,13 @@ export function buildAPI(
     const a = actor(req);
     const deployment = service.adminConfiguration(a);
     reply.header("Cache-Control", "no-store");
-    const agentDefaults = await service.store.readMetadata(
+    const settings = await service.store.readMetadata(
       a.tenantId,
-      ["agentDefaults"],
-      (s) => s.agentDefaults,
+      ["agentDefaults", "defaultsRevision"],
+      (s) => ({
+        agentDefaults: s.agentDefaults,
+        defaultsRevision: s.defaultsRevision ?? 0,
+      }),
     );
     return {
       tenantId: a.tenantId,
@@ -145,7 +148,8 @@ export function buildAPI(
         editable: false,
         changesRequireRestart: true,
       },
-      agentDefaults: agentDefaults ?? {
+      defaultsRevision: settings.defaultsRevision,
+      agentDefaults: settings.agentDefaults ?? {
         model:
           deployment.models[0] ??
           (process.env.HARNESS_MODE === "demo"
@@ -165,7 +169,13 @@ export function buildAPI(
   app.put("/api/v1/admin/configuration/defaults", async (req) => {
     const a = actor(req);
     const deployment = service.adminConfiguration(a);
-    const defaults = AgentDefaults.parse(req.body);
+    const { expectedRevision, ...defaults } = AgentDefaults.extend({
+      expectedRevision: z
+        .number()
+        .int()
+        .min(0)
+        .max(Number.MAX_SAFE_INTEGER - 1),
+    }).parse(req.body);
     if (
       deployment.modelApprovalRequired &&
       !deployment.models.some(
@@ -178,9 +188,16 @@ export function buildAPI(
     if (!service.hasBundle(defaults.skillBundle, a.tenantId))
       throw new Fault(400, "UNKNOWN_SKILL_BUNDLE");
     return service.store.tx(a.tenantId, (s) => {
+      if ((s.defaultsRevision ?? 0) !== expectedRevision)
+        throw new Fault(
+          409,
+          "DEFAULTS_CONFLICT",
+          "Defaults were updated by another administrator",
+        );
       s.agentDefaults = defaults;
+      s.defaultsRevision = expectedRevision + 1;
       audit(s, a, "configuration.defaults", a.tenantId);
-      return defaults;
+      return { agentDefaults: defaults, defaultsRevision: s.defaultsRevision };
     });
   });
   app.post("/api/v1/admin/mcp-servers/:id/check", async (req) => {

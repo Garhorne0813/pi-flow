@@ -72,7 +72,7 @@ test("configuration is admin-only, filters tenant grants and stores isolated def
       method: "PUT",
       url: "/api/v1/admin/configuration/defaults",
       headers: { authorization: "admin" },
-      payload: defaults,
+      payload: { ...defaults, expectedRevision: 0 },
     });
     assert.equal(save.statusCode, 200);
     const after = (
@@ -123,7 +123,7 @@ test("defaults reject unapproved models, ungranted bundles and unknown deploymen
         method: "PUT",
         url: "/api/v1/admin/configuration/defaults",
         headers: { authorization: "admin" },
-        payload,
+        payload: { ...payload, expectedRevision: 0 },
       });
       assert.equal(response.statusCode, status);
       assert.equal(response.json().error.code, code);
@@ -134,7 +134,7 @@ test("defaults reject unapproved models, ungranted bundles and unknown deploymen
           method: "PUT",
           url: "/api/v1/admin/configuration/defaults",
           headers: { authorization: "user" },
-          payload: defaults,
+          payload: { ...defaults, expectedRevision: 0 },
         })
       ).statusCode,
       403,
@@ -316,6 +316,81 @@ test("registry changes are audited and registration retains strict tenant valida
     );
     assert.ok(actions.includes("skill.status"));
     assert.ok(actions.includes("mcp.status"));
+  } finally {
+    await app.close();
+  }
+});
+
+test("two administrators cannot overwrite stale defaults; concurrent writes compare revisions atomically", async () => {
+  const { app, store } = fixture();
+  const get = async () =>
+    (
+      await app.inject({
+        url: "/api/v1/admin/configuration",
+        headers: { authorization: "admin" },
+      })
+    ).json();
+  const save = (expectedRevision: number, maxSteps: number) =>
+    app.inject({
+      method: "PUT",
+      url: "/api/v1/admin/configuration/defaults",
+      headers: { authorization: "admin" },
+      payload: { ...defaults, expectedRevision, maxSteps },
+    });
+  try {
+    const [a, b] = await Promise.all([get(), get()]);
+    assert.equal(a.defaultsRevision, 0);
+    assert.equal(b.defaultsRevision, 0);
+    const first = await save(a.defaultsRevision, 41);
+    assert.equal(first.statusCode, 200);
+    assert.equal(first.json().defaultsRevision, 1);
+    const stale = await save(b.defaultsRevision, 42);
+    assert.equal(stale.statusCode, 409);
+    assert.equal(stale.json().error.code, "DEFAULTS_CONFLICT");
+    assert.equal((await get()).agentDefaults.maxSteps, 41);
+    assert.equal(
+      await store.read(
+        "one",
+        (s) =>
+          s.audit.filter((e) => e.action === "configuration.defaults").length,
+      ),
+      1,
+    );
+    assert.equal((await save(1, 42)).statusCode, 200);
+    const concurrent = await Promise.all([save(2, 43), save(2, 44)]);
+    assert.deepEqual(
+      concurrent.map((response) => response.statusCode).sort(),
+      [200, 409],
+    );
+    const final = await get();
+    assert.equal(final.defaultsRevision, 3);
+    assert.ok([43, 44].includes(final.agentDefaults.maxSteps));
+    const persisted = await store.read("one", (s) => metadata(s));
+    assert.equal(
+      snapshotState({ state: persisted, runs: [], sessions: [] })
+        .defaultsRevision,
+      3,
+    );
+    assert.equal(
+      (
+        await app.inject({
+          method: "PUT",
+          url: "/api/v1/admin/configuration/defaults",
+          headers: { authorization: "admin" },
+          payload: defaults,
+        })
+      ).statusCode,
+      400,
+    );
+    assert.equal(
+      (
+        await app.inject({
+          url: "/api/v1/admin/configuration",
+          headers: { authorization: "other" },
+        })
+      ).json().defaultsRevision,
+      0,
+    );
   } finally {
     await app.close();
   }

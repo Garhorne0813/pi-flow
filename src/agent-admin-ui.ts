@@ -275,7 +275,7 @@ fetch"></textarea></div>
     let formMode = "new";
     let configuration = null;
     let defaultsFormInitialized = false;
-    let defaultsBaseline = "", defaultsServerBaseline = "", defaultsConflict = false;
+    let defaultsBaseline = "", defaultsServerBaseline = "", defaultsConflict = false, defaultsExpectedRevision = 0;
     function notify(message, error) {
       $("message").textContent = message;
       $("message").className = "message " + (error ? "error" : "show");
@@ -308,7 +308,8 @@ fetch"></textarea></div>
       current(session);
       if (!response.ok) {
         const err = data.error || {};
-        throw new Error((err.code || "HTTP_" + response.status) + ": " + (err.message || response.statusText));
+        const error = new Error((err.code || "HTTP_" + response.status) + ": " + (err.message || response.statusText));
+        error.code = err.code;error.status = response.status;throw error;
       }
       return data;
     }
@@ -465,9 +466,9 @@ fetch"></textarea></div>
       else if (selected && agents.some(v=>v.id === selected.id)) selectAgent(agents.find(v=>v.id === selected.id));
       else newDraft();
     }
-    async function refreshAfterMutation(message, id, session) {
+    async function refreshAfterMutation(message, id, session, preserveDraft = false) {
       try {
-        await refresh(id, session);
+        await refresh(id, session, preserveDraft);
         notify(message);
       } catch(e) {
         if (session !== connection) return;
@@ -645,7 +646,7 @@ fetch"></textarea></div>
       for (const [name,value] of entries) {const row = el("tr");row.append(el("td",name),el("td",value === undefined ? "—" : String(value)));rows.append(row);}
       const serverDefaults = configuration && configuration.agentDefaults || defaults;
       const dirty = defaultsFormInitialized && defaultsKey(collectDefaults()) !== defaultsBaseline;
-      defaultsConflict = dirty && defaultsKey(serverDefaults) !== defaultsServerBaseline;
+      defaultsConflict = dirty && (defaultsKey(serverDefaults) !== defaultsServerBaseline || (configuration && configuration.defaultsRevision || 0) !== defaultsExpectedRevision);
       if (!dirty) {
         options("default-bundle",deployment.bundles || []);
         const d = configuration && configuration.agentDefaults || defaults;
@@ -655,6 +656,7 @@ fetch"></textarea></div>
         defaultsFormInitialized = !!configuration;
         defaultsBaseline = defaultsKey(collectDefaults());
         defaultsServerBaseline = defaultsKey(serverDefaults);
+        defaultsExpectedRevision = configuration && configuration.defaultsRevision || 0;
       }
       $("defaults-conflict").hidden = !defaultsConflict;
       $("defaults-conflict").textContent = defaultsConflict ? "服务器默认值已被其他管理员更新。当前草稿已保留；保存将覆盖服务器值，也可放弃草稿并载入新值。" : "";
@@ -702,12 +704,30 @@ fetch"></textarea></div>
       if (!window.confirm("确认放弃未保存的草稿并载入服务器默认值？")) return;
       defaultsFormInitialized = false;renderConsole();notify("已载入服务器默认值。");
     });
-    $("defaults-form").addEventListener("submit",event=>{
+    $("defaults-form").addEventListener("submit",async event=>{
       event.preventDefault();
       if (!token || busy) return;
       if (defaultsConflict && !window.confirm("服务器默认值已更新，确认用当前草稿覆盖服务器值？")) return;
-      const d = collectDefaults();
-      return consoleMutation("/admin/configuration/defaults","PUT",d,"默认值已保存，将用于新建 Agent 草稿。",saved=>{configuration.agentDefaults = saved;defaultsFormInitialized = false;});
+      const expectedRevision = defaultsConflict ? configuration.defaultsRevision : defaultsExpectedRevision;
+      const d = {...collectDefaults(),expectedRevision};
+      const session = connection;setBusy(true);
+      try {
+        const saved = await api("/admin/configuration/defaults","PUT",d,session);
+        configuration.agentDefaults = saved.agentDefaults;configuration.defaultsRevision = saved.defaultsRevision;
+        defaultsFormInitialized = false;renderConsole();
+        await refreshAfterMutation("默认值已保存，将用于新建 Agent 草稿。",undefined,session,true);
+      } catch(e) {
+        if (session !== connection) return;
+        if (e.status === 409 && e.code === "DEFAULTS_CONFLICT") {
+          try {
+            configuration = await api("/admin/configuration",undefined,undefined,session);
+            renderConsole();
+            notify("保存冲突：服务器默认值已更新，本次未写入。草稿已保留，可重新载入或确认后重试。",true);
+          } catch(refreshError) {
+            if (session === connection) notify("保存冲突：本次未写入。读取最新配置失败，请刷新数据后重试。",true);
+          }
+        } else notify("操作失败：" + e.message,true);
+      } finally {if (session === connection) setBusy(false);}
     });
     renderConsole();
     newDraft();

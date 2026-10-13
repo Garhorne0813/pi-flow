@@ -196,7 +196,7 @@ test("defaults edits survive refresh and unrelated mutations, then reset on save
   const get = consoleController(async (url,options) => {
     if (String(url).endsWith("/configuration/defaults")) {
       if (failSave) return Response.json({error:{code:"INVALID_REQUEST"}},{status:400});
-      saved = JSON.parse(options!.body as string);return Response.json(saved);
+      const {expectedRevision,...value} = JSON.parse(options!.body as string);saved = value;return Response.json({agentDefaults:saved,defaultsRevision:expectedRevision+1});
     }
     if (options?.method === "PUT") {skill.enabled = !skill.enabled;return Response.json(skill);}
     if (String(url).endsWith("/configuration")) return Response.json({agentDefaults:saved,deployment:{bundles:["default","other"],models:[],endpoints:[]}});
@@ -276,4 +276,32 @@ test("refresh updates pristine defaults and warns/preserves dirty drafts after a
   // Editing and reverting is pristine again, so a subsequent refresh loads new server values.
   get("default-steps").value="55";get("default-steps").value="42";
   server={...server,maxSteps:43};await get("refresh-console").dispatch();assert.equal(get("default-steps").value,"43");
+});
+
+test("stale defaults save returns conflict without overwriting, preserves draft and requires explicit revision-aware retry", async () => {
+  let revision=0, approve=true;
+  let server = {model:{provider:"demo",modelId:"demo"},tools:["read"],skillBundle:"default",maxSteps:30,maxTokens:100000,timeoutSeconds:600,maxSubagents:2,maxDepth:1};
+  const attempts:number[]=[];
+  const get = consoleController(async (url,options) => {
+    if (options?.method === "PUT") {
+      const {expectedRevision,...value} = JSON.parse(options.body as string);attempts.push(expectedRevision);
+      if (expectedRevision !== revision) return Response.json({error:{code:"DEFAULTS_CONFLICT"}},{status:409});
+      server=value;revision++;return Response.json({agentDefaults:server,defaultsRevision:revision});
+    }
+    if (String(url).endsWith("/configuration")) return Response.json({agentDefaults:server,defaultsRevision:revision,deployment:{bundles:["default"]}});
+    return Response.json({items:[]});
+  },()=>approve);
+  get("token").value="test-admin-token";await get("connect").dispatch();get("default-steps").value="51";
+  // Another client saves while this page has not refreshed.
+  server={...server,maxSteps:42};revision=1;
+  await get("defaults-form").dispatch("submit");
+  assert.deepEqual(attempts,[0]);assert.equal(server.maxSteps,42);assert.equal(get("default-steps").value,"51");
+  assert.equal(get("defaults-conflict").hidden,false);assert.match(get("message").textContent,/保存冲突/);
+  approve=false;await get("defaults-form").dispatch("submit");assert.deepEqual(attempts,[0]);
+  // Yet another write between conflict discovery and confirmed retry must also be rejected.
+  approve=true;revision=2;server={...server,maxSteps:43};await get("defaults-form").dispatch("submit");
+  assert.deepEqual(attempts,[0,1]);assert.equal(server.maxSteps,43);assert.equal(get("default-steps").value,"51");
+  await get("defaults-form").dispatch("submit");
+  assert.deepEqual(attempts,[0,1,2]);assert.equal(server.maxSteps,51);assert.equal(revision,3);
+  assert.equal(get("defaults-conflict").hidden,true);assert.match(get("message").textContent,/默认值已保存/);
 });

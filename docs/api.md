@@ -204,14 +204,15 @@ Agent `mcpServers` 最多 16 项。Worker 将 Run 的 AbortSignal 与 deadline �
 
 | 方法 / 路径 | 行为 |
 | --- | --- |
-| `GET /api/v1/admin/configuration` | 返回租户 ID、获批模型、获授权 Bundle / Endpoint 名称、只读 Sandbox 策略与新 Agent 默认值；不返回密钥或 Endpoint URL |
-| `PUT /api/v1/admin/configuration/defaults` | 保存当前租户的新草稿默认值；模型和 Bundle 必须符合部署授权；不影响已有 Agent / Session |
+| `GET /api/v1/admin/configuration` | 返回 `defaultsRevision`、租户 ID、获批模型、获授权 Bundle / Endpoint 名称、只读 Sandbox 策略与新 Agent 默认值；不返回密钥或 Endpoint URL |
+| `PUT /api/v1/admin/configuration/defaults` | 保存当前租户的新草稿默认值；必须携带 GET 返回的 `expectedRevision`，事务内校验，不匹配返回 `409 DEFAULTS_CONFLICT`；不影响已有 Agent / Session |
 | `POST /api/v1/admin/mcp-servers/:id/check` | 请求体 `{}`；检查已启用且获授权的服务，执行工具发现，返回 `{status, tools: [{name, description}], checkedAt}`；不调用工具，总时限 10 秒 |
 
 默认值请求体示例：
 
 ```json
 {
+  "expectedRevision": 0,
   "model": { "provider": "enterprise", "modelId": "coding-model" },
   "tools": ["read", "ls", "grep", "find"],
   "skillBundle": "default",
@@ -224,3 +225,5 @@ Agent `mcpServers` 最多 16 项。Worker 将 Run 的 AbortSignal 与 deadline �
 ```
 
 默认值使用 AgentConfig 的相同字段限制，拒绝未知字段；生产保存到租户元数据，Demo 保存在内存。部署设置由服务端管理，修改后重启相关进程。Skill / MCP 登记及启停复用现有 API，所有变更进入审计记录。Skill 版本不可变，MCP 检查沿用服务器凭证、HTTPS、租户授权与工具白名单。
+
+默认值保存成功返回 `{agentDefaults, defaultsRevision}`，修订号递增。旧数据的初始修订号为 0；未提供 `expectedRevision` 返回 400。客户端收到 409 后需重新读取最新配置，保留草稿，并由管理员明确选择重新载入或使用最新修订号重试；重复并发冲突仍返回 409，不自动覆盖。
