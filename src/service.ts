@@ -493,6 +493,17 @@ export class HarnessService {
       return next;
     });
   }
+  adminConfiguration(a: Actor) {
+    admin(a);
+    return {
+      models: this.models ?? [],
+      bundles: this.bundleRefs.filter((ref) => this.hasBundle(ref, a.tenantId)),
+      endpoints: this.endpointRefs.filter((ref) =>
+        this.hasEndpoint(ref, a.tenantId),
+      ),
+      modelApprovalRequired: this.models !== undefined,
+    };
+  }
   hasEndpoint(ref: string, tenant?: string) {
     return (
       this.endpointRefs.includes(ref) &&

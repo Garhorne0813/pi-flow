@@ -1,6 +1,6 @@
 # HTTP / SSE API
 
-Base: `/api/v1`。除 `/health` 外，所有请求必须提供 `Authorization: Bearer <UCS JWT>`；Demo 使用 `DEV_TOKEN`。Tenant 只来自认证后的声明。所有 JSON 请求采用严格字段校验。错误形如：
+Base: `/api/v1`。除健康检查端点和控制台入口 `GET /admin/ui`、仅返回静态 HTML 的 `GET /admin/agents/ui` 外，所有 API 请求必须提供 `Authorization: Bearer <UCS JWT>`；Demo 使用 `DEV_TOKEN`。Agent 管理页面在同源路径 `/admin/agents/ui`，页面通过浏览器内存中的管理员 Bearer Token 调用 `/api/v1/admin/*`，不将令牌保存到 URL 或浏览器存储。Tenant 只来自认证后的声明。所有 JSON 请求采用严格字段校验。错误形如：
 
 ```json
 {
@@ -222,3 +222,34 @@ Agent `mcpServers` 最多 16 项。Worker 将 Run 的 AbortSignal 与 deadline �
 Run 查询、任务提交（含幂等重试）、交互续跑和取消响应统一使用公开字段白名单，只返回任务/版本身份、状态、计数和时间等执行元数据。它们不返回 capabilities、systemPrompt、agentsMd、模型/Tools/Skills/MCP 配置、actor、lease 或其他内部字段。Workspace 成员可按原有权限查询执行状态，不因此获得 Agent 配置；配置查询仍通过逻辑 Agent ACL 授权。
 
 等待任务的权限失效包含 WORKSPACE_NOT_FOUND（成员被移除）和 READ_ONLY（降级 viewer）。有未释放 checkpoint 租约的等待 Run 仍不提前失效；新任务返回原有兼容性错误，租约释放后重试即可自动清理被撤销的旧等待任务。
+## 管理控制台
+
+`GET /admin/ui` 重定向到 `GET /admin/agents/ui`。HTML 外壳公开；下列 API 均要求管理员身份，数据限制在认证后的 Tenant 内。
+
+| 方法 / 路径 | 行为 |
+| --- | --- |
+| `GET /api/v1/admin/configuration` | 返回 `defaultsRevision`、租户 ID、获批模型、获授权 Bundle / Endpoint 名称、只读 Sandbox 策略与新 Agent 默认值；不返回密钥或 Endpoint URL |
+| `PUT /api/v1/admin/configuration/defaults` | 保存当前租户的新草稿默认值；必须携带 GET 返回的 `expectedRevision`，事务内校验，不匹配返回 `409 DEFAULTS_CONFLICT`；不影响已有 Agent / Session |
+| `POST /api/v1/admin/mcp-servers/:id/check` | 请求体 `{}`；检查已启用且获授权的服务，执行工具发现，返回 `{status, tools: [{name, description}], checkedAt}`；不调用工具，总时限 10 秒 |
+
+默认值请求体示例：
+
+```json
+{
+  "expectedRevision": 0,
+  "model": { "provider": "enterprise", "modelId": "coding-model" },
+  "tools": ["read", "ls", "grep", "find"],
+  "skillBundle": "default",
+  "maxSteps": 30,
+  "maxTokens": 100000,
+  "timeoutSeconds": 600,
+  "maxSubagents": 2,
+  "maxDepth": 1
+}
+```
+
+默认值使用 AgentConfig 的相同字段限制，拒绝未知字段；生产保存到租户元数据，Demo 保存在内存。部署设置由服务端管理，修改后重启相关进程。Skill / MCP 登记及启停复用现有 API，所有变更进入审计记录。Skill 版本不可变，MCP 检查沿用服务器凭证、HTTPS、租户授权与工具白名单。
+
+默认值保存成功返回 `{agentDefaults, defaultsRevision}`，修订号递增。旧数据的初始修订号为 0；未提供 `expectedRevision` 返回 400。客户端收到 409 后需重新读取最新配置，保留草稿，并由管理员明确选择重新载入或使用最新修订号重试；重复并发冲突仍返回 409，不自动覆盖。
+
+管理控制台按逻辑 Agent 显示版本身份和生效状态；“发布后续版本”调用 `/admin/agents/{agentId}/versions`，“激活此版本”调用 `/admin/agents/{agentId}/active-version`。管理员版本列表额外返回 `agentId`、`activeVersionId` 和当前逻辑 Agent 的 `allowedUsers`，不使用历史 ACL 快照。控制台权限保存调用 `/admin/logical-agents/{agentId}/access`。
