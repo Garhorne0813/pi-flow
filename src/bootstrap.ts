@@ -175,5 +175,5 @@ export async function bootstrap() {
         };
       }
     });
-  return { store, service, sandbox, worker };
+  return { store, service, sandbox, worker, mcp };
 }
