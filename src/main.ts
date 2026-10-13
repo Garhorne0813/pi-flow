@@ -4,7 +4,7 @@ import { buildAPI } from "./api.js";
 import { authFromEnv } from "./auth.js";
 const auth = authFromEnv();
 const context = await bootstrap();
-const app = buildAPI(context.service, auth, context.sandbox);
+const app = buildAPI(context.service, auth, context.sandbox, context.mcp);
 const inline =
   process.env.HARNESS_MODE === "demo" || process.env.INLINE_WORKER === "true";
 let loop: Promise<void> | undefined;

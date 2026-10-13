@@ -49,6 +49,17 @@ export const AgentConfig = z
   })
   .strict();
 export type AgentConfig = z.infer<typeof AgentConfig>;
+export const AgentDefaults = AgentConfig.pick({
+  model: true,
+  tools: true,
+  skillBundle: true,
+  maxTokens: true,
+  maxSteps: true,
+  timeoutSeconds: true,
+  maxSubagents: true,
+  maxDepth: true,
+});
+export type AgentDefaults = z.infer<typeof AgentDefaults>;
 export type AgentVersion = {
   id: string;
   config: AgentConfig;
@@ -172,6 +183,8 @@ export type Audit = {
   result: string;
 };
 export type State = {
+  agentDefaults?: AgentDefaults;
+  defaultsRevision?: number;
   usage?: import("./usage.js").UsageState;
   agents: Record<string, AgentVersion>;
   workspaces: Record<string, Workspace>;

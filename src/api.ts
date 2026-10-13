@@ -1,4 +1,6 @@
 import { alerts } from "./alerts.js";
+import { agentAdminHTML } from "./agent-admin-ui.js";
+import { randomBytes } from "node:crypto";
 import Fastify from "fastify";
 import { usageReport, policyFromEnv } from "./usage.js";
 import { telemetry, traceContext } from "./telemetry.js";
@@ -6,6 +8,8 @@ import { bounded } from "./health.js";
 import { z } from "zod";
 import {
   Fault,
+  AgentDefaults,
+  AgentConfig,
   id,
   admin,
   agentAllowed,
@@ -18,6 +22,7 @@ import {
 import type { Auth } from "./auth.js";
 import type { HarnessService } from "./service.js";
 import type { SandboxManager } from "./adapters/sandbox.js";
+import type { MCPManager } from "./adapters/mcp.js";
 const uuid = z.string().uuid();
 const filePath = z
   .string()
@@ -41,6 +46,7 @@ export function buildAPI(
   service: HarnessService,
   auth: Auth,
   sandbox: SandboxManager,
+  mcp?: MCPManager,
 ) {
   const app = Fastify({
     logger: {
@@ -79,6 +85,12 @@ export function buildAPI(
   });
   app.addHook("onRequest", async (req, reply) => {
     reply.header("X-Request-ID", req.id);
+    // Only the static shell is public; all data and mutations still require admin auth.
+    if (
+      req.method === "GET" &&
+      ["/admin/agents/ui", "/admin/ui"].includes(req.url.split("?")[0]!)
+    )
+      return;
     if (
       ["/health", "/health/live", "/health/ready"].includes(
         req.url.split("?")[0]!,
@@ -100,6 +112,135 @@ export function buildAPI(
       });
   });
   app.get("/health", async () => ({ status: "ok" }));
+  app.get("/admin/ui", async (_req, reply) =>
+    reply.redirect("/admin/agents/ui"),
+  );
+  app.get("/admin/agents/ui", async (_req, reply) => {
+    const nonce = randomBytes(16).toString("base64");
+    return reply
+      .header("Cache-Control", "no-store")
+      .header("X-Content-Type-Options", "nosniff")
+      .header("Referrer-Policy", "no-referrer")
+      .header(
+        "Content-Security-Policy",
+        `default-src 'none'; script-src 'nonce-${nonce}'; style-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`,
+      )
+      .type("text/html; charset=utf-8")
+      .send(agentAdminHTML.replace("__AGENT_UI_NONCE__", nonce));
+  });
+  app.get("/api/v1/admin/configuration", async (req, reply) => {
+    const a = actor(req);
+    const deployment = service.adminConfiguration(a);
+    reply.header("Cache-Control", "no-store");
+    const settings = await service.store.readMetadata(
+      a.tenantId,
+      ["agentDefaults", "defaultsRevision"],
+      (s) => ({
+        agentDefaults: s.agentDefaults,
+        defaultsRevision: s.defaultsRevision ?? 0,
+      }),
+    );
+    return {
+      tenantId: a.tenantId,
+      deployment: {
+        ...deployment,
+        sandbox: sandbox.policy,
+        editable: false,
+        changesRequireRestart: true,
+      },
+      defaultsRevision: settings.defaultsRevision,
+      agentDefaults: settings.agentDefaults ?? {
+        model:
+          deployment.models[0] ??
+          (process.env.HARNESS_MODE === "demo"
+            ? { provider: "demo", modelId: "demo" }
+            : { provider: "", modelId: "" }),
+        tools: ["read", "ls", "grep", "find"],
+        skillBundle: deployment.bundles[0] ?? "",
+        maxSteps: 30,
+        maxTokens: 100000,
+        timeoutSeconds: 600,
+        maxSubagents: 2,
+        maxDepth: 1,
+      },
+      defaultsScope: "tenant-new-agent-drafts",
+    };
+  });
+  app.put("/api/v1/admin/configuration/defaults", async (req) => {
+    const a = actor(req);
+    const deployment = service.adminConfiguration(a);
+    const { expectedRevision, ...defaults } = AgentDefaults.extend({
+      expectedRevision: z
+        .number()
+        .int()
+        .min(0)
+        .max(Number.MAX_SAFE_INTEGER - 1),
+    }).parse(req.body);
+    if (
+      deployment.modelApprovalRequired &&
+      !deployment.models.some(
+        (m) =>
+          m.provider === defaults.model.provider &&
+          m.modelId === defaults.model.modelId,
+      )
+    )
+      throw new Fault(403, "MODEL_NOT_APPROVED");
+    if (!service.hasBundle(defaults.skillBundle, a.tenantId))
+      throw new Fault(400, "UNKNOWN_SKILL_BUNDLE");
+    return service.store.tx(a.tenantId, (s) => {
+      if ((s.defaultsRevision ?? 0) !== expectedRevision)
+        throw new Fault(
+          409,
+          "DEFAULTS_CONFLICT",
+          "Defaults were updated by another administrator",
+        );
+      s.agentDefaults = defaults;
+      s.defaultsRevision = expectedRevision + 1;
+      audit(s, a, "configuration.defaults", a.tenantId);
+      return { agentDefaults: defaults, defaultsRevision: s.defaultsRevision };
+    });
+  });
+  app.post("/api/v1/admin/mcp-servers/:id/check", async (req) => {
+    const a = actor(req);
+    admin(a);
+    z.object({})
+      .strict()
+      .parse(req.body ?? {});
+    const key = params(req.params).id!;
+    const reg = await service.store.readMetadata(
+      a.tenantId,
+      ["mcp"],
+      (s) => s.mcp[key],
+    );
+    if (!reg) throw new Fault(404, "MCP_NOT_FOUND");
+    if (!reg.enabled) throw new Fault(403, "MCP_DISABLED");
+    if (!service.hasEndpoint(reg.endpointRef, a.tenantId))
+      throw new Fault(403, "MCP_ENDPOINT_NOT_GRANTED");
+    if (!mcp) throw new Fault(503, "MCP_CHECK_UNAVAILABLE");
+    // Discovery only: no tool execution. Existing MCP transport enforces HTTPS,
+    // server-side credentials, grants, whitelists, pagination and a total deadline.
+    const result = await mcp.discover(
+      a,
+      AgentConfig.parse({
+        name: "connection-check",
+        systemPrompt: "",
+        model: { provider: "check", modelId: "check" },
+        tools: [],
+        skillBundle: "check",
+        mcpServers: [key],
+      }),
+      undefined,
+      Date.now() + 10000,
+    );
+    return {
+      status: "ok",
+      tools: result.specs.map((t) => ({
+        name: t.name,
+        description: t.description,
+      })),
+      checkedAt: new Date().toISOString(),
+    };
+  });
   app.get("/api/v1/admin/usage", async (req) => {
     const a = actor(req);
     admin(a);
@@ -250,6 +391,7 @@ export function buildAPI(
     return service.store.tx(a.tenantId, (s) => {
       if (!s.skills[key]) throw new Fault(404, "SKILL_NOT_FOUND");
       s.skills[key]!.enabled = b.enabled;
+      audit(s, a, "skill.status", key);
       return s.skills[key];
     });
   });
@@ -290,6 +432,7 @@ export function buildAPI(
     return service.store.tx(a.tenantId, (s) => {
       if (!s.mcp[key]) throw new Fault(404, "MCP_NOT_FOUND");
       s.mcp[key]!.enabled = b.enabled;
+      audit(s, a, "mcp.status", key);
       return s.mcp[key];
     });
   });

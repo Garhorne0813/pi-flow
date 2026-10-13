@@ -1,6 +1,6 @@
 # HTTP / SSE API
 
-Base: `/api/v1`。除 `/health` 外，所有请求必须提供 `Authorization: Bearer <UCS JWT>`；Demo 使用 `DEV_TOKEN`。Tenant 只来自认证后的声明。所有 JSON 请求采用严格字段校验。错误形如：
+Base: `/api/v1`。除健康检查端点和控制台入口 `GET /admin/ui`、仅返回静态 HTML 的 `GET /admin/agents/ui` 外，所有 API 请求必须提供 `Authorization: Bearer <UCS JWT>`；Demo 使用 `DEV_TOKEN`。Agent 管理页面在同源路径 `/admin/agents/ui`，页面通过浏览器内存中的管理员 Bearer Token 调用 `/api/v1/admin/*`，不将令牌保存到 URL 或浏览器存储。Tenant 只来自认证后的声明。所有 JSON 请求采用严格字段校验。错误形如：
 
 ```json
 {
@@ -197,3 +197,33 @@ Run 终态错误在 Run.error / run.failed 中给出，包括 `AGENT_REVOKED`、
 Agent `mcpServers` 最多 16 项。Worker 将 Run 的 AbortSignal 与 deadline 传给 discovery；完整发现预算取剩余 Run 时间与 30 秒上限的较小值。每个 connect/listTools 请求仍最多等待 10 秒，分页最多 10 页，单 Server 白名单工具最多 100 个。发现开始、Server/分页循环和结果返回前检查取消；SDK 请求与实际 HTTPS fetch 都绑定信号，并以本地取消等待兜底。耗尽发现预算返回 `MCP_DISCOVERY_TIMEOUT`，耗尽 Run deadline 为 `RUN_TIMEOUT`；取消仍按 Run 取消状态处理。
 
 连接和传输都尝试关闭，单次 cleanup 最多等待 250 ms；关闭异常不会覆盖原始取消/超时原因。配额相关过期回调不会释放或标记新请求的记录：所有转换绑定持久唯一 operation，CAS 接管失败返回 `CAPACITY_LEASE_LOST`。Sandbox 创建/连接期间取消时不执行工具；已返回 ID 的实例按取消策略确认清理后退还配额，创建无 ID 或 Kill 未确认返回 `REMOTE_CANCEL_UNCONFIRMED` 并保持保守占用。持久 Workspace Volume 不随取消删除。
+
+## 管理控制台
+
+`GET /admin/ui` 重定向到 `GET /admin/agents/ui`。HTML 外壳公开；下列 API 均要求管理员身份，数据限制在认证后的 Tenant 内。
+
+| 方法 / 路径 | 行为 |
+| --- | --- |
+| `GET /api/v1/admin/configuration` | 返回 `defaultsRevision`、租户 ID、获批模型、获授权 Bundle / Endpoint 名称、只读 Sandbox 策略与新 Agent 默认值；不返回密钥或 Endpoint URL |
+| `PUT /api/v1/admin/configuration/defaults` | 保存当前租户的新草稿默认值；必须携带 GET 返回的 `expectedRevision`，事务内校验，不匹配返回 `409 DEFAULTS_CONFLICT`；不影响已有 Agent / Session |
+| `POST /api/v1/admin/mcp-servers/:id/check` | 请求体 `{}`；检查已启用且获授权的服务，执行工具发现，返回 `{status, tools: [{name, description}], checkedAt}`；不调用工具，总时限 10 秒 |
+
+默认值请求体示例：
+
+```json
+{
+  "expectedRevision": 0,
+  "model": { "provider": "enterprise", "modelId": "coding-model" },
+  "tools": ["read", "ls", "grep", "find"],
+  "skillBundle": "default",
+  "maxSteps": 30,
+  "maxTokens": 100000,
+  "timeoutSeconds": 600,
+  "maxSubagents": 2,
+  "maxDepth": 1
+}
+```
+
+默认值使用 AgentConfig 的相同字段限制，拒绝未知字段；生产保存到租户元数据，Demo 保存在内存。部署设置由服务端管理，修改后重启相关进程。Skill / MCP 登记及启停复用现有 API，所有变更进入审计记录。Skill 版本不可变，MCP 检查沿用服务器凭证、HTTPS、租户授权与工具白名单。
+
+默认值保存成功返回 `{agentDefaults, defaultsRevision}`，修订号递增。旧数据的初始修订号为 0；未提供 `expectedRevision` 返回 400。客户端收到 409 后需重新读取最新配置，保留草稿，并由管理员明确选择重新载入或使用最新修订号重试；重复并发冲突仍返回 409，不自动覆盖。
