@@ -6,6 +6,14 @@ Pi-Flow 为智能体应用提供持久化工作区和会话。用户通过 REST 
 
 基于 Pi 运行智能体，使用 CubeSandbox 执行远程工具。当前为 **0.1 后端版本**，可接入自己的对话前端或 API 客户端。
 
+### Agent 配置管理页面
+
+服务启动后访问 [Agent 配置中心](http://127.0.0.1:8080/admin/agents/ui)（路径：`/admin/agents/ui`），在页面顶部输入管理员 Bearer Token 即可连接。支持查看已发布版本、创建 Agent、复制旧版本重新发布、选择内置工具及已登记的 Skills/MCP/子 Agent，以及调整版本的启停状态和允许访问的用户。
+
+页面与 API 同源，不需要独立前端构建；HTML 外壳无需认证，但所有管理数据操作仍通过 `/api/v1/admin/*` 检查管理员权限。令牌仅在页面内存中使用，不会保存到浏览器存储或 URL。刷新页面需重新输入。生产使用具备 `harness-admin` 角色的 UCS JWT；本地 Demo 可输入 `DEV_TOKEN`。
+
+**注意**：页面不能代替服务器的 `LLM_*`、`SKILL_VOLUMES_JSON`、`MCP_ENDPOINTS_JSON`、`TENANT_CAPABILITIES_JSON` 等部署配置。模型需要提前获批、Skill 和 MCP 需要预先登记。配置修改会发布新的不可变 AgentVersion，不会修改已有 Session。页面不是聊天前端。
+
 [English](README.md)
 
 ## 功能特色
@@ -164,7 +172,7 @@ Smoke 自动在 `18081` 端口启动并关闭 Demo，验证对话、SSE、幂等
 | [实现说明](docs/implementation.md) · [验收要求](docs/acceptance.md) | 实现记录、验证证据与待完成生产门禁 |
 | [联调记录](docs/local-deployment.md) | 真实服务部署反馈 |
 
-当前版本是可运行的联调基线，企业生产验收仍待完成。尚未提供内置前端、长期 Memory 或会话分支 API；文件接口不支持二进制文件。MCP 使用部署服务凭证，尚未实现用户委托 OAuth。预算报表提供成本估算，尚未对账供应商账单；实例快照不能替代工作区卷备份。
+当前版本是可运行的联调基线，企业生产验收仍待完成。尚未提供内置聊天前端、长期 Memory 或会话分支 API；文件接口不支持二进制文件。MCP 使用部署服务凭证，尚未实现用户委托 OAuth。预算报表提供成本估算，尚未对账供应商账单；实例快照不能替代工作区卷备份。
 
 ## 许可证
 
