@@ -1,6 +1,6 @@
 # HTTP / SSE API
 
-Base: `/api/v1`。除 `/health` 外，所有请求必须提供 `Authorization: Bearer <UCS JWT>`；Demo 使用 `DEV_TOKEN`。Tenant 只来自认证后的声明。所有 JSON 请求采用严格字段校验。错误形如：
+Base: `/api/v1`。除健康检查端点和仅返回静态 HTML 的 `GET /admin/agents/ui` 外，所有 API 请求必须提供 `Authorization: Bearer <UCS JWT>`；Demo 使用 `DEV_TOKEN`。Agent 管理页面在同源路径 `/admin/agents/ui`，页面通过浏览器内存中的管理员 Bearer Token 调用 `/api/v1/admin/*`，不将令牌保存到 URL 或浏览器存储。Tenant 只来自认证后的声明。所有 JSON 请求采用严格字段校验。错误形如：
 
 ```json
 {
