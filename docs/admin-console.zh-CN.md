@@ -18,6 +18,6 @@
 
 ### 上传 Skill ZIP
 
-打开 Skills，填写版本 ID（如 `review@v1`）、名称、可选描述与获授权 Bundle，选择 ZIP 后点击“上传并登记版本”。ZIP 包含一个 `SKILL.md`，位于根目录或唯一顶层 Skill 目录内，并可附带 scripts / references。无需填写宿主路径或 SHA-256；上传后可立即在 Agent 的 Skills 中选择新版本并发布。
+打开 Skills，填写版本 ID（如 `review@v1`）、名称、可选描述与获授权 Bundle，将单个 ZIP 拖入上传区或点击选择文件，再点击“上传并登记版本”。ZIP 包含一个 `SKILL.md`，位于根目录或唯一顶层 Skill 目录内，并可附带 scripts / references。无需填写宿主路径或 SHA-256；上传后可立即在 Agent 的 Skills 中选择新版本并发布。
 
-ZIP 最大 10 MiB、解压后最大 32 MiB、最多 1000 个文件。失败会保留表单和文件选择，成功后清空上传表单；保存成功但列表刷新失败会明确提示，可刷新数据查看。已有版本 ID 不可覆盖，更新请换新 ID。部署需要 API 对共享根目录下 `uploads/` 的写权限，详见[部署文档](deployment.md#skill-zip-uploads--技能-zip-上传)。上传入口被禁用时仍可展开“登记已有部署版本”。
+ZIP 最大 10 MiB、解压后最大 32 MiB、最多 1000 个文件。拖入多个文件、非 ZIP 或超限文件会拒绝并保留此前选择；上传期间及未连接时不接受拖入。失败会保留表单和文件选择，成功后清空上传表单；保存成功但列表刷新失败会明确提示，可刷新数据查看。已有版本 ID 不可覆盖，更新请换新 ID。部署需要 API 对共享根目录下 `uploads/` 的写权限，详见[部署文档](deployment.md#skill-zip-uploads--技能-zip-上传)。上传入口被禁用时仍可展开“登记已有部署版本”。

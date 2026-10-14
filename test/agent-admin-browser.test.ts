@@ -237,13 +237,16 @@ test(
       await page.locator("#tab-skills").click();
       await page.locator("#upload-skill-id").fill("browser-review@v1");
       await page.locator("#upload-skill-name").fill("Browser review");
-      await page
-        .locator("#skill-zip")
-        .setInputFiles({
-          name: "review.zip",
-          mimeType: "application/zip",
-          buffer: skillZip([{ path: "../escape", content: "bad" }]),
-        });
+      const chooserEvent = page.waitForEvent("filechooser");
+      await page.locator("#skill-zip").focus();
+      await page.keyboard.press("Space");
+      await (
+        await chooserEvent
+      ).setFiles({
+        name: "review.zip",
+        mimeType: "application/zip",
+        buffer: skillZip([{ path: "../escape", content: "bad" }]),
+      });
       await page.locator("#upload-skill").click();
       await page.locator("#message").filter({ hasText: "操作失败" }).waitFor();
       assert.equal(
@@ -256,21 +259,138 @@ test(
           .evaluate((input: HTMLInputElement) => input.files!.length),
         1,
       );
+      const zip = skillZip([
+        { path: "review/SKILL.md", content: skillMarkdown },
+        { path: "review/references/example.txt", content: "example" },
+      ]);
+      async function dropFiles(
+        files: { name: string; data?: string; size?: number }[],
+        type = "drop",
+      ) {
+        await page.locator("#skill-zip-dropzone").evaluate(
+          (target, { files, type }) => {
+            const transfer = new DataTransfer();
+            for (const file of files)
+              transfer.items.add(
+                new File(
+                  [
+                    file.data
+                      ? Uint8Array.from(atob(file.data), (c) => c.charCodeAt(0))
+                      : new Uint8Array(file.size || 0),
+                  ],
+                  file.name,
+                  { type: "application/zip" },
+                ),
+              );
+            target.dispatchEvent(
+              new DragEvent(type, {
+                bubbles: true,
+                cancelable: true,
+                dataTransfer: transfer,
+              }),
+            );
+          },
+          { files, type },
+        );
+      }
+      const selected = [{ name: "review.zip", data: zip.toString("base64") }];
+      await dropFiles(selected, "dragenter");
+      assert.match(
+        (await page.locator("#skill-zip-dropzone").getAttribute("class")) || "",
+        /dragging/,
+      );
+      await dropFiles(selected, "dragenter");
+      await dropFiles(selected, "dragleave");
+      assert.match(
+        (await page.locator("#skill-zip-dropzone").getAttribute("class")) || "",
+        /dragging/,
+      );
+      await dropFiles(selected);
+      assert.doesNotMatch(
+        (await page.locator("#skill-zip-dropzone").getAttribute("class")) || "",
+        /dragging/,
+      );
+      assert.match(
+        (await page.locator("#skill-zip-selection").textContent()) || "",
+        /review.zip/,
+      );
+      for (const [files, message] of [
+        [[{ name: "one.zip" }, { name: "two.zip" }], "一次选择一个"],
+        [[{ name: "notes.txt" }], ".zip 格式"],
+        [
+          [{ name: "huge.zip", size: 10 * 1024 * 1024 + 1 }],
+          "超过上传大小限制",
+        ],
+      ] as const) {
+        await dropFiles([...files]);
+        assert.match(
+          (await page.locator("#message").textContent()) || "",
+          new RegExp(message.replace(".", "\\.")),
+        );
+        assert.equal(
+          await page
+            .locator("#skill-zip")
+            .evaluate((input: HTMLInputElement) => input.files![0]!.name),
+          "review.zip",
+        );
+      }
+      await page.locator("#skill-zip-dropzone").evaluate((target) => {
+        const transfer = new DataTransfer();
+        transfer.items.add(new File([""], "folder"));
+        Object.defineProperty(transfer.items[0], "webkitGetAsEntry", {
+          value: Object.prototype.valueOf.bind({ isDirectory: true }),
+        });
+        target.dispatchEvent(
+          new DragEvent("drop", {
+            bubbles: true,
+            cancelable: true,
+            dataTransfer: transfer,
+          }),
+        );
+      });
+      assert.match(
+        (await page.locator("#message").textContent()) || "",
+        /不支持直接拖入文件夹/,
+      );
+      assert.equal(
+        await page
+          .locator("#skill-zip")
+          .evaluate((input: HTMLInputElement) => input.files![0]!.name),
+        "review.zip",
+      );
+      // Drop selects the file; publication remains an explicit form submission.
+      assert.equal(
+        await store.read(admin.tenantId, (s) => Object.keys(s.skills).length),
+        0,
+      );
+      let resume!: () => void;
+      const gate = new Promise<void>((resolve) => (resume = resolve));
+      await page.route("**/api/v1/admin/skills/upload", async (route) => {
+        await gate;
+        await route.continue();
+      });
       const response = page.waitForResponse(
         (response) =>
           response.url().endsWith("/admin/skills/upload") &&
           response.status() === 201,
       );
-      await page.locator("#skill-zip").setInputFiles({
-        name: "review.zip",
-        mimeType: "application/zip",
-        buffer: skillZip([
-          { path: "review/SKILL.md", content: skillMarkdown },
-          { path: "review/references/example.txt", content: "example" },
-        ]),
-      });
       await page.locator("#upload-skill").click();
+      assert.equal(
+        await page.locator("#skill-zip-dropzone").getAttribute("aria-disabled"),
+        "true",
+      );
+      await dropFiles([
+        { name: "replacement.zip", data: zip.toString("base64") },
+      ]);
+      assert.equal(
+        await page
+          .locator("#skill-zip")
+          .evaluate((input: HTMLInputElement) => input.files![0]!.name),
+        "review.zip",
+      );
+      resume();
       const created = await (await response).json();
+      await page.unroute("**/api/v1/admin/skills/upload");
       await page
         .locator("#message")
         .filter({ hasText: "Skill ZIP 已上传并登记" })
@@ -305,13 +425,11 @@ test(
       await page.locator("#tab-skills").click();
       await page.locator("#upload-skill-id").fill("browser-review@v2");
       await page.locator("#upload-skill-name").fill("Browser review v2");
-      await page
-        .locator("#skill-zip")
-        .setInputFiles({
-          name: "review.zip",
-          mimeType: "application/zip",
-          buffer: skillZip([{ path: "SKILL.md", content: skillMarkdown }]),
-        });
+      await page.locator("#skill-zip").setInputFiles({
+        name: "review.zip",
+        mimeType: "application/zip",
+        buffer: skillZip([{ path: "SKILL.md", content: skillMarkdown }]),
+      });
       await page.route("**/api/v1/admin/configuration", (route) =>
         route.fulfill({
           status: 503,
@@ -345,6 +463,18 @@ test(
           () => document.documentElement.scrollWidth <= innerWidth,
         ),
         true,
+      );
+      await page.locator("#disconnect").click();
+      await dropFiles(selected);
+      assert.equal(
+        await page
+          .locator("#skill-zip")
+          .evaluate((input: HTMLInputElement) => input.files!.length),
+        0,
+      );
+      assert.equal(
+        await page.locator("#skill-zip-dropzone").getAttribute("aria-disabled"),
+        "true",
       );
       assert.deepEqual(errors, []);
     } finally {
