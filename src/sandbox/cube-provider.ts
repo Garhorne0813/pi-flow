@@ -8,6 +8,7 @@ import {
   ApiError,
 } from "@cubesandbox/sdk";
 import { createHash } from "node:crypto";
+import { skillUploadRoot, uploadedSkillBinding } from "../skill-packages.js";
 import { Fault, type Skill } from "../domain.js";
 import {
   skillMountPath,
@@ -29,10 +30,12 @@ export class CubeProvider implements SandboxProvider {
     private user: string,
     private driver: string,
     private hostSkillRoots: readonly string[] = DEFAULT_HOST_SKILL_ROOTS,
+    private uploadRoot = hostSkillRoots[0],
   ) {
     if (/^(root(?::|$)|0(?::|$))/.test(user) || !user)
       throw new Error("Cube execution user must be non-root");
     validateSkillBindings(skillVolumes, hostSkillRoots);
+    this.uploadRoot = skillUploadRoot(hostSkillRoots, uploadRoot, skillVolumes);
   }
   async createVolume(name: string) {
     try {
@@ -50,15 +53,21 @@ export class CubeProvider implements SandboxProvider {
       throw e;
     }
   }
+  private binding(skill: Pick<Skill, "id" | "bundle" | "path" | "hostUpload">) {
+    return (
+      uploadedSkillBinding(skill, this.uploadRoot) ??
+      (Object.hasOwn(this.skillVolumes, skill.id)
+        ? this.skillVolumes[skill.id]
+        : undefined)
+    );
+  }
   scope(bundle: string, skills: readonly Skill[]) {
     validateSkillBindings(this.skillVolumes, this.hostSkillRoots);
     const metadata = skillScope(bundle, skills);
     const volumes = [...skills]
       .sort((a, b) => a.id.localeCompare(b.id))
       .map((skill) => {
-        const published = Object.hasOwn(this.skillVolumes, skill.id)
-          ? this.skillVolumes[skill.id]
-          : undefined;
+        const published = this.binding(skill);
         if (
           !published ||
           published.bundle !== bundle ||
@@ -88,7 +97,7 @@ export class CubeProvider implements SandboxProvider {
     }
     const selected = skills.map((skill) => ({
       skill,
-      published: this.skillVolumes[skill.id]!,
+      published: this.binding(skill)!,
     }));
     try {
       for (const { published } of selected)
@@ -200,9 +209,18 @@ export class CubeProvider implements SandboxProvider {
       ? (args._skillIds as string[])
       : [];
     for (const id of selectedIds) {
-      const binding = Object.hasOwn(this.skillVolumes, id)
-        ? this.skillVolumes[id]
-        : undefined;
+      // Upload metadata is injected by SandboxManager from this tenant's Store,
+      // never accepted from the browser's tool arguments.
+      const uploaded = (
+        Array.isArray(args._skillHostUploads) ? args._skillHostUploads : []
+      ).find((skill: Pick<Skill, "id">) => skill.id === id) as
+        | Pick<Skill, "id" | "bundle" | "path" | "hostUpload">
+        | undefined;
+      const binding = uploaded
+        ? this.binding(uploaded)
+        : Object.hasOwn(this.skillVolumes, id)
+          ? this.skillVolumes[id]
+          : undefined;
       if (!binding || !("hostPath" in binding)) continue;
       if (!manifests.some((manifest) => manifest.path === binding.path))
         throw new Fault(403, "SKILL_VOLUME_NOT_REGISTERED");

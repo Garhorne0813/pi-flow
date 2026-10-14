@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { HostSkillPackages, skillUploadRoot } from "./skill-packages.js";
 import {
   SkillVolumeSchema,
   HostSkillRootsSchema,
@@ -68,6 +69,12 @@ export async function bootstrap() {
   for (const skill of Object.values(skillVolumes))
     if (!Object.hasOwn(bundles, skill.bundle))
       throw new Error("Unknown skill volume bundle");
+  const uploadRoot = skillUploadRoot(
+    hostSkillRoots,
+    process.env.SKILL_UPLOAD_ROOT,
+    skillVolumes,
+  );
+  const skillPackages = new HostSkillPackages(uploadRoot);
   const endpoints = z
     .record(
       z.string(),
@@ -96,6 +103,7 @@ export async function bootstrap() {
         process.env.CUBE_EXEC_USER!,
         process.env.CUBE_VOLUME_DRIVER!,
         hostSkillRoots,
+        uploadRoot,
       );
   const service = new HarnessService(
     store,
@@ -179,5 +187,5 @@ export async function bootstrap() {
         };
       }
     });
-  return { store, service, sandbox, worker, mcp };
+  return { store, service, sandbox, worker, mcp, skillPackages };
 }

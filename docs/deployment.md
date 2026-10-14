@@ -42,12 +42,18 @@ Cube templates need Python 3, Bash, a non-root execution user without passwordle
 
 Cube 模板需预装 Python 3、Bash，使用非 root 且无免密 sudo 的执行用户，并授予工作区写权限。模板 `/skills` 应为空，无预置共享技能或额外技能挂载。持久存储、资源限制和出口网络策略由 Cube 基础设施强制执行。`allowPublicTraffic=false` 限制入站访问，不代表出口隔离；需在目标集群验证，见 [联调记录](local-deployment.md)。
 
-Skills default to read-only `hostPath` mounts from independent immutable directories under `/data/agent-skills`. Each directory contains one version's `SKILL.md`, scripts, and resources. Configure each binding explicitly in `SKILL_VOLUMES_JSON` (the existing variable name is retained):
+Skills default to read-only `hostPath` mounts from independent immutable directories under `/data/agent-skills`. Each directory contains one version's `SKILL.md`, scripts, and resources. For manually deployed Skills, configure each binding explicitly in `SKILL_VOLUMES_JSON` (the existing variable name is retained):
 
-技能默认通过 `hostPath` 只读挂载 `/data/agent-skills` 下的独立不可变目录，根目录只包含该技能版本的 `SKILL.md`、脚本和资源。每个绑定仍需在 `SKILL_VOLUMES_JSON` 中显式配置（保留现有变量名），例如：
+技能默认通过 `hostPath` 只读挂载 `/data/agent-skills` 下的独立不可变目录，根目录只包含该技能版本的 `SKILL.md`、脚本和资源。手动部署的绑定仍需在 `SKILL_VOLUMES_JSON` 中显式配置（保留现有变量名），例如：
 
 ```json
-{"review@v1":{"bundle":"default","path":"/skills/review/v1/SKILL.md","hostPath":"/data/agent-skills/review"}}
+{
+  "review@v1": {
+    "bundle": "default",
+    "path": "/skills/review/v1/SKILL.md",
+    "hostPath": "/data/agent-skills/review"
+  }
+}
 ```
 
 Register matching metadata through the admin API, then select `review@v1` in the agent's `skills`. Only selected skill directories mount read-only. Explicit `volume` bindings remain supported, including mixed deployments. `SKILL_BUNDLES_JSON` defines authorization groups, not shared mount sources. Publishers must preserve skill source immutability; manifest hashing cannot replace storage enforcement.
@@ -56,9 +62,9 @@ Register matching metadata through the admin API, then select `review@v1` in the
 
 ### Local host skills / Cubelet 宿主机技能目录
 
-`SKILL_VOLUMES_JSON` uses `hostPath` in the default deployment example; explicit `volume` bindings remain supported. Exactly one backend is required for each ID. `SKILL_HOST_ROOTS_JSON` defaults to `["/data/agent-skills"]` when unset; an explicit list replaces this default, and `[]` denies all host sources. No skill bindings are generated automatically; each source must be a strict descendant of an approved canonical absolute root. Duplicate/nested host sources are rejected at startup. Target conflicts are checked only within the selected Skill set, preserving existing Volume deployments where mutually exclusive Skills use the same target. Targets are always the parent of the registered `/skills/.../SKILL.md`; requests cannot specify sources or mount destinations.
+`SKILL_VOLUMES_JSON` uses `hostPath` in the default deployment example; explicit `volume` bindings remain supported. Exactly one backend is required for each ID. `SKILL_HOST_ROOTS_JSON` defaults to `["/data/agent-skills"]` when unset; an explicit list replaces this default, and `[]` denies all host sources. Manual deployment bindings are explicit; uploaded Skill bindings are derived from tenant metadata. Each source must be a strict descendant of an approved canonical absolute root. Duplicate/nested host sources are rejected at startup. Target conflicts are checked only within the selected Skill set, preserving existing Volume deployments where mutually exclusive Skills use the same target. Targets are always the parent of the registered `/skills/.../SKILL.md`; requests cannot specify sources or mount destinations.
 
-Host mode requires **the same filesystem, at the same canonical absolute path, on every API/Worker and the eligible Cubelet nodes**. For a single machine this can be a local directory; containers must receive that directory at the same path, read-only in API/Worker containers. For remote nodes use shared storage at that path, not a copy of its files. A source unavailable to the control processes is rejected (`SKILL_HOST_SOURCE_UNSAFE`); this release does not support opaque node-local directories on remote Cubelets. The metadata protocol cannot attest a remote realpath, so trusting a local mirror would not safely enforce the source boundary. Source roots, ancestors and contents must be administrator-owned and unavailable for writes by API/Worker users, sandbox users or tenants. All symlinks and special files in host skill trees are rejected. The validator bounds each tree to 10,000 entries and uses asynchronous filesystem operations at startup, creation and before tools, so shared-storage I/O does not synchronously block the Worker event loop. Validation is not cached: source mutations must still be rejected before tools.
+Host mode requires **the same filesystem, at the same canonical absolute path, on every API/Worker and the eligible Cubelet nodes**. For a single machine this can be a local directory; containers must receive that directory at the same path, read-only in Worker containers; API upload storage needs the limited write access described below. For remote nodes use shared storage at that path, not a copy of its files. A source unavailable to the control processes is rejected (`SKILL_HOST_SOURCE_UNSAFE`); this release does not support opaque node-local directories on remote Cubelets. The metadata protocol cannot attest a remote realpath, so trusting a local mirror would not safely enforce the source boundary. Source roots, ancestors and contents must be administrator-owned and unavailable for writes by API/Worker users, sandbox users or tenants. All symlinks and special files in host skill trees are rejected. The validator bounds each tree to 10,000 entries and uses asynchronous filesystem operations at startup, creation and before tools, so shared-storage I/O does not synchronously block the Worker event loop. Validation is not cached: source mutations must still be rejected before tools.
 
 `hostPath` still means the path seen by **Cubelet**, including its container namespace. Kubernetes Cubelet pods must have the appropriate hostPath/shared volume available. Restrict eligible nodes to those with the identical shared filesystem and path. Do not assume the scheduler will locate a node with a missing directory.
 
@@ -92,7 +98,9 @@ extra_conf:
 The implementation uses SDK 0.3.0's string metadata transport:
 
 ```json
-{"host-mount":"[{\"hostPath\":\"/data/agent-skills/code-review\",\"mountPath\":\"/skills/code-review/v1\",\"readOnly\":true}]"}
+{
+  "host-mount": "[{\"hostPath\":\"/data/agent-skills/code-review\",\"mountPath\":\"/skills/code-review/v1\",\"readOnly\":true}]"
+}
 ```
 
 Protocol and restore behavior were checked against the repository's pinned Cube source commit `2bbaf74ba7565992ec2a3dbc9928ed5b720639a2` (`vendor/provenance.json`), including CubeAPI forwarding, CubeMaster host-mount parsing/allowlisting, and origin-node pinning on resume/restore. Deploy a matching compatible Cube build; SDK version alone does not establish server compatibility. New and restored host instances verify each exact mount target is `ro` in `/proc/self/mountinfo` and validate every selected manifest before returning the instance. Older servers that ignore metadata, missing mounts and writable mounts fail with `SKILL_HOST_MOUNT_UNCONFIRMED` (409); the new instance is killed. Confirmed cleanup releases the reserved capacity and permits retry. If cleanup fails, capacity stays charged as `unknown`, and the instance ID is saved in the capacity/workspace records and audit log for operator reconciliation. Late preflight failures after a timeout are reconciled with the same operation ownership checks, without releasing a successor's capacity. Cube creation errors propagate without replacing a host mount with a broader mount or writable volume.
@@ -111,7 +119,7 @@ Register `pdf-processing@v1` similarly, using its deployed volume manifest's pat
 {
   "name": "Review and PDF",
   "systemPrompt": "Use the authorized skills when appropriate.",
-  "model": {"provider": "enterprise", "modelId": "coding-model"},
+  "model": { "provider": "enterprise", "modelId": "coding-model" },
   "tools": ["read", "ls"],
   "skills": ["code-review@v1", "pdf-processing@v1"],
   "skillBundle": "default"
@@ -169,3 +177,26 @@ LLM_ALLOW_HTTP=true node --env-file=.env scripts/smoke-deepseek.mjs
 For restricted proxy environments, configure Node proxy/CA settings such as `NODE_USE_ENV_PROXY=1` and `NODE_EXTRA_CA_CERTS`. Docker accepts `--secret id=proxy_ca,src=...`; retain TLS verification. SDK provenance and reproducible package builds are in [vendor/README.md](../vendor/README.md). CI, benchmarks, and remaining acceptance requirements are in [ci.md](ci.md), [read-benchmark.md](read-benchmark.md), and [acceptance.md](acceptance.md).
 
 受限代理环境可配置 `NODE_USE_ENV_PROXY=1`、`NODE_EXTRA_CA_CERTS`；Docker 构建可传入 `--secret id=proxy_ca,src=...`，保持 TLS 校验。SDK 来源和可复现打包见 [vendor/README.md](../vendor/README.md)。CI、基准与剩余验收见 [ci.md](ci.md)、[read-benchmark.md](read-benchmark.md) 和 [acceptance.md](acceptance.md)。
+
+## Skill ZIP uploads / 技能 ZIP 上传
+
+The console can upload a ZIP containing one Skill and register it immediately. `SKILL_UPLOAD_ROOT` defaults to the first entry of `SKILL_HOST_ROOTS_JSON` (`/data/agent-skills` by default); an override must be equal to or inside an approved root. `[]` disables uploading. Configure the same root in every API and Worker, and expose the **same shared filesystem at the same canonical path** to the API, Workers and eligible Cubelets. This feature does not upload to an opaque remote node-local directory.
+
+控制台支持上传包含一个 Skill 的 ZIP 并自动登记。`SKILL_UPLOAD_ROOT` 默认取 `SKILL_HOST_ROOTS_JSON` 的第一项（默认 `/data/agent-skills`），覆盖值必须等于获批根目录或位于其内部；`[]` 禁用上传。所有 API / Worker 使用同一配置，并在 API、Worker 与符合条件的 Cubelet 上以相同规范绝对路径共享同一文件系统。此功能不能写入 API 无法访问的远端节点本地目录。
+
+Provision the root before starting uploads. Restrict API write access to the reserved `uploads/` namespace, for example by giving its service UID ownership of that subdirectory while keeping manual deployment sources read-only. In containers, mount the root read-only and separately bind the `uploads/` subdirectory read-write into the API. Workers need only read access. Root/namespace paths must have no symlink ancestors and must be owned/managed by deployment administrators; sandbox users and untrusted host users must have no write access. An example deployment setup (replace the service account for your environment):
+
+上传前由部署层创建根目录。API 仅需对保留的 `uploads/` 命名空间有写权限；手动部署目录仍保持只读。容器可将根目录只读挂载，再单独把 `uploads/` 子目录读写挂载给 API；Worker 只需读取。根目录及命名空间路径的祖先不能包含符号链接，应由部署管理员维护，Sandbox 用户和不可信宿主机用户不能写入。例如（按实际部署替换服务账户）：
+
+```bash
+install -d -m 0755 /data/agent-skills
+install -d -m 0755 -o harness-api -g harness-api /data/agent-skills/uploads
+```
+
+Each package is installed under `uploads/<opaque-tenant-and-version-key>/content/` and mounted read-only at `/skills/uploaded/<key>/`. Its files are sealed read-only (executable support files retain execution permission); the manifest digest is computed server-side. The tenant Skill record stores the opaque package key and archive checksum, not a browser-controlled host path. Workers derive the mount from this persisted record at creation and reuse, preserving source validation, exact read-only mount checks and manifest checks. No per-upload `SKILL_VOLUMES_JSON` change or process restart is required. The reserved upload namespace cannot overlap an existing deployment Skill source.
+
+每个包写入 `uploads/<租户及版本的不透明键>/content/`，只读挂载到 `/skills/uploaded/<key>/`。文件封存为只读，辅助脚本保留执行位，清单摘要由服务端计算。租户 Skill 记录只保存包身份和归档校验值，不接受浏览器指定宿主路径。Worker 创建及复用 Sandbox 时从持久化记录解析挂载，继续执行源目录、精确只读挂载及清单校验；每次上传不需要调整 `SKILL_VOLUMES_JSON` 或重启。上传命名空间不得与已有部署 Skill 源目录重叠。
+
+Updating a package requires a new Skill version ID and a new AgentVersion. Uploaded artifacts, like manually deployed ones, must remain immutable and must be backed up with tenant metadata. Source relocation requires coordinated deployment configuration; it changes sandbox scope and does not silently migrate existing task chains. A known pre-commit failure removes its package; an uncertain database commit conservatively keeps it. Before removing any orphan, confirm its key is not referenced by tenant metadata or retained Agent/task versions. An API 500 after an uncertain commit should be followed by a registry refresh, not an attempt to overwrite that ID. Shared-storage ACLs, total disk quotas and durable backup/cleanup policy remain deployment responsibilities.
+
+更新包需要新的 Skill 版本 ID 和 AgentVersion。已上传文件与手动部署文件一样必须保持不可变，并与租户元数据一并备份。迁移共享路径需要协调部署配置，会改变 Sandbox scope，不静默迁移已有任务链。确定未提交的失败会删除新包；数据库提交结果不确定时保守保留。删除孤立包前必须核实租户登记、保留 Agent / 任务版本没有引用该键；提交不确定后的 500 应先刷新登记列表，不覆盖版本 ID。共享存储 ACL、总磁盘配额及持久备份/清理策略仍由部署层负责。

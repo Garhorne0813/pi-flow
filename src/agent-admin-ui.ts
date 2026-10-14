@@ -203,7 +203,18 @@ export const agentAdminHTML = String.raw`<!doctype html>
     <section id="view-skills" hidden>
       <div class="console-grid">
         <div><div class="panel-head"><h2>已登记 Skills</h2><span id="skill-count" class="pill">0</span></div><div id="skill-registry" class="resource-list"></div></div>
-        <section class="panel"><div class="panel-head"><h2>登记 Skill 版本</h2></div><form id="skill-form" class="pad">
+        <section class="panel"><div class="panel-head"><h2>上传 Skill ZIP</h2></div>
+          <form id="skill-upload-form" class="pad">
+            <p class="note">ZIP 中包含一个 Skill：SKILL.md 位于根目录，或位于唯一的顶层目录中，可附带 scripts / references 等文件。上传后自动登记为不可变版本，可直接在 Agent 中选择。</p>
+            <p id="skill-upload-status" class="note" role="status" aria-live="polite">连接后查看上传能力。</p>
+            <div class="field-wrap"><label class="field" for="upload-skill-id">版本 ID</label><input id="upload-skill-id" class="full" required maxlength="200" pattern="[a-zA-Z0-9_\-]+@[a-zA-Z0-9_\-]+" placeholder="code-review@v1"></div>
+            <div class="field-wrap"><label class="field" for="upload-skill-name">名称</label><input id="upload-skill-name" class="full" required maxlength="100" placeholder="代码审查"></div>
+            <div class="field-wrap"><label class="field" for="upload-skill-description">描述</label><textarea id="upload-skill-description" class="full" maxlength="2000"></textarea></div>
+            <div class="field-wrap"><label class="field" for="upload-skill-bundle">Bundle</label><select id="upload-skill-bundle" class="full" required></select></div>
+            <div class="field-wrap"><label class="field" for="skill-zip">Skill ZIP 包</label><input id="skill-zip" class="full" type="file" accept=".zip,application/zip,application/x-zip-compressed" required></div>
+            <button id="upload-skill" class="btn primary" type="submit" disabled>上传并登记版本</button>
+          </form>
+          <details><summary class="pad">登记已有部署版本</summary><form id="skill-form" class="pad">
           <p class="note">Skill 版本不可变。更新内容需登记新的版本 ID；Skill 文件和卷需先部署到服务器。</p>
           <div class="field-wrap"><label class="field" for="skill-id">版本 ID</label><input id="skill-id" class="full" required pattern="[a-zA-Z0-9_\-]+@[a-zA-Z0-9_\-]+" placeholder="code-review@v1"></div>
           <div class="field-wrap"><label class="field" for="skill-name">名称</label><input id="skill-name" class="full" required maxlength="100"></div>
@@ -212,7 +223,7 @@ export const agentAdminHTML = String.raw`<!doctype html>
           <div class="field-wrap"><label class="field" for="skill-path">文件路径</label><input id="skill-path" class="full" required pattern="/skills/([a-zA-Z0-9_\-]+/)+SKILL\.md" placeholder="/skills/code-review/SKILL.md"></div>
           <div class="field-wrap"><label class="field" for="skill-digest">SHA-256 摘要</label><input id="skill-digest" class="full" required pattern="[a-f0-9]{64}" minlength="64" maxlength="64" placeholder="Skill 文件的 SHA-256"></div>
           <button id="register-skill" class="btn primary" type="submit" disabled>登记版本</button>
-        </form></section>
+        </form></details></section>
       </div>
     </section>
     <section id="view-mcp" hidden>
@@ -291,6 +302,7 @@ fetch"></textarea></div>
       connection = new AbortController();
       token = "";agents = [];skills = [];mcps = [];selected = null;configuration = null;defaultsFormInitialized = false;
       $("mcp-check-result").textContent = "";
+      $("skill-upload-form").reset?.();
       $("token").value = "";
       $("disconnect").disabled = true;$("connection").textContent = "未连接";
       newDraft();renderConsole();setBusy(false);
@@ -298,10 +310,11 @@ fetch"></textarea></div>
     async function api(path, method, body, session = connection) {
       current(session);
       if (!token) throw new Error("请先连接管理员令牌");
+      const multipart = typeof FormData !== "undefined" && body instanceof FormData;
       const response = await fetch("/api/v1" + path, {
         method: method || "GET",
-        headers: {Authorization: "Bearer " + token, ...(body === undefined ? {} : {"Content-Type":"application/json"})},
-        ...(body === undefined ? {} : {body:JSON.stringify(body)}),
+        headers: {Authorization: "Bearer " + token, ...(body === undefined || multipart ? {} : {"Content-Type":"application/json"})},
+        ...(body === undefined ? {} : {body:multipart ? body : JSON.stringify(body)}),
         cache:"no-store",
         credentials:"omit",
         signal:session.signal
@@ -483,6 +496,8 @@ fetch"></textarea></div>
     function setBusy(value) {
       busy = value;
       $("connect").disabled = value;
+      $("upload-skill").disabled = value || !token || !(configuration && configuration.skillUploads && configuration.skillUploads.enabled);
+      for (const input of $("skill-upload-form").querySelectorAll("input,textarea,select")) input.disabled = value || !token;
       $("new").disabled = value || !token;
       $("publish").disabled = value || !token || formMode === "view";
       $("clone").disabled = value || !token || !selected;
@@ -665,6 +680,10 @@ fetch"></textarea></div>
         }
       }
       const deployment = configuration && configuration.deployment || {};
+      options("upload-skill-bundle",deployment.bundles || []);
+      const upload = configuration && configuration.skillUploads;
+      $("skill-upload-status").textContent = !token ? "连接后查看上传能力。" : upload && upload.enabled ? "ZIP 最大 " + Math.floor(upload.maxArchiveBytes / 1024 / 1024) + " MiB，解压后最大 " + Math.floor(upload.maxExpandedBytes / 1024 / 1024) + " MiB，最多 " + upload.maxFiles + " 个文件。由服务器选择共享 hostPath，Sandbox 只读挂载。更新内容请使用新版本 ID。" : "服务器未启用 hostPath 上传；仍可登记已部署的 Skill。";
+      $("upload-skill").disabled = busy || !token || !(upload && upload.enabled);
       options("skill-bundle",deployment.bundles || []);options("mcp-endpoint",deployment.endpoints || []);
       options("provider-options",[...new Set((deployment.models || []).map(m=>m.provider))]);options("model-options",[...new Set((deployment.models || []).map(m=>m.modelId))]);
       const rows = $("deployment-settings");rows.replaceChildren();
@@ -717,6 +736,19 @@ fetch"></textarea></div>
       try {await refresh(undefined,session,true);notify("数据已刷新。");}
       catch(e) {if (session === connection) notify("刷新失败：" + e.message,true);}
       finally {if (session === connection) setBusy(false);}
+    });
+    $("skill-upload-form").addEventListener("submit",event=>{
+      event.preventDefault();
+      if (!token || busy || !(configuration && configuration.skillUploads && configuration.skillUploads.enabled)) return;
+      const file = $("skill-zip").files[0];
+      if (!file) return notify("请选择包含一个 Skill 的 ZIP 包。",true);
+      if (file.size > configuration.skillUploads.maxArchiveBytes) return notify("ZIP 文件超过上传大小限制。",true);
+      const form = new FormData();
+      form.append("id",$("upload-skill-id").value.trim());form.append("name",$("upload-skill-name").value.trim());
+      form.append("description",$("upload-skill-description").value);form.append("bundle",$("upload-skill-bundle").value);
+      form.append("archive",file);
+      notify("正在上传并校验 Skill ZIP…");
+      return consoleMutation("/admin/skills/upload","POST",form,"Skill ZIP 已上传并登记，可在 Agent 中选择此版本。",created=>{skills.push(created);$("skill-upload-form").reset();});
     });
     $("skill-form").addEventListener("submit",event=>{
       event.preventDefault();

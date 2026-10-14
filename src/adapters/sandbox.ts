@@ -649,7 +649,7 @@ export class SandboxManager {
       bundle,
       async (sid) => {
         signal?.throwIfAborted();
-        const { skills, trafficToken } = await this.store.read(
+        const { skills, hostUploads, trafficToken } = await this.store.read(
           a.tenantId,
           (s) => ({
             skills: skillIds.map((id) => {
@@ -658,6 +658,15 @@ export class SandboxManager {
                 throw new Fault(403, "SKILL_DENIED");
               return { path: skill.path, digest: skill.digest };
             }),
+            hostUploads: skillIds
+              .map((id) => s.skills[id]!)
+              .filter((skill) => skill.hostUpload)
+              .map(({ id, bundle, path, hostUpload }) => ({
+                id,
+                bundle,
+                path,
+                hostUpload,
+              })),
             trafficToken: s.workspaces[wid]?.sandboxTrafficToken,
           }),
         );
@@ -669,6 +678,7 @@ export class SandboxManager {
             ...args,
             _skillIds: [...skillIds],
             _skillManifests: skills,
+            _skillHostUploads: hostUploads,
           },
           trafficToken,
         );

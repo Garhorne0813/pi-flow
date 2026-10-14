@@ -134,7 +134,7 @@ Session 绑定稳定的逻辑 Agent。新独立任务使用当前生效版本；
 
 服务启动后访问 **http://127.0.0.1:8080/admin/ui**（兼容 `/admin/agents/ui`）。Demo 使用 `DEV_TOKEN`；生产使用具备 `harness-admin` 角色的 UCS JWT。控制台无需独立前端构建。
 
-可管理 Agent 版本与访问范围、Skills、MCP 服务和子 Agent 委派，查看部署能力并保存新 Agent 草稿的租户默认值。部署凭证、卷、Endpoint 与权限上限仍由服务端配置。
+可管理 Agent 版本与访问范围、Skills、MCP 服务和子 Agent 委派，查看部署能力并保存新 Agent 草稿的租户默认值。部署凭证、卷、Endpoint 与权限上限仍由服务端配置。 Skills 支持上传单 Skill ZIP，自动安装到共享 hostPath 并登记不可变版本；部署需为 API 配置上传目录写权限。
 
 操作细节、令牌处理与配置冲突规则见 [管理控制台文档](docs/admin-console.zh-CN.md)。
 
