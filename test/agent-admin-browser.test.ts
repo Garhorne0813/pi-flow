@@ -337,16 +337,22 @@ test(
       await page.locator("#skill-zip-dropzone").evaluate((target) => {
         const transfer = new DataTransfer();
         transfer.items.add(new File([""], "folder"));
-        Object.defineProperty(transfer.items[0], "webkitGetAsEntry", {
-          value: Object.prototype.valueOf.bind({ isDirectory: true }),
-        });
-        target.dispatchEvent(
-          new DragEvent("drop", {
-            bubbles: true,
-            cancelable: true,
-            dataTransfer: transfer,
-          }),
-        );
+        // Chromium can return a fresh item wrapper for each lookup. Patch the
+        // prototype only for this synchronous drop to emulate a directory entry.
+        const original = DataTransferItem.prototype.webkitGetAsEntry;
+        try {
+          DataTransferItem.prototype.webkitGetAsEntry =
+            Object.prototype.valueOf.bind({ isDirectory: true });
+          target.dispatchEvent(
+            new DragEvent("drop", {
+              bubbles: true,
+              cancelable: true,
+              dataTransfer: transfer,
+            }),
+          );
+        } finally {
+          DataTransferItem.prototype.webkitGetAsEntry = original;
+        }
       });
       assert.match(
         (await page.locator("#message").textContent()) || "",
