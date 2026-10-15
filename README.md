@@ -171,6 +171,8 @@ See [acceptance requirements](docs/acceptance.md) for production gates and valid
 
 ## Development
 
+PR 自动执行 Node 24 质量门禁和真实 PostgreSQL 测试；开发、发布、分支保护与回滚步骤见 [docs/release.md](docs/release.md)。
+
 ```bash
 npm run check
 npm test
