@@ -25,10 +25,13 @@ export const SkillVolumeSchema = z.union([
 ]);
 export type SkillVolume = z.infer<typeof SkillVolumeSchema>;
 export const HostSkillRootsSchema = z.array(absoluteDirectory);
+export const DEFAULT_HOST_SKILL_ROOTS: readonly string[] = Object.freeze([
+  "/data/agent-skills",
+]);
 
 export function validateSkillBindings(
   bindings: Record<string, SkillVolume>,
-  roots: readonly string[] = [],
+  roots: readonly string[] = DEFAULT_HOST_SKILL_ROOTS,
 ) {
   HostSkillRootsSchema.parse(roots);
   const volumes = new Set<string>(),

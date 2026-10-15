@@ -135,7 +135,7 @@ Agent 发布示例：
 
 `maxSteps` 统计模型 turn 和实际工具执行，共享于父子任务树。Subagents 引用已发布 AgentVersion ID；委派能力需要 tools 中的 `delegate_to_agent`。每次发布生成新 UUID，不修改旧配置；access/status 是独立的治理字段，允许即时撤销。没有运行时扩展代码或自定义 URL 字段。
 
-Skills 登记（不会上传或执行文件）：
+手动 Skills 登记（不会上传或执行文件；ZIP 上传见本文末尾）：
 
 ```json
 {
@@ -148,9 +148,9 @@ Skills 登记（不会上传或执行文件）：
 }
 ```
 
-Skill 登记只保存元数据。生产部署必须在 `SKILL_VOLUMES_JSON` 为该 ID 配置一致的 Bundle 和路径；每个技能版本选择一个预发布 Volume 或经部署 allowlist 批准的 `hostPath` 目录（两者互斥），根目录存放 `SKILL.md` 和辅助文件。只有 Agent 的 `skills` 列表对应的存储源会被只读挂载到各自 SKILL.md 的父目录。Bundle 是租户授权分组，不是整包挂载源。重复或相互包含的挂载路径会在发布 Agent 时拒绝。空列表不挂载技能。受信任的远程适配器在所有工具执行前验证已选 SKILL.md 的规范路径与摘要；read/grep 对实际读取的 manifest 字节再次校验，`..` 和指向 manifest 的符号链接别名遵循相同规则。无法确认登记 manifest 身份时返回 `SKILL_IDENTITY_UNCONFIRMED`，摘要不匹配返回 `SKILL_DIGEST_MISMATCH` (409)，不返回内容。登记 manifest 本身必须是规范路径下的普通文件，不能是符号链接；辅助文件在校验通过后仍可正常读取。bash 使用执行前校验，技能存储必须保持不可变。
+手动 Skill 登记只保存元数据。手动部署需要在 `SKILL_VOLUMES_JSON` 为该 ID 配置一致的 Bundle 和路径；ZIP 上传的版本自动解析挂载，无需该映射；每个技能版本默认使用经部署 allowlist 批准的 `hostPath` 目录，也可显式选择预发布 Volume（两者互斥），根目录存放 `SKILL.md` 和辅助文件。只有 Agent 的 `skills` 列表对应的存储源会被只读挂载到各自 SKILL.md 的父目录。Bundle 是租户授权分组，不是整包挂载源。重复或相互包含的挂载路径会在发布 Agent 时拒绝。空列表不挂载技能。受信任的远程适配器在所有工具执行前验证已选 SKILL.md 的规范路径与摘要；read/grep 对实际读取的 manifest 字节再次校验，`..` 和指向 manifest 的符号链接别名遵循相同规则。无法确认登记 manifest 身份时返回 `SKILL_IDENTITY_UNCONFIRMED`，摘要不匹配返回 `SKILL_DIGEST_MISMATCH` (409)，不返回内容。登记 manifest 本身必须是规范路径下的普通文件，不能是符号链接；辅助文件在校验通过后仍可正常读取。bash 使用执行前校验，技能存储必须保持不可变。
 
-Host 模式仅能通过部署环境配置 `SKILL_VOLUMES_JSON` 的 `hostPath` 和 `SKILL_HOST_ROOTS_JSON` 启用，Skill 登记与 Agent 发布请求不接受 `hostPath`/`volume` 字段；Agent 仍只指定 Skill ID，可混用两种后端。未经批准的源路径返回 `SKILL_HOST_PATH_DENIED`，不可访问、符号链接或特殊文件源返回 `SKILL_HOST_SOURCE_UNSAFE`，缺失或非只读挂载返回 `SKILL_HOST_MOUNT_UNCONFIRMED`。同一 Agent 所选 Skills 的目标冲突返回 `SKILL_MOUNT_CONFLICT`，源目录重复/嵌套返回 `SKILL_HOST_SOURCE_CONFLICT`。预检失败且实例已确认删除时释放配额，修正配置后可重试；删除无法确认时保留 `unknown` 配额及实例 ID（容量记录、工作区状态和审计日志）。源路径/后端变更触发实例重建；快照 scope 不一致拒绝恢复。Host 源目录必须在 API/Worker 与 Cubelet 上以相同路径共享同一文件系统；本版本不能验证的远程节点本地目录会被拒绝。完整目录、环境配置、注册/发布及节点生命周期示例见 [部署文档](deployment.md#local-host-skills--cubelet-宿主机技能目录)。
+默认部署使用 `SKILL_VOLUMES_JSON` 的 `hostPath`；`SKILL_HOST_ROOTS_JSON` 未设置时默认为 `["/data/agent-skills"]`，显式列表替换默认值，`[]` 禁用 Host 源。手动部署技能的存储绑定仍需显式配置；上传的技能从租户登记元数据自动解析 Host 挂载，Skill 登记与 Agent 发布请求不接受 `hostPath`/`volume` 字段；Agent 仍只指定 Skill ID，可混用两种后端。未经批准的源路径返回 `SKILL_HOST_PATH_DENIED`，不可访问、符号链接或特殊文件源返回 `SKILL_HOST_SOURCE_UNSAFE`，缺失或非只读挂载返回 `SKILL_HOST_MOUNT_UNCONFIRMED`。同一 Agent 所选 Skills 的目标冲突返回 `SKILL_MOUNT_CONFLICT`，源目录重复/嵌套返回 `SKILL_HOST_SOURCE_CONFLICT`。预检失败且实例已确认删除时释放配额，修正配置后可重试；删除无法确认时保留 `unknown` 配额及实例 ID（容量记录、工作区状态和审计日志）。源路径/后端变更触发实例重建；快照 scope 不一致拒绝恢复。Host 源目录必须在 API/Worker 与 Cubelet 上以相同路径共享同一文件系统；本版本不能验证的远程节点本地目录会被拒绝。完整目录、环境配置、注册/发布及节点生命周期示例见 [部署文档](deployment.md#local-host-skills--cubelet-宿主机技能目录)。
 
 MCP 只发现该 Agent 的 `mcpServers` 列表；其他 Server 不出现在模型工具列表中，猜测工具名也不能调用或申请审批。子 Agent 使用父子 Server/技能列表的交集。管理 API 的注册目录仅供管理员管理，不作为 Agent 的工具发现目录。
 
@@ -253,3 +253,21 @@ Run 查询、任务提交（含幂等重试）、交互续跑和取消响应统�
 默认值保存成功返回 `{agentDefaults, defaultsRevision}`，修订号递增。旧数据的初始修订号为 0；未提供 `expectedRevision` 返回 400。客户端收到 409 后需重新读取最新配置，保留草稿，并由管理员明确选择重新载入或使用最新修订号重试；重复并发冲突仍返回 409，不自动覆盖。
 
 管理控制台按逻辑 Agent 显示版本身份和生效状态；“发布后续版本”调用 `/admin/agents/{agentId}/versions`，“激活此版本”调用 `/admin/agents/{agentId}/active-version`。管理员版本列表额外返回 `agentId`、`activeVersionId` 和当前逻辑 Agent 的 `allowedUsers`，不使用历史 ACL 快照。控制台权限保存调用 `/admin/logical-agents/{agentId}/access`。
+
+
+## 上传单 Skill ZIP
+
+`POST /api/v1/admin/skills/upload` 要求管理员身份和当前租户的 Bundle 授权。使用 `multipart/form-data`：`id`（如 `review@v1`）、`name`、`bundle`、可选 `description`，以及唯一文件字段 `archive`。不接受 `hostPath`、目标路径、Volume 或客户端摘要。成功返回 201 和已启用的 Skill，包含自动生成的 Sandbox 路径、SKILL.md SHA-256 及 `hostUpload` 包身份/文件数/字节数；不返回宿主机路径。
+
+```bash
+curl -X POST http://127.0.0.1:8080/api/v1/admin/skills/upload \
+  -H 'Authorization: Bearer <admin-token>' \
+  -F 'id=review@v1' -F 'name=Code Review' -F 'bundle=default' \
+  -F 'description=Review workspace code' -F 'archive=@review.zip;type=application/zip'
+```
+
+ZIP 内必须恰有一个 `SKILL.md`，位于 ZIP 根目录或唯一顶层 Skill 目录内；保留 scripts/references 等辅助文件和执行位，忽略常见 macOS 打包元数据。拒绝路径穿越、绝对路径、链接/特殊文件、加密、重复/冲突路径、损坏的 CRC、无效 UTF-8 清单和多个 Skill。限制为 ZIP 10 MiB、解压总量 32 MiB、单文件 8 MiB、SKILL.md 128 KiB、1000 个文件及 10000 个目录树条目；每个 API 进程最多同时处理两次上传。现有 JSON API 的 350000 字节限制不变。
+
+`GET /admin/configuration` 返回 `skillUploads` 的 enabled 与各项大小/数量限制。`SKILL_HOST_ROOTS_JSON=[]` 禁用上传；默认 `SKILL_UPLOAD_ROOT` 是第一个获批 Host 根目录。实际共享目录必须由部署端预先准备并允许 API 写入 `uploads/`，见[部署说明](deployment.md#skill-zip-uploads--技能-zip-上传)。新 Worker 根据租户持久化元数据和相同上传根目录解析只读挂载，不需要修改 `SKILL_VOLUMES_JSON` 或重启。
+
+失败返回 400（格式/授权 Bundle/ZIP 校验）、401/403（身份）、409（不可变版本/包已存在）、413（大小/数量超限）、415（非 multipart）、429（上传并发已满）、503（上传禁用或共享存储不可用）。上传审计记录文件数/字节数，不包含文件内容。重复 ID 不覆盖现有版本；不同租户的相同 ID 写入不同目录。确定未登记的失败会清理新目录；无法确认数据库提交结果时保留目录，避免删除可能已被引用的版本，需先刷新登记列表或由运维核对数据库后处理孤立目录。

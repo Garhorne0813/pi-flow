@@ -55,6 +55,10 @@ export const registries = String.raw`    function switchTab(tab) {
         }
       }
       const deployment = configuration && configuration.deployment || {};
+      options("upload-skill-bundle",deployment.bundles || []);
+      const upload = configuration && configuration.skillUploads;
+      $("skill-upload-status").textContent = !token ? "连接后查看上传能力。" : upload && upload.enabled ? "ZIP 最大 " + Math.floor(upload.maxArchiveBytes / 1024 / 1024) + " MiB，解压后最大 " + Math.floor(upload.maxExpandedBytes / 1024 / 1024) + " MiB，最多 " + upload.maxFiles + " 个文件。由服务器选择共享 hostPath，Sandbox 只读挂载。更新内容请使用新版本 ID。" : "服务器未启用 hostPath 上传；仍可登记已部署的 Skill。";
+      $("upload-skill").disabled = busy || !token || !(upload && upload.enabled);
       options("skill-bundle",deployment.bundles || []);options("mcp-endpoint",deployment.endpoints || []);
       options("provider-options",[...new Set((deployment.models || []).map(m=>m.provider))]);options("model-options",[...new Set((deployment.models || []).map(m=>m.modelId))]);
       const rows = $("deployment-settings");rows.replaceChildren();

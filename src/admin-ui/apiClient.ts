@@ -5,10 +5,11 @@ export const apiClient = String.raw`    function current(session) {
     async function api(path, method, body, session = connection) {
       current(session);
       if (!token) throw new Error("请先连接管理员令牌");
+      const multipart = typeof FormData !== "undefined" && body instanceof FormData;
       const response = await fetch("/api/v1" + path, {
         method: method || "GET",
-        headers: {Authorization: "Bearer " + token, ...(body === undefined ? {} : {"Content-Type":"application/json"})},
-        ...(body === undefined ? {} : {body:JSON.stringify(body)}),
+        headers: {Authorization: "Bearer " + token, ...(body === undefined || multipart ? {} : {"Content-Type":"application/json"})},
+        ...(body === undefined ? {} : {body:multipart ? body : JSON.stringify(body)}),
         cache:"no-store",
         credentials:"omit",
         signal:session.signal

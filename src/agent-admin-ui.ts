@@ -10,7 +10,12 @@ export const agentAdminHTML = String.raw`<!doctype html>
   <meta name="referrer" content="no-referrer">
   <title>管理控制台 · Pi-Flow</title>
   <style>
-${styles}  </style>
+${styles}    .zip-dropzone { overflow-wrap:anywhere; padding:20px; border:2px dashed #c2cee4; border-radius:12px; background:#f8faff; text-align:center; transition:background .15s,border-color .15s; }
+    .zip-dropzone.dragging { border-color:#405cf5; background:#edf2ff; }
+    .zip-dropzone[aria-disabled="true"] { opacity:.6; }
+    .zip-dropzone:focus-within { outline:2px solid #a0b4ff; outline-offset:2px; }
+    .zip-dropzone p { margin:0 0 12px; }
+  </style>
 </head>
 <body>
   <header class="topbar">
@@ -138,7 +143,24 @@ ${styles}  </style>
     <section id="view-skills" hidden>
       <div class="console-grid">
         <div><div class="panel-head"><h2>已登记 Skills</h2><span id="skill-count" class="pill">0</span></div><div id="skill-registry" class="resource-list"></div></div>
-        <section class="panel"><div class="panel-head"><h2>登记 Skill 版本</h2></div><form id="skill-form" class="pad">
+        <section class="panel"><div class="panel-head"><h2>上传 Skill ZIP</h2></div>
+          <form id="skill-upload-form" class="pad">
+            <p class="note">ZIP 中包含一个 Skill：SKILL.md 位于根目录，或位于唯一的顶层目录中，可附带 scripts / references 等文件。上传后自动登记为不可变版本，可直接在 Agent 中选择。</p>
+            <p id="skill-upload-status" class="note" role="status" aria-live="polite">连接后查看上传能力。</p>
+            <div class="field-wrap"><label class="field" for="upload-skill-id">版本 ID</label><input id="upload-skill-id" class="full" required maxlength="200" pattern="[a-zA-Z0-9_\-]+@[a-zA-Z0-9_\-]+" placeholder="code-review@v1"></div>
+            <div class="field-wrap"><label class="field" for="upload-skill-name">名称</label><input id="upload-skill-name" class="full" required maxlength="100" placeholder="代码审查"></div>
+            <div class="field-wrap"><label class="field" for="upload-skill-description">描述</label><textarea id="upload-skill-description" class="full" maxlength="2000"></textarea></div>
+            <div class="field-wrap"><label class="field" for="upload-skill-bundle">Bundle</label><select id="upload-skill-bundle" class="full" required></select></div>
+            <div class="field-wrap"><label class="field" for="skill-zip">Skill ZIP 包</label>
+              <div id="skill-zip-dropzone" class="zip-dropzone" role="group" aria-label="Skill ZIP 拖拽上传区" aria-disabled="true">
+                <p>将单个 ZIP 文件拖到这里</p>
+                <input id="skill-zip" class="full" type="file" accept=".zip,application/zip,application/x-zip-compressed" aria-describedby="skill-zip-selection" required disabled>
+                <p id="skill-zip-selection" class="note" role="status" aria-live="polite" style="margin:12px 0 0">也可点击选择文件，填写版本信息后点击上传。</p>
+              </div>
+            </div>
+            <button id="upload-skill" class="btn primary" type="submit" disabled>上传并登记版本</button>
+          </form>
+          <details><summary class="pad">登记已有部署版本</summary><form id="skill-form" class="pad">
           <p class="note">Skill 版本不可变。更新内容需登记新的版本 ID；Skill 文件和卷需先部署到服务器。</p>
           <div class="field-wrap"><label class="field" for="skill-id">版本 ID</label><input id="skill-id" class="full" required pattern="[a-zA-Z0-9_\-]+@[a-zA-Z0-9_\-]+" placeholder="code-review@v1"></div>
           <div class="field-wrap"><label class="field" for="skill-name">名称</label><input id="skill-name" class="full" required maxlength="100"></div>
@@ -147,7 +169,7 @@ ${styles}  </style>
           <div class="field-wrap"><label class="field" for="skill-path">文件路径</label><input id="skill-path" class="full" required pattern="/skills/([a-zA-Z0-9_\-]+/)+SKILL\.md" placeholder="/skills/code-review/SKILL.md"></div>
           <div class="field-wrap"><label class="field" for="skill-digest">SHA-256 摘要</label><input id="skill-digest" class="full" required pattern="[a-f0-9]{64}" minlength="64" maxlength="64" placeholder="Skill 文件的 SHA-256"></div>
           <button id="register-skill" class="btn primary" type="submit" disabled>登记版本</button>
-        </form></section>
+        </form></details></section>
       </div>
     </section>
     <section id="view-mcp" hidden>

@@ -1,4 +1,5 @@
 import { settings } from "./settings.js";
+import { skillUpload } from "./skillUpload.js";
 import { registries } from "./registries.js";
 import { agentEditor } from "./agentEditor.js";
 import { controls } from "./controls.js";
@@ -71,6 +72,7 @@ export const controller = String.raw`    "use strict";
       token = "";agents = [];skills = [];mcps = [];selected = null;configuration = null;defaultsFormInitialized = false;
       $("mcp-check-result").textContent = "";
       $("skill-form").reset?.();$("mcp-form").reset?.();
+      $("skill-upload-form").reset?.();resetSkillZip();
       $("token").value = "";
       $("disconnect").disabled = true;$("connection").textContent = "未连接";
       newDraft(true);renderConsole();setBusy(false);
@@ -104,6 +106,10 @@ ${apiClient}${controls}${agentEditor}    async function refresh(preferredId, ses
     }
     function setBusy(value) {
       busy = value;
+      $("upload-skill").disabled = value || !token || !(configuration && configuration.skillUploads && configuration.skillUploads.enabled);
+      renderSkillZip();
+      for (const input of $("skill-upload-form").querySelectorAll("input,textarea,select")) input.disabled = value || !token;
+      $("skill-zip").disabled = !canSelectSkillZip();
       for (const input of $("form").querySelectorAll("input,textarea")) input.disabled = value || !token || formMode === "view";
       for (const input of $("defaults-form").querySelectorAll("input,select")) input.disabled = value || !token;
       $("connect").disabled = value;
@@ -260,7 +266,7 @@ ${apiClient}${controls}${agentEditor}    async function refresh(preferredId, ses
       } catch(e) { if (session === connection) notify("更新失败：" + e.message,true); }
       finally {if (session === connection) setBusy(false);}
     });
-${registries}    for (const tab of ["agents","skills","mcp","delegation","settings"]) $("tab-" + tab).addEventListener("click",()=>switchTab(tab));
+${registries}${skillUpload}    for (const tab of ["agents","skills","mcp","delegation","settings"]) $("tab-" + tab).addEventListener("click",()=>switchTab(tab));
     $("refresh-console").addEventListener("click",async()=>{
       if (!token || busy) return;const session = connection;setBusy(true);
       try {await refresh(undefined,session,true);notify("数据已刷新。");}
@@ -278,4 +284,5 @@ ${registries}    for (const tab of ["agents","skills","mcp","delegation","settin
 ${settings}
     renderConsole();
     newDraft();
+    renderSkillZip();
 `;
