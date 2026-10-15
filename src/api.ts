@@ -2,6 +2,12 @@ import { alerts } from "./alerts.js";
 import { agentAdminHTML } from "./agent-admin-ui.js";
 import { randomBytes } from "node:crypto";
 import Fastify from "fastify";
+import multipart from "@fastify/multipart";
+import {
+  HostSkillPackages,
+  SkillUploadFields,
+  skillZipLimits,
+} from "./skill-packages.js";
 import { usageReport, policyFromEnv } from "./usage.js";
 import { telemetry, traceContext } from "./telemetry.js";
 import { bounded } from "./health.js";
@@ -71,6 +77,7 @@ export function buildAPI(
   auth: Auth,
   sandbox: SandboxManager,
   mcp?: MCPManager,
+  skillPackages?: HostSkillPackages,
 ) {
   const app = Fastify({
     logger: {
@@ -80,6 +87,7 @@ export function buildAPI(
     bodyLimit: 350000,
     requestTimeout: 30000,
   });
+  void app.register(multipart);
   const actors = new WeakMap<object, Actor>();
   const actor = (req: object) => actors.get(req)!;
   app.setErrorHandler((err, req, reply) => {
@@ -171,6 +179,10 @@ export function buildAPI(
         sandbox: sandbox.policy,
         editable: false,
         changesRequireRestart: true,
+      },
+      skillUploads: skillPackages?.configuration ?? {
+        enabled: false,
+        ...skillZipLimits,
       },
       defaultsRevision: settings.defaultsRevision,
       agentDefaults: settings.agentDefaults ?? {
@@ -439,6 +451,105 @@ export function buildAPI(
       items: Object.values(s.skills).slice(p.offset, p.offset + p.limit),
     }));
   });
+  app.post(
+    "/api/v1/admin/skills/upload",
+    { bodyLimit: skillZipLimits.maxArchiveBytes + 65536 },
+    async (req, reply) => {
+      const a = actor(req);
+      admin(a);
+      if (!skillPackages?.configuration.enabled)
+        throw new Fault(
+          503,
+          "SKILL_UPLOAD_DISABLED",
+          "Host Skill uploads are not configured",
+        );
+      return skillPackages.withSlot(async () => {
+        if (!req.isMultipart())
+          throw new Fault(
+            415,
+            "SKILL_ZIP_CONTENT_TYPE",
+            "Send a multipart form with one archive file",
+          );
+        const fields: Record<string, unknown> = Object.create(null);
+        let archive: Buffer | undefined;
+        for await (const part of req.parts({
+          limits: {
+            files: 1,
+            fields: 4,
+            parts: 5,
+            fileSize: skillZipLimits.maxArchiveBytes,
+            fieldSize: 8192,
+          },
+        })) {
+          if (part.type === "file") {
+            if (part.fieldname !== "archive" || archive)
+              throw new Fault(
+                400,
+                "INVALID_REQUEST",
+                "Exactly one archive file is required",
+              );
+            archive = await part.toBuffer();
+            if (part.file.truncated) throw new Fault(413, "SKILL_ZIP_LIMIT");
+          } else {
+            if (Object.hasOwn(fields, part.fieldname) || part.valueTruncated)
+              throw new Fault(
+                400,
+                "INVALID_REQUEST",
+                "Duplicate or truncated upload field",
+              );
+            fields[part.fieldname] = part.value;
+          }
+        }
+        const input = SkillUploadFields.parse(fields);
+        if (!archive)
+          throw new Fault(400, "INVALID_REQUEST", "Choose a Skill ZIP archive");
+        if (!service.hasBundle(input.bundle, a.tenantId))
+          throw new Fault(400, "UNKNOWN_SKILL_BUNDLE");
+        await service.store.readMetadata(a.tenantId, ["skills"], (s) => {
+          if (s.skills[input.id])
+            throw new Fault(409, "IMMUTABLE_SKILL_VERSION");
+        });
+        if (req.raw.aborted) throw new Fault(400, "UPLOAD_ABORTED");
+        if (a.expiresAt !== undefined && a.expiresAt <= Date.now())
+          throw new Fault(401, "UNAUTHENTICATED");
+        const prepared = await skillPackages.prepare(
+          a.tenantId,
+          input,
+          archive,
+        );
+        let metadataMayHaveCommitted = false;
+        try {
+          if (req.raw.aborted) throw new Fault(400, "UPLOAD_ABORTED");
+          if (a.expiresAt !== undefined && a.expiresAt <= Date.now())
+            throw new Fault(401, "UNAUTHENTICATED");
+          const skill = await service.store.tx(a.tenantId, (s) => {
+            if (req.raw.aborted) throw new Fault(400, "UPLOAD_ABORTED");
+            if (a.expiresAt !== undefined && a.expiresAt <= Date.now())
+              throw new Fault(401, "UNAUTHENTICATED");
+            if (s.skills[input.id])
+              throw new Fault(409, "IMMUTABLE_SKILL_VERSION");
+            s.skills[input.id] = prepared.skill;
+            audit(
+              s,
+              a,
+              "skill.upload",
+              input.id,
+              JSON.stringify({
+                files: prepared.skill.hostUpload!.files,
+                bytes: prepared.skill.hostUpload!.bytes,
+              }),
+            );
+            metadataMayHaveCommitted = true;
+            return prepared.skill;
+          });
+          return reply.code(201).send(skill);
+        } catch (error) {
+          if (!metadataMayHaveCommitted) await prepared.discard();
+          throw error;
+        }
+      });
+    },
+  );
   app.post("/api/v1/admin/skills", async (req, reply) => {
     const a = actor(req);
     admin(a);

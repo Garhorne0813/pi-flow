@@ -172,6 +172,12 @@ export type Interaction = {
   continuationRunId?: string;
 };
 export type Skill = {
+  hostUpload?: {
+    key: string;
+    archiveDigest: string;
+    files: number;
+    bytes: number;
+  };
   id: string;
   name: string;
   description: string;

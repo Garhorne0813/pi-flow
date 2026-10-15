@@ -132,6 +132,8 @@ See the [API reference](docs/api.md) for workspace sharing, history and Todos, f
 
 ## Management console
 
+Skills supports uploading a single-Skill ZIP into shared hostPath storage, automatically registering an immutable version. The API needs write access to the configured upload namespace; see [deployment](docs/deployment.md#skill-zip-uploads--技能-zip-上传).
+
 After starting the API, open **http://127.0.0.1:8080/admin/ui** (`/admin/agents/ui` remains supported). Demo accepts `DEV_TOKEN`; production uses a UCS JWT with the `harness-admin` role. No separate frontend build is needed.
 
 Manage agent versions and access, skills, MCP servers, and subagent delegation. Inspect deployment capabilities and save tenant defaults for new agent drafts. Deployment credentials, volumes, endpoints, and capability grants are configured server-side.

@@ -76,6 +76,11 @@ export const agentAdminHTML = String.raw`<!doctype html>
     code { font-size: 11px; overflow-wrap: anywhere; }
     @media(max-width:1150px) { .layout { grid-template-columns: 260px minmax(0,1fr); } .side-detail { grid-column: 2; } }
     @media(max-width:750px) { .layout { display:block; } .layout > .panel { margin-bottom: 16px; } .agent-list { max-height: 260px; } .grid2, .grid3 { grid-template-columns: 1fr; } .auth input { width: 200px; } }
+    .zip-dropzone { overflow-wrap:anywhere; padding:20px; border:2px dashed #c2cee4; border-radius:12px; background:#f8faff; text-align:center; transition:background .15s,border-color .15s; }
+    .zip-dropzone.dragging { border-color:#405cf5; background:#edf2ff; }
+    .zip-dropzone[aria-disabled="true"] { opacity:.6; }
+    .zip-dropzone:focus-within { outline:2px solid #a0b4ff; outline-offset:2px; }
+    .zip-dropzone p { margin:0 0 12px; }
     [hidden] { display:none !important; }
     .tabs { display:flex; gap:8px; flex-wrap:wrap; margin:0 0 22px; }
     .tabs .active { background:#111b35; color:white; border-color:#111b35; }
@@ -203,7 +208,24 @@ export const agentAdminHTML = String.raw`<!doctype html>
     <section id="view-skills" hidden>
       <div class="console-grid">
         <div><div class="panel-head"><h2>已登记 Skills</h2><span id="skill-count" class="pill">0</span></div><div id="skill-registry" class="resource-list"></div></div>
-        <section class="panel"><div class="panel-head"><h2>登记 Skill 版本</h2></div><form id="skill-form" class="pad">
+        <section class="panel"><div class="panel-head"><h2>上传 Skill ZIP</h2></div>
+          <form id="skill-upload-form" class="pad">
+            <p class="note">ZIP 中包含一个 Skill：SKILL.md 位于根目录，或位于唯一的顶层目录中，可附带 scripts / references 等文件。上传后自动登记为不可变版本，可直接在 Agent 中选择。</p>
+            <p id="skill-upload-status" class="note" role="status" aria-live="polite">连接后查看上传能力。</p>
+            <div class="field-wrap"><label class="field" for="upload-skill-id">版本 ID</label><input id="upload-skill-id" class="full" required maxlength="200" pattern="[a-zA-Z0-9_\-]+@[a-zA-Z0-9_\-]+" placeholder="code-review@v1"></div>
+            <div class="field-wrap"><label class="field" for="upload-skill-name">名称</label><input id="upload-skill-name" class="full" required maxlength="100" placeholder="代码审查"></div>
+            <div class="field-wrap"><label class="field" for="upload-skill-description">描述</label><textarea id="upload-skill-description" class="full" maxlength="2000"></textarea></div>
+            <div class="field-wrap"><label class="field" for="upload-skill-bundle">Bundle</label><select id="upload-skill-bundle" class="full" required></select></div>
+            <div class="field-wrap"><label class="field" for="skill-zip">Skill ZIP 包</label>
+              <div id="skill-zip-dropzone" class="zip-dropzone" role="group" aria-label="Skill ZIP 拖拽上传区" aria-disabled="true">
+                <p>将单个 ZIP 文件拖到这里</p>
+                <input id="skill-zip" class="full" type="file" accept=".zip,application/zip,application/x-zip-compressed" aria-describedby="skill-zip-selection" required disabled>
+                <p id="skill-zip-selection" class="note" role="status" aria-live="polite" style="margin:12px 0 0">也可点击选择文件，填写版本信息后点击上传。</p>
+              </div>
+            </div>
+            <button id="upload-skill" class="btn primary" type="submit" disabled>上传并登记版本</button>
+          </form>
+          <details><summary class="pad">登记已有部署版本</summary><form id="skill-form" class="pad">
           <p class="note">Skill 版本不可变。更新内容需登记新的版本 ID；Skill 文件和卷需先部署到服务器。</p>
           <div class="field-wrap"><label class="field" for="skill-id">版本 ID</label><input id="skill-id" class="full" required pattern="[a-zA-Z0-9_\-]+@[a-zA-Z0-9_\-]+" placeholder="code-review@v1"></div>
           <div class="field-wrap"><label class="field" for="skill-name">名称</label><input id="skill-name" class="full" required maxlength="100"></div>
@@ -212,7 +234,7 @@ export const agentAdminHTML = String.raw`<!doctype html>
           <div class="field-wrap"><label class="field" for="skill-path">文件路径</label><input id="skill-path" class="full" required pattern="/skills/([a-zA-Z0-9_\-]+/)+SKILL\.md" placeholder="/skills/code-review/SKILL.md"></div>
           <div class="field-wrap"><label class="field" for="skill-digest">SHA-256 摘要</label><input id="skill-digest" class="full" required pattern="[a-f0-9]{64}" minlength="64" maxlength="64" placeholder="Skill 文件的 SHA-256"></div>
           <button id="register-skill" class="btn primary" type="submit" disabled>登记版本</button>
-        </form></section>
+        </form></details></section>
       </div>
     </section>
     <section id="view-mcp" hidden>
@@ -291,6 +313,7 @@ fetch"></textarea></div>
       connection = new AbortController();
       token = "";agents = [];skills = [];mcps = [];selected = null;configuration = null;defaultsFormInitialized = false;
       $("mcp-check-result").textContent = "";
+      $("skill-upload-form").reset?.();resetSkillZip();
       $("token").value = "";
       $("disconnect").disabled = true;$("connection").textContent = "未连接";
       newDraft();renderConsole();setBusy(false);
@@ -298,10 +321,11 @@ fetch"></textarea></div>
     async function api(path, method, body, session = connection) {
       current(session);
       if (!token) throw new Error("请先连接管理员令牌");
+      const multipart = typeof FormData !== "undefined" && body instanceof FormData;
       const response = await fetch("/api/v1" + path, {
         method: method || "GET",
-        headers: {Authorization: "Bearer " + token, ...(body === undefined ? {} : {"Content-Type":"application/json"})},
-        ...(body === undefined ? {} : {body:JSON.stringify(body)}),
+        headers: {Authorization: "Bearer " + token, ...(body === undefined || multipart ? {} : {"Content-Type":"application/json"})},
+        ...(body === undefined ? {} : {body:multipart ? body : JSON.stringify(body)}),
         cache:"no-store",
         credentials:"omit",
         signal:session.signal
@@ -483,6 +507,10 @@ fetch"></textarea></div>
     function setBusy(value) {
       busy = value;
       $("connect").disabled = value;
+      $("upload-skill").disabled = value || !token || !(configuration && configuration.skillUploads && configuration.skillUploads.enabled);
+      renderSkillZip();
+      for (const input of $("skill-upload-form").querySelectorAll("input,textarea,select")) input.disabled = value || !token;
+      $("skill-zip").disabled = !canSelectSkillZip();
       $("new").disabled = value || !token;
       $("publish").disabled = value || !token || formMode === "view";
       $("clone").disabled = value || !token || !selected;
@@ -665,6 +693,10 @@ fetch"></textarea></div>
         }
       }
       const deployment = configuration && configuration.deployment || {};
+      options("upload-skill-bundle",deployment.bundles || []);
+      const upload = configuration && configuration.skillUploads;
+      $("skill-upload-status").textContent = !token ? "连接后查看上传能力。" : upload && upload.enabled ? "ZIP 最大 " + Math.floor(upload.maxArchiveBytes / 1024 / 1024) + " MiB，解压后最大 " + Math.floor(upload.maxExpandedBytes / 1024 / 1024) + " MiB，最多 " + upload.maxFiles + " 个文件。由服务器选择共享 hostPath，Sandbox 只读挂载。更新内容请使用新版本 ID。" : "服务器未启用 hostPath 上传；仍可登记已部署的 Skill。";
+      $("upload-skill").disabled = busy || !token || !(upload && upload.enabled);
       options("skill-bundle",deployment.bundles || []);options("mcp-endpoint",deployment.endpoints || []);
       options("provider-options",[...new Set((deployment.models || []).map(m=>m.provider))]);options("model-options",[...new Set((deployment.models || []).map(m=>m.modelId))]);
       const rows = $("deployment-settings");rows.replaceChildren();
@@ -718,6 +750,66 @@ fetch"></textarea></div>
       catch(e) {if (session === connection) notify("刷新失败：" + e.message,true);}
       finally {if (session === connection) setBusy(false);}
     });
+    let zipDragDepth = 0;
+    function canSelectSkillZip() { return !!token && !busy && !!(configuration && configuration.skillUploads && configuration.skillUploads.enabled); }
+    function renderSkillZip() {
+      $("skill-zip-dropzone").setAttribute("aria-disabled",String(!canSelectSkillZip()));
+      $("skill-zip").disabled = !canSelectSkillZip();
+      $("skill-zip-dropzone").className = "zip-dropzone" + (canSelectSkillZip() && zipDragDepth ? " dragging" : "");
+      const file = $("skill-zip").files?.[0];
+      $("skill-zip-selection").textContent = file ? "已选择：" + file.name + "（" + (file.size / 1024).toFixed(1) + " KiB）。点击上传并登记版本。" : "也可点击选择文件，填写版本信息后点击上传。";
+    }
+    function resetSkillZip() { zipDragDepth = 0;renderSkillZip(); }
+    function skillZipError(files) {
+      if (files.length !== 1) return "请一次选择一个 Skill ZIP 文件。";
+      if (!/\.zip$/i.test(files[0].name)) return "请选择 .zip 格式的 Skill 包。";
+      if (files[0].size > configuration.skillUploads.maxArchiveBytes) return "ZIP 文件超过上传大小限制。";
+      return "";
+    }
+    $("skill-zip").addEventListener("change",()=>{
+      if (!canSelectSkillZip()) return;
+      const files = [...$("skill-zip").files];
+      if (files.length) {
+        const error = skillZipError(files);
+        if (error) {$("skill-zip").value = "";notify(error,true);} else resetMessage();
+      }
+      resetSkillZip();
+    });
+    for (const type of ["dragenter","dragover","dragleave","drop"]) $("skill-zip-dropzone").addEventListener(type,event=>{
+      event.preventDefault();
+      if (type === "dragleave") {zipDragDepth = Math.max(0,zipDragDepth - 1);renderSkillZip();return;}
+      if (type === "drop") {
+        zipDragDepth = 0;
+        if (!canSelectSkillZip()) {renderSkillZip();return;}
+        const files = [...(event.dataTransfer?.files || [])];
+        const directory = [...(event.dataTransfer?.items || [])].some(item=>item.webkitGetAsEntry?.()?.isDirectory);
+        const error = directory ? "请拖入 ZIP 文件，不支持直接拖入文件夹。" : skillZipError(files);
+        if (error) {notify(error,true);renderSkillZip();return;}
+        const transfer = new DataTransfer();transfer.items.add(files[0]);
+        $("skill-zip").files = transfer.files;resetMessage();renderSkillZip();return;
+      }
+      if (event.dataTransfer) event.dataTransfer.dropEffect = canSelectSkillZip() ? "copy" : "none";
+      if (type === "dragenter" && canSelectSkillZip()) zipDragDepth++;
+      renderSkillZip();
+    });
+    // Dropping outside the target must not navigate away and discard form drafts.
+    for (const type of ["dragover","drop"]) document.addEventListener?.(type,event=>{
+      if ([...(event.dataTransfer?.types || [])].includes("Files")) {event.preventDefault();if (type === "drop") resetSkillZip();}
+    });
+    $("skill-upload-form").addEventListener("submit",event=>{
+      event.preventDefault();
+      if (!token || busy || !(configuration && configuration.skillUploads && configuration.skillUploads.enabled)) return;
+      const file = $("skill-zip").files[0];
+      if (!file) return notify("请选择包含一个 Skill 的 ZIP 包。",true);
+      const error = skillZipError([file]);
+      if (error) return notify(error,true);
+      const form = new FormData();
+      form.append("id",$("upload-skill-id").value.trim());form.append("name",$("upload-skill-name").value.trim());
+      form.append("description",$("upload-skill-description").value);form.append("bundle",$("upload-skill-bundle").value);
+      form.append("archive",file);
+      notify("正在上传并校验 Skill ZIP…");
+      return consoleMutation("/admin/skills/upload","POST",form,"Skill ZIP 已上传并登记，可在 Agent 中选择此版本。",created=>{skills.push(created);$("skill-upload-form").reset();resetSkillZip();});
+    });
     $("skill-form").addEventListener("submit",event=>{
       event.preventDefault();
       return consoleMutation("/admin/skills","POST",{id:$("skill-id").value.trim(),name:$("skill-name").value.trim(),description:$("skill-description").value,bundle:$("skill-bundle").value,path:$("skill-path").value.trim(),digest:$("skill-digest").value.trim()},"Skill 版本已登记。",created=>{skills.push(created);$("skill-form").reset();});
@@ -758,6 +850,7 @@ fetch"></textarea></div>
     });
     renderConsole();
     newDraft();
+    renderSkillZip();
   </script>
 </body>
 </html>
