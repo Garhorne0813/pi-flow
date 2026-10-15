@@ -132,6 +132,8 @@ Session 绑定稳定的逻辑 Agent。新独立任务使用当前生效版本；
 
 ## 管理控制台
 
+Agent 编辑器按逻辑 Agent 分组版本，使用支持键盘操作的配置标签页，发布前展示摘要与差异；切换 Agent 或连接时保护未保存草稿。后续增量见[交付计划](docs/agent-console-roadmap.md)和 [Studio 隔离 RFC](docs/agent-studio-rfc.md)。
+
 服务启动后访问 **http://127.0.0.1:8080/admin/ui**（兼容 `/admin/agents/ui`）。Demo 使用 `DEV_TOKEN`；生产使用具备 `harness-admin` 角色的 UCS JWT。控制台无需独立前端构建。
 
 可管理 Agent 版本与访问范围、Skills、MCP 服务和子 Agent 委派，查看部署能力并保存新 Agent 草稿的租户默认值。部署凭证、卷、Endpoint 与权限上限仍由服务端配置。 Skills 支持上传单 Skill ZIP，自动安装到共享 hostPath 并登记不可变版本；部署需为 API 配置上传目录写权限。
