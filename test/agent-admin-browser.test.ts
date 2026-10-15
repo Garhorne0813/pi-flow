@@ -418,6 +418,7 @@ test(
       );
       await page.locator("#tab-agents").click();
       await page.locator("#name").fill("Uploaded Skill Agent");
+      await page.locator("#editor-tab-capabilities").click();
       await page
         .locator('input[data-group="skills"][value="browser-review@v1"]')
         .check();
