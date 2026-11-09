@@ -1,6 +1,11 @@
+import { ScheduleService } from "./schedules/service.js";
+import { PersonalPostgresStore } from "./personal-postgres-store.js";
+import { MemoryRegistry, PostgresRegistry } from "./store/registry.js";
+import { personalStore } from "./store/personal.js";
+import { PersonalService } from "./personal-service.js";
+import { seedDemo } from "./config/agents.js";
 import { z } from "zod";
-import { MemoryStore, PostgresStore } from "./store.js";
-import { HarnessService } from "./service.js";
+import { MemoryStore } from "./store.js";
 import {
   CubeProvider,
   DemoSandbox,
@@ -19,14 +24,6 @@ export async function bootstrap() {
     throw new Error("DATABASE_URL required");
   if (
     !demo &&
-    (!process.env.LLM_PROVIDER ||
-      !process.env.LLM_MODEL_ID ||
-      !process.env.LLM_API_KEY ||
-      !process.env.LLM_BASE_URL)
-  )
-    throw new Error("Enterprise model gateway configuration required");
-  if (
-    !demo &&
     (!process.env.CUBE_API_URL ||
       !process.env.CUBE_TEMPLATE_ID ||
       !process.env.CUBE_API_KEY ||
@@ -34,9 +31,34 @@ export async function bootstrap() {
       !process.env.CUBE_EXEC_USER)
   )
     throw new Error("Cube configuration required");
-  const store = process.env.DATABASE_URL
-    ? new PostgresStore(process.env.DATABASE_URL)
+  if (process.env.SANDBOX_MULTI_SESSION === "true")
+    throw new Error(
+      "Multi-session sandbox leases are not supported by the current provider",
+    );
+  if (
+    process.env.SANDBOX_NETWORK_MODE &&
+    process.env.SANDBOX_NETWORK_MODE !== "unmanaged"
+  )
+    throw new Error(
+      "Provider network enforcement is required for SANDBOX_NETWORK_MODE",
+    );
+  const backing = process.env.DATABASE_URL
+    ? new PersonalPostgresStore(process.env.DATABASE_URL)
     : new MemoryStore();
+  const registry =
+    backing instanceof PersonalPostgresStore
+      ? new PostgresRegistry(backing.pool)
+      : new MemoryRegistry();
+  if (
+    !demo &&
+    !(await registry.read((s) => s.modelCatalog?.length)) &&
+    (!process.env.LLM_PROVIDER ||
+      !process.env.LLM_MODEL_ID ||
+      !process.env.LLM_API_KEY ||
+      !process.env.LLM_BASE_URL)
+  )
+    throw new Error("Model catalog or LLM gateway configuration required");
+  const store = personalStore(backing, registry);
   const bundles = z
     .record(z.string(), z.string().min(1))
     .parse(
@@ -67,21 +89,15 @@ export async function bootstrap() {
       z.object({ url: z.url(), tokenEnv: z.string().optional() }).strict(),
     )
     .parse(JSON.parse(process.env.MCP_ENDPOINTS_JSON ?? "{}"));
-  if (!demo && !process.env.TENANT_CAPABILITIES_JSON)
-    throw new Error("Explicit tenant capability grants required");
-  const grants = demo
-    ? undefined
-    : z
-        .record(
-          z.string(),
-          z
-            .object({
-              bundles: z.array(z.string()),
-              endpoints: z.array(z.string()),
-            })
-            .strict(),
-        )
-        .parse(JSON.parse(process.env.TENANT_CAPABILITIES_JSON!));
+
+  const grants = undefined;
+  const selectedProvider =
+    process.env.SANDBOX_PROVIDER ?? (demo ? "demo" : "cube");
+  if (
+    !["demo", "cube"].includes(selectedProvider) ||
+    (!demo && selectedProvider === "demo")
+  )
+    throw new Error(`Unsupported SANDBOX_PROVIDER: ${selectedProvider}`);
   const provider = demo
     ? new DemoSandbox()
     : new CubeProvider(
@@ -89,8 +105,9 @@ export async function bootstrap() {
         process.env.CUBE_EXEC_USER!,
         process.env.CUBE_VOLUME_DRIVER!,
       );
-  const service = new HarnessService(
+  const service = new PersonalService(
     store,
+    registry,
     Object.keys(endpoints),
     Object.keys(bundles),
     demo
@@ -101,7 +118,6 @@ export async function bootstrap() {
             modelId: process.env.LLM_MODEL_ID!,
           },
         ],
-    grants,
   );
   const sandbox = new SandboxManager(
     store,
@@ -136,32 +152,11 @@ export async function bootstrap() {
       .min(1)
       .max(32)
       .parse(process.env.WORKER_CONCURRENCY ?? 4),
+    5000,
+    process.env.SCHEDULES_ENABLED === "true"
+      ? new ScheduleService(service)
+      : undefined,
   );
-  if (demo)
-    await store.tx("demo", (s) => {
-      if (!Object.values(s.agents).length)
-        s.agents["00000000-0000-4000-8000-000000000001"] = {
-          id: "00000000-0000-4000-8000-000000000001",
-          enabled: true,
-          publishedAt: new Date().toISOString(),
-          digest: "demo",
-          config: {
-            name: "Demo Agent",
-            systemPrompt: "Demo",
-            agentsMd: [],
-            model: { provider: "demo", modelId: "demo" },
-            tools: ["read", "write", "ls"],
-            skills: [],
-            mcpServers: [],
-            subagents: [],
-            skillBundle: "default",
-            maxTokens: 100000,
-            maxSteps: 30,
-            timeoutSeconds: 600,
-            maxSubagents: 2,
-            maxDepth: 1,
-          },
-        };
-    });
+  if (demo) await registry.tx(seedDemo);
   return { store, service, sandbox, worker };
 }

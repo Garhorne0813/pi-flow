@@ -32,7 +32,7 @@ export async function loadState(
       `WITH RECURSIVE chain AS (
       SELECT run_id,data FROM harness_runs WHERE tenant_id=$1 AND run_id=$2
       UNION
-      SELECT p.run_id,p.data FROM harness_runs p JOIN chain child ON child.data->>'parentRunId'=p.run_id WHERE p.tenant_id=$1
+      SELECT p.run_id,p.data FROM harness_runs p JOIN chain child ON (child.data->>'parentRunId'=p.run_id OR child.data->>'rootRunId'=p.run_id) WHERE p.tenant_id=$1
     ) SELECT data FROM chain`,
       [tenant, runId],
     );
@@ -147,7 +147,7 @@ WITH RECURSIVE chain AS (
  SELECT data FROM harness_runs WHERE tenant_id=$1 AND run_id=$2
  UNION
  SELECT p.data FROM harness_runs p JOIN chain child
- ON p.run_id=child.data->>'parentRunId' WHERE p.tenant_id=$1
+ ON (p.run_id=child.data->>'parentRunId' OR p.run_id=child.data->>'rootRunId') WHERE p.tenant_id=$1
 ), sessions AS (
  SELECT data FROM harness_sessions WHERE tenant_id=$1
  AND session_id IN (SELECT data->>'sessionId' FROM chain)

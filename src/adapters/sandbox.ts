@@ -241,6 +241,14 @@ export class SandboxManager {
     const { skills, scope } = await this.store.tx(a.tenantId, (s) => {
       signal?.throwIfAborted();
       const w = workspace(s, a, wid);
+      if (
+        a.personal &&
+        Object.values(s.runs).some((r) => r.state === "RUNNING") &&
+        !Object.values(s.runs).some(
+          (r) => r.state === "RUNNING" && owner.startsWith(r.id + ":"),
+        )
+      )
+        throw new Fault(409, "WORKSPACE_BUSY");
       if (w.lock && w.lock.expires > Date.now())
         throw new Fault(409, "WORKSPACE_BUSY");
       if (w.bundle && w.bundle !== bundle)
@@ -511,11 +519,29 @@ export class SandboxManager {
     a: Actor,
     wid: string,
     owner: string,
-    op: "read" | "ls" | "write",
+    op: "read" | "ls" | "write" | "delete",
     args: Record<string, unknown>,
   ) {
+    if (a.personal) {
+      const w = await this.store.read(a.tenantId, (s) => {
+        const w = workspace(s, a, wid, true);
+        if (Object.values(s.runs).some((r) => r.state === "RUNNING"))
+          throw new Fault(409, "WORKSPACE_BUSY");
+        return w;
+      });
+      return this.execute(
+        a,
+        wid,
+        owner,
+        w.bundle ?? "default",
+        op,
+        { ...args, _workspaceOnly: true },
+        undefined,
+        w.sandboxSkills ?? [],
+      );
+    }
     owner = `${owner}:${crypto.randomUUID()}`;
-    if (!["read", "ls", "write"].includes(op))
+    if (!["read", "ls", "write", "delete"].includes(op))
       throw new Fault(403, "TOOL_DENIED");
     const raw = args.path ?? "/workspace";
     if (typeof raw !== "string" || raw.includes("\0"))
@@ -523,7 +549,7 @@ export class SandboxManager {
     const path = posix.resolve("/workspace", raw);
     if (path !== "/workspace" && !path.startsWith("/workspace/"))
       throw new Fault(403, "PATH_DENIED");
-    const writing = op === "write";
+    const writing = op === "write" || op === "delete";
     const w = await this.store.tx(a.tenantId, (s) => {
       const w = workspace(s, a, wid, writing);
       if (!w.bundle) throw new Fault(409, "CREATE_SESSION_FIRST");

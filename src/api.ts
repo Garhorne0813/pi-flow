@@ -1,3 +1,6 @@
+import { PersonalService } from "./personal-service.js";
+import { principal } from "./store/registry.js";
+import { personalRoutes } from "./api/personal.js";
 import { alerts } from "./alerts.js";
 import Fastify from "fastify";
 import { usageReport, policyFromEnv } from "./usage.js";
@@ -85,7 +88,17 @@ export function buildAPI(
       )
     )
       return;
-    actors.set(req, await auth(req.headers.authorization));
+    const authenticated = await auth(req.headers.authorization);
+    if (service instanceof PersonalService) {
+      if (
+        req.url.startsWith("/api/v1/workspaces") ||
+        req.url.startsWith("/api/v1/admin/agents") ||
+        req.url.startsWith("/api/v1/admin/skills") ||
+        req.url.startsWith("/api/v1/admin/mcp")
+      )
+        throw new Fault(404, "ROUTE_NOT_FOUND");
+      actors.set(req, await principal(service.registry, authenticated));
+    } else actors.set(req, authenticated);
   });
   app.addHook("onResponse", async (req, reply) => {
     const a = actors.get(req);
@@ -165,11 +178,18 @@ export function buildAPI(
   app.get("/api/v1/agents", async (req) => {
     const a = actor(req),
       p = page.parse(req.query);
-    return service.store.readMetadata(a.tenantId, ["agents"], (s) => ({
-      items: Object.values(s.agents)
-        .filter((v) => agentAllowed(v, a))
-        .slice(p.offset, p.offset + p.limit),
-    }));
+    return service.store.readMetadata(
+      a.tenantId,
+      ["agents", "managedAgents"],
+      (s) => ({
+        items: (service instanceof PersonalService
+          ? Object.values(s.managedAgents ?? {})
+          : Object.values(s.agents)
+        )
+          .filter((v) => agentAllowed(v, a))
+          .slice(p.offset, p.offset + p.limit),
+      }),
+    );
   });
   app.post("/api/v1/admin/agents", async (req, reply) =>
     reply.code(201).send(await service.publish(actor(req), req.body)),
@@ -514,6 +534,7 @@ export function buildAPI(
           );
           return `00-${trace.traceId}-${trace.spanId}-01`;
         })(),
+        req.headers.authorization?.slice(7),
       ),
     );
   });
@@ -522,7 +543,12 @@ export function buildAPI(
       rid = uuid.parse(params(req.params).id);
     return service.store.readRun(a.tenantId, rid, (s) => {
       const r = run(s, a, rid);
-      return { ...r, lease: undefined, actor: undefined };
+      return {
+        ...r,
+        lease: undefined,
+        actor: undefined,
+        userTokenRef: undefined,
+      };
     });
   });
   app.post("/api/v1/runs/:id/cancel", async (req) =>
@@ -749,5 +775,7 @@ export function buildAPI(
       _workspaceOnly: true,
     });
   });
+  if (service instanceof PersonalService)
+    personalRoutes(app, service, sandbox, actor);
   return app;
 }

@@ -152,6 +152,9 @@ export class CubeProvider implements SandboxProvider {
         "SKILL_IDENTITY_UNCONFIRMED",
       ])
         if (result.stderr.includes(code)) throw new Fault(409, code);
+      if(result.stderr.includes("FileNotFoundError:"))throw new Fault(404,"FILE_NOT_FOUND");
+      for(const code of ["EDIT_CONFLICT","EDIT_NOT_UNIQUE"])if(result.stderr.includes(code))throw new Fault(409,code);
+      if(result.stderr.includes("PATH_DENIED"))throw new Fault(403,"PATH_DENIED");
       throw new Fault(502, "REMOTE_TOOL_FAILED");
     }
     try {

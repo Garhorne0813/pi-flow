@@ -1,14 +1,22 @@
+import { PersonalService } from "./personal-service.js";
+import { openToken } from "./security/token-vault.js";
+import { webFetch, webSearch } from "./tools/web.js";
+import { createHash } from "node:crypto";
+import { MemoryManager } from "./execution/memory.js";
+import { authorizeTool, requiresApproval } from "./security/policy.js";
+import { workspacePath } from "./security-path.js";
 import {
   id,
   Fault,
   event,
   audit,
   terminal,
+  taskRoot,
   type Run,
   type State,
   type AgentConfig,
 } from "./domain.js";
-import { HarnessService, authorizedRun } from "./service.js";
+import { HarnessService, authorizedRun, runConfig } from "./service.js";
 import type { Runtime } from "./runtime.js";
 import type { SandboxManager } from "./adapters/sandbox.js";
 import type { MCPManager, McpCallContext } from "./adapters/mcp.js";
@@ -50,6 +58,7 @@ export class Worker {
     private mcp: MCPManager,
     private concurrency = 4,
     private shutdownTimeoutMs = 5000,
+    private scheduler?: { tick(): Promise<void> },
   ) {
     this.ledger = new UsageLedger(service.store, policyFromEnv());
     if (!Number.isFinite(shutdownTimeoutMs) || shutdownTimeoutMs <= 0)
@@ -98,6 +107,7 @@ export class Worker {
         if (this.maintenance === task) this.maintenance = undefined;
       });
     }
+    if (this.scheduler) await this.scheduler.tick();
     const tenants = (await this.service.store.tenants()).sort();
     let start =
       this.lastTenant === undefined
@@ -116,7 +126,12 @@ export class Worker {
       );
       let r: Run | undefined;
       for (const rid of candidates) {
-        r = await this.service.store.runTx(tenant, rid, (s) => {
+        const claim =
+          this.service instanceof PersonalService
+            ? <T>(fn: (s: State) => T) => this.service.store.tx(tenant, fn)
+            : <T>(fn: (s: State) => T) =>
+                this.service.store.runTx(tenant, rid, fn);
+        r = await claim((s) => {
           const current = s.runs[rid];
           if (!current) return;
           if (current.lease && current.lease.expires < Date.now()) {
@@ -128,6 +143,16 @@ export class Worker {
             }
           }
           if (current.state !== "QUEUED") return;
+          if (
+            current.actor.personal &&
+            (Object.values(s.runs).some(
+              (r) => r.id !== current.id && r.state === "RUNNING",
+            ) ||
+              Object.values(s.workspaces).some(
+                (w) => w.lock && w.lock.expires > Date.now(),
+              ))
+          )
+            return;
           try {
             const { config } = authorizedRun(s, current);
             current.deadline ??= Date.now() + config.timeoutSeconds * 1000;
@@ -224,15 +249,22 @@ export class Worker {
       },
       Math.max(0, (initial.deadline ?? Date.now() + 600000) - Date.now()),
     );
+    let heartbeatCount = 0;
     const heartbeat = setInterval(() => {
-      void this.service.store
-        .runTx(tenant, initial.id, (s) => {
-          const r = this.owned(s, initial.id);
-          authorizedRun(s, r);
-          if ((r.deadline ?? 0) < Date.now())
-            throw new Fault(408, "RUN_TIMEOUT");
-          r.lease!.expires = Date.now() + 30000;
-        })
+      void (
+        ++heartbeatCount % 5 === 0
+          ? this.service.verifyActor(initial.actor)
+          : Promise.resolve()
+      )
+        .then(() =>
+          this.service.store.runTx(tenant, initial.id, (s) => {
+            const r = this.owned(s, initial.id);
+            authorizedRun(s, r);
+            if ((r.deadline ?? 0) < Date.now())
+              throw new Fault(408, "RUN_TIMEOUT");
+            r.lease!.expires = Date.now() + 30000;
+          }),
+        )
         .catch((e) => {
           telemetry.error("heartbeat", e, {
             tenantId: tenant,
@@ -255,8 +287,9 @@ export class Worker {
       },
     );
     const emit = (type: string, data: unknown) => batcher.emit(type, data);
-    const get = () =>
-      this.service.store.readRun(
+    const get = async () => {
+      await this.service.verifyActor(initial.actor);
+      return this.service.store.readRun(
         tenant,
         initial.id,
         (s) => {
@@ -273,12 +306,20 @@ export class Worker {
         },
         true,
       );
+    };
     const defer = async (kind: "question" | "approval", payload: unknown) => {
+      if (initial.schedule)
+        throw new Fault(409, "SCHEDULED_INTERACTION_UNSUPPORTED");
       if (initial.parentRunId)
         throw new Fault(409, "SUBAGENT_INTERACTION_UNSUPPORTED");
+      await batcher.flush();
       await this.service.store.tx(tenant, (s) => {
         const r = this.owned(s, initial.id);
         authorizedRun(s, r);
+        const pending = Object.values(s.interactions).find(
+          (i) => i.runId === r.id && !i.resolved,
+        );
+        if (pending) return;
         const i = { id: id(), runId: r.id, kind, payload, resolved: false };
         s.interactions[i.id] = i;
         r.state = "WAITING_INPUT";
@@ -288,6 +329,7 @@ export class Worker {
       controller.abort();
       throw new Fault(409, "INTERACTION_PENDING");
     };
+    const memory = new MemoryManager(this.service.store, this.sandbox);
     const executeTool = async (
       name: string,
       args: Record<string, unknown>,
@@ -306,23 +348,92 @@ export class Worker {
       const bare = name.replace(/^remote_/, "");
       const mcpTool = name.startsWith("mcp_");
       if (
+        initial.schedule &&
+        (bare === "ask_user_question" ||
+          (initial.schedule.allowedTools
+            ? !initial.schedule.allowedTools.includes(bare)
+            : mcpTool))
+      )
+        throw new Fault(403, "SCHEDULE_TOOL_DENIED");
+      if (
         !mcpTool &&
         !config.tools.includes(bare as AgentConfig["tools"][number])
       )
         throw new Fault(403, "TOOL_DENIED");
       if (!mcpTool) args = argumentsSchemas[bare]!.parse(args);
       else await mcpAuthorize(name);
-      if (!approved && (mcpTool || ["write", "edit", "bash"].includes(bare)))
+      await this.service.store.readRun(tenant, initial.id, (s) =>
+        authorizeTool(s, config, name),
+      );
+      if (
+        initial.actor.personal &&
+        typeof args.path === "string" &&
+        !args.path.startsWith("/skills/")
+      )
+        args = { ...args, path: workspacePath(args.path, initial.cwd) };
+      if (bare === "edit") {
+        const current = (await this.sandbox.execute(
+          initial.actor,
+          wid,
+          initial.id,
+          config.skillBundle,
+          "read",
+          { path: args.path },
+          controller.signal,
+          config.skills,
+        )) as { text: string };
+        if (
+          createHash("sha256").update(current.text).digest("hex") !==
+          args.expectedHash
+        )
+          throw new Fault(409, "EDIT_CONFLICT");
+        if (current.text.split(String(args.oldText)).length !== 2)
+          throw new Fault(409, "EDIT_NOT_UNIQUE");
+      }
+      const memoryPath =
+        initial.actor.personal && typeof args.path === "string"
+          ? memory.classify(args.path, initial.cwd ?? "/workspace")
+          : undefined;
+      const memoryWrite = memoryPath && ["write", "edit"].includes(bare);
+      if (
+        memoryWrite &&
+        (memoryPath.reserved ||
+          !memory
+            .roots(config, initial.cwd ?? "/workspace")
+            .includes(memoryPath.root))
+      )
+        throw new Fault(403, "MEMORY_PATH_RESERVED");
+      if (initial.schedule) {
+        const mode = initial.schedule.approvalMode;
+        if (
+          requiresApproval(
+            { ...config, approval: { mode: mode === "deny" ? "user" : mode } },
+            bare,
+            args,
+          )
+        )
+          throw new Fault(403, "SCHEDULE_APPROVAL_DENIED");
+      } else if (
+        !approved &&
+        !memoryWrite &&
+        requiresApproval(config, bare, args)
+      )
         return defer("approval", { name, args });
+      if (!approved && (mcpTool || ["write", "edit", "bash"].includes(bare)))
+        await this.service.store.tx(tenant, (s) => {
+          const r = this.owned(s, initial.id);
+          audit(s, r.actor, "tool.auto_approved", name);
+          event(s, r, "tool.auto_approved", {
+            name,
+            mode: config.approval?.mode,
+          });
+        });
       const callId = id();
       await this.service.store.tx(tenant, (s) => {
         const r = this.owned(s, initial.id);
         const { config } = authorizedRun(s, r);
-        let root = r;
-        while (root.parentRunId) root = s.runs[root.parentRunId]!;
-        const rc =
-          root.capabilities ??
-          s.agents[s.sessions[root.sessionId]!.agentVersionId]!.config;
+        const root = taskRoot(s, r);
+        const rc = runConfig(s, root);
         if (r.steps >= config.maxSteps || root.steps >= rc.maxSteps)
           throw new Fault(429, "STEP_BUDGET_EXCEEDED");
         r.steps++;
@@ -345,7 +456,46 @@ export class Worker {
                 requestId: initial.requestId,
               }),
           });
-        else if (bare === "ask_user_question")
+        else if (bare === "web_fetch")
+          result = await webFetch(String(args.url), controller.signal);
+        else if (bare === "web_search")
+          result = await webSearch(String(args.query), controller.signal);
+        else if (memoryWrite) {
+          let content = String(args.content);
+          if (bare === "edit") {
+            const current = (await this.sandbox.execute(
+              initial.actor,
+              wid,
+              initial.id,
+              config.skillBundle,
+              "read",
+              { path: args.path },
+              controller.signal,
+              config.skills,
+            )) as { text: string };
+            if (
+              createHash("sha256").update(current.text).digest("hex") !==
+              args.expectedHash
+            )
+              throw new Fault(409, "EDIT_CONFLICT");
+            if (current.text.split(String(args.oldText)).length !== 2)
+              throw new Fault(409, "EDIT_NOT_UNIQUE");
+            content = current.text.replace(
+              String(args.oldText),
+              String(args.newText),
+            );
+          }
+          result = await memory.write(
+            initial.actor,
+            wid,
+            initial.id,
+            config,
+            initial.cwd ?? "/workspace",
+            String(args.path),
+            content,
+            controller.signal,
+          );
+        } else if (bare === "ask_user_question")
           return await defer("question", { question: args.question });
         else if (bare === "todo") {
           await this.service.store.tx(tenant, (s) => {
@@ -358,7 +508,7 @@ export class Worker {
           const child = await this.service.delegate(
             tenant,
             initial.id,
-            String(args.agentVersionId),
+            String(args.agentId ?? args.agentVersionId),
             String(args.task),
             this.owner,
           );
@@ -383,7 +533,20 @@ export class Worker {
             initial.id,
             config.skillBundle,
             bare,
-            args,
+            {
+              ...args,
+              _cwd: initial.cwd ?? "/workspace",
+              ...(bare === "bash" &&
+              config.userTokenAccess &&
+              initial.userTokenRef
+                ? {
+                    _userToken: openToken(
+                      initial.userTokenRef,
+                      initial.actor.userId + ":" + initial.taskId,
+                    ),
+                  }
+                : {}),
+            },
             controller.signal,
             config.skills,
           );
@@ -452,9 +615,26 @@ export class Worker {
         }
       }
       ctx = await get();
+      if (initial.actor.personal && ctx.config.memory?.enabled) {
+        const index = await memory.index(
+          initial.actor,
+          ctx.ses.workspaceId,
+          initial.id,
+          ctx.config,
+          initial.cwd ?? "/workspace",
+        );
+        ctx.config = {
+          ...ctx.config,
+          agentsMd: [...ctx.config.agentsMd, index],
+        };
+      }
       const modelStarted = Date.now();
       try {
         await this.runtime.execute({
+          gateway:
+            this.service instanceof PersonalService
+              ? await this.service.gatewayFor(ctx.config.model)
+              : undefined,
           beforeModelRequest: async (estimate) => {
             try {
               return await this.ledger.reserve(
@@ -493,11 +673,8 @@ export class Worker {
             const code = await this.service.store.tx(tenant, (s) => {
               const r = this.owned(s, initial.id);
               const { config } = authorizedRun(s, r);
-              let root = r;
-              while (root.parentRunId) root = s.runs[root.parentRunId]!;
-              const rc =
-                root.capabilities ??
-                s.agents[s.sessions[root.sessionId]!.agentVersionId]!.config;
+              const root = taskRoot(s, r);
+              const rc = runConfig(s, root);
               r.tokens = (r.tokens ?? 0) + tokens;
               if (root.id !== r.id) root.tokens = (root.tokens ?? 0) + tokens;
               if (turn) {

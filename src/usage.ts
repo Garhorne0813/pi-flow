@@ -1,6 +1,6 @@
 import { z } from "zod";
-import { Fault, id, type State, type Run } from "./domain.js";
-import { authorizedRun } from "./service.js";
+import { Fault, id, taskRoot, type State, type Run } from "./domain.js";
+import { authorizedRun, runConfig } from "./service.js";
 import type { Store } from "./store.js";
 const limit = z.number().int().positive().optional();
 export const UsagePolicy = z
@@ -105,14 +105,10 @@ export class UsageLedger {
         records = Object.values(ledger.requests),
         model = config.model.provider + "/" + config.model.modelId,
         price = this.policy.prices[model];
-      let root = r;
-      const seen = new Set<string>();
-      while (root.parentRunId) {
-        if (seen.has(root.id)) throw new Fault(403, "INVALID_RUN_TREE");
-        seen.add(root.id);
-        root = s.runs[root.parentRunId]!;
-      }
+      const root = taskRoot(s, r);
       const family = (candidate: Run) => {
+        if (candidate.taskId && root.taskId)
+          return candidate.taskId === root.taskId;
         let parent = candidate;
         const visited = new Set<string>();
         while (parent.parentRunId) {
@@ -130,9 +126,7 @@ export class UsageLedger {
         familyUsed = records
           .filter((x) => s.runs[x.runId] && family(s.runs[x.runId]!))
           .reduce((n, x) => n + x.tokens, 0),
-        rootConfig =
-          root.capabilities ??
-          s.agents[s.sessions[root.sessionId]!.agentVersionId]!.config;
+        rootConfig = runConfig(s, root);
       let maxOutputTokens = Math.min(
         4096,
         config.maxTokens - Math.max(runUsed, r.tokens ?? 0) - inputEstimate,
@@ -204,7 +198,7 @@ export class UsageLedger {
         runId: r.id,
         userId: r.actor.userId,
         workspaceId: ses.workspaceId,
-        agentId: ses.agentVersionId,
+        agentId: r.agentId ?? ses.agentVersionId ?? "unknown",
         model,
         at: now,
         status: "reserved",

@@ -10,6 +10,7 @@ const child = spawn(process.execPath, ["dist/main.js"], {
     PORT: "18081",
     HOST: "127.0.0.1",
     LOG_LEVEL: "silent",
+    CONFIG_DIR:"/nonexistent/pi-flow-optional-import",
   },
   stdio: ["ignore", "pipe", "pipe"],
 });
@@ -19,9 +20,14 @@ child.stderr.on("data", (d) => {
 });
 child.stdout.resume();
 const base = "http://127.0.0.1:18081";
-async function request(path, body, extra = {}) {
+async function request(
+  path,
+  body,
+  extra = {},
+  method = body === undefined ? "GET" : "POST",
+) {
   const res = await fetch(base + path, {
-    method: body === undefined ? "GET" : "POST",
+    method,
     headers: {
       Authorization: `Bearer ${token}`,
       "Content-Type": "application/json",
@@ -49,9 +55,9 @@ try {
   }
   assert.ok(ready, "Server did not become ready: " + errors);
   const agents = await request("/api/v1/agents");
-  const w = await request("/api/v1/workspaces", { name: "Smoke workspace" });
-  const s = await request(`/api/v1/workspaces/${w.id}/sessions`, {
-    agentVersionId: agents.items[0].id,
+  const s = await request("/api/v1/sessions", {
+    agentId: agents.items[0].id,
+    cwd: "/workspace",
   });
   const run = await request(
     `/api/v1/sessions/${s.id}/runs`,
@@ -73,13 +79,14 @@ try {
   assert.match(events, /event: run.completed/);
   const final = await request(`/api/v1/runs/${run.id}`);
   assert.equal(final.state, "COMPLETED");
-  const uploaded = await request(`/api/v1/workspaces/${w.id}/files`, {
-    path: "report.txt",
-    content: "persisted through file API",
-  });
-  const file = await request(
-    `/api/v1/workspaces/${w.id}/files/${uploaded.fileId}`,
+  await request(
+    "/api/v1/me/files",
+    { path: "report.txt", content: "persisted through file API" },
+    {},
+    "PUT",
   );
+  await request("/api/v1/me/sandbox/release", {});
+  const file = await request("/api/v1/me/files?path=report.txt&operation=read");
   assert.equal(file.text, "persisted through file API");
   console.log(
     JSON.stringify({

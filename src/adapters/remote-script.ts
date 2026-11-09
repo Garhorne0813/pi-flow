@@ -52,9 +52,18 @@ for manifest in a.get('_skillManifests',[]):
  v=path(manifest['path'])
  if v!=manifest['path']: raise SkillIntegrityError('SKILL_IDENTITY_UNCONFIRMED')
  manifest_hashes[v]=manifest['digest']
-for v in manifest_hashes: read(v)
+for v in manifest_hashes:
+ try: read(v)
+ except FileNotFoundError: raise SkillIntegrityError('SKILL_IDENTITY_UNCONFIRMED')
 if op=='read':
  v=path(a['path']); text=read(v); result={'path':v,'text':text,'sha256':hashlib.sha256(text.encode()).hexdigest()}
+elif op=='mkdir':
+ v=path(a['path'],True); os.makedirs(v,exist_ok=True); result={'created':True}
+elif op=='delete':
+ v=path(a['path'],True); fd,name=parent(v)
+ try: os.unlink(name,dir_fd=fd); os.fsync(fd)
+ finally: os.close(fd)
+ result={'deleted':True}
 elif op in ['write','edit']:
  v=path(a['path'],True)
  if op=='edit':
@@ -92,9 +101,10 @@ elif op in ['find','grep']:
   if scanned>10000 or bytes_scanned>16777216 or len(matches)>=500: break
  result={'matches':matches,'truncated':scanned>10000 or bytes_scanned>16777216 or len(matches)>=500}
 elif op=='bash':
+ cwd=path(a.get('_cwd',root)); os.makedirs(cwd,exist_ok=True)
  seconds=min(int(a.get('timeoutSeconds',60)),120)
  with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
-  proc=subprocess.Popen(['/bin/bash','--noprofile','--norc','-c',a['command']],cwd=root,stdout=out,stderr=err,start_new_session=True,env={'PATH':'/usr/local/bin:/usr/bin:/bin','HOME':'/tmp','LANG':'C.UTF-8'})
+  proc=subprocess.Popen(['/bin/bash','--noprofile','--norc','-c',a['command']],cwd=cwd,stdout=out,stderr=err,start_new_session=True,env={'PATH':'/usr/local/bin:/usr/bin:/bin','HOME':'/tmp','LANG':'C.UTF-8',**({'USER_TOKEN':a['_userToken']} if '_userToken' in a else {})})
   timed=False
   try: proc.wait(timeout=seconds)
   except subprocess.TimeoutExpired:

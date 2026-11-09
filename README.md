@@ -1,3 +1,5 @@
+> **Current implementation:** [Personal platform setup and status](docs/personal-platform.md). Bootstrap now uses private user workspaces and editable database-backed Agents with per-Run snapshots. Shared workspace API examples below describe the legacy engine.
+
 # Pi-Flow
 
 **An agent backend for shared workspaces, streamed conversations, and controlled tool execution.**

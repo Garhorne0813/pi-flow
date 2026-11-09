@@ -11,6 +11,8 @@ services:
       - ./migrations/002_sandbox_leases.sql:/docker-entrypoint-initdb.d/002.sql:ro
       - ./migrations/003_runs_sessions_events.sql:/docker-entrypoint-initdb.d/003.sql:ro
       - ./migrations/004_schema_readiness.sql:/docker-entrypoint-initdb.d/004.sql:ro
+      - ./migrations/005_personal_platform.sql:/docker-entrypoint-initdb.d/005.sql:ro
+      - ./migrations/006_editable_agents.sql:/docker-entrypoint-initdb.d/006.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U harness -d harness"]
       interval: 2s

@@ -22,6 +22,12 @@ import type {
 } from "./adapters/sandbox-policy.js";
 import { SCHEMA_VERSION, type WorkerHealth } from "./health.js";
 export interface Store {
+  txLight?<T>(
+    user: string,
+    sessionId: string,
+    fn: (state: State) => T | Promise<T>,
+    key?: string,
+  ): Promise<T>;
   eventPage(
     tenant: string,
     runId: string,

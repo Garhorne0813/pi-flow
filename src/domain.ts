@@ -15,6 +15,9 @@ export type Actor = {
   userId: string;
   admin: boolean;
   expiresAt?: number;
+  issuer?: string;
+  subject?: string;
+  personal?: boolean;
 };
 export const tools = [
   "read",
@@ -27,20 +30,47 @@ export const tools = [
   "todo",
   "ask_user_question",
   "delegate_to_agent",
+  "web_search",
+  "web_fetch",
 ] as const;
 export const AgentConfig = z
   .object({
     name: z.string().min(1).max(100),
     systemPrompt: z.string().max(32000),
     agentsMd: z.array(z.string().max(32000)).default([]),
-    model: z
-      .object({ provider: z.string().min(1), modelId: z.string().min(1) })
-      .strict(),
-    tools: z.array(z.enum(tools)).max(10),
+    model: z.union([
+      z
+        .literal("default")
+        .transform(() => ({ provider: "default", modelId: "default" })),
+      z
+        .object({ provider: z.string().min(1), modelId: z.string().min(1) })
+        .strict(),
+    ]),
+    tools: z.array(z.enum(tools)).max(12),
     skills: z.array(z.string()).default([]),
     mcpServers: z.array(z.string()).max(16).default([]),
     subagents: z.array(z.string()).default([]),
-    skillBundle: z.string().min(1),
+    subagentDefinitions: z.record(z.string(), z.unknown()).optional(),
+    skillBundle: z.string().min(1).default("default"),
+    approval: z
+      .object({ mode: z.enum(["user", "guarded", "auto"]) })
+      .strict()
+      .optional(),
+    userTokenAccess: z.boolean().optional(),
+    memory: z
+      .object({
+        enabled: z.boolean().default(true),
+        scopes: z
+          .array(z.enum(["user", "project"]))
+          .default(["user", "project"]),
+        maxFileBytes: z.number().int().min(100).max(262144).default(32000),
+        maxTotalBytes: z.number().int().min(100).max(10000000).default(1000000),
+        maxFiles: z.number().int().min(1).max(1000).default(100),
+        maxIndexBytes: z.number().int().min(100).max(32000).default(8000),
+        maxWritesPerRun: z.number().int().min(1).max(100).default(10),
+      })
+      .strict()
+      .optional(),
     maxTokens: z.number().int().min(100).max(1000000).default(100000),
     maxSteps: z.number().int().min(1).max(100).default(30),
     timeoutSeconds: z.number().int().min(1).max(1800).default(600),
@@ -51,6 +81,7 @@ export const AgentConfig = z
 export type AgentConfig = z.infer<typeof AgentConfig>;
 export type AgentVersion = {
   id: string;
+  agentId?: string;
   config: AgentConfig;
   digest: string;
   publishedAt: string;
@@ -84,7 +115,13 @@ export type Workspace = {
 export type Session = {
   id: string;
   workspaceId: string;
-  agentVersionId: string;
+  userId?: string;
+  agentId?: string;
+  cwd?: string;
+  title?: string;
+  deletedAt?: string;
+  /** Legacy shared-workspace sessions only. */
+  agentVersionId?: string;
   entries: unknown[];
   createdAt: string;
 };
@@ -126,6 +163,22 @@ export type Run = {
   capabilities?: AgentConfig;
   deadline?: number;
   resumedFrom?: string;
+  userTokenRef?: string;
+  memoryWrites?: number;
+  schedule?: {
+    id: string;
+    fireId: string;
+    approvalMode: "deny" | "guarded" | "auto";
+    allowedTools?: string[];
+  };
+  agentId?: string;
+  agentVersionId?: string;
+  configDigest?: string;
+  cwd?: string;
+  model?: AgentConfig["model"];
+  taskId?: string;
+  rootRunId?: string;
+  eventSeq?: number;
   requestId?: string;
   traceparent?: string;
   startedAt?: string;
@@ -133,6 +186,7 @@ export type Run = {
 };
 export type Event = {
   eventId: number;
+  seq?: number;
   runId: string;
   sessionId: string;
   type: string;
@@ -156,6 +210,10 @@ export type Skill = {
   path: string;
   digest: string;
   enabled: boolean;
+  versionDigest?: string;
+  files?: Record<string, string>;
+  disableModelInvocation?: boolean;
+  subagentDefinitions?: Record<string, unknown>;
 };
 export type McpRegistration = {
   id: string;
@@ -172,6 +230,17 @@ export type Audit = {
   result: string;
 };
 export type State = {
+  modelCatalog?: import("./config/models.js").ModelEntry[];
+  secrets?: Record<string, string>;
+  configRevisions?: { global: number; agents: number };
+  schedules?: Record<string, import("./schedules/service.js").ScheduledTask>;
+  scheduleFires?: Record<string, import("./schedules/service.js").Fire>;
+  managedAgents?: Record<string, ManagedAgent>;
+  identities?: Record<
+    string,
+    { id: string; issuer: string; subject: string; enabled: boolean }
+  >;
+  policy?: { disabledTools: string[] };
   usage?: import("./usage.js").UsageState;
   agents: Record<string, AgentVersion>;
   workspaces: Record<string, Workspace>;
@@ -201,9 +270,12 @@ export const emptyState = (): State => ({
 export function event(s: State, r: Run, type: string, data: unknown = {}) {
   const now = new Date().toISOString();
   if (type === "run.started") r.startedAt = now;
-  if (["run.completed", "run.failed", "run.cancelled"].includes(type))
+  if (["run.completed", "run.failed", "run.cancelled"].includes(type)) {
     r.endedAt = now;
+    delete r.userTokenRef;
+  }
   s.events.push({
+    seq: (r.eventSeq = (r.eventSeq ?? 0) + 1),
     eventId: ++s.sequence,
     runId: r.id,
     sessionId: r.sessionId,
@@ -243,7 +315,8 @@ export function workspace(
 }
 export function session(s: State, a: Actor, sid: string, write = false) {
   const v = s.sessions[sid];
-  if (!v) throw new Fault(404, "SESSION_NOT_FOUND");
+  if (!v || v.deletedAt || (v.userId && v.userId !== a.userId))
+    throw new Fault(404, "SESSION_NOT_FOUND");
   workspace(s, a, v.workspaceId, write);
   return v;
 }
@@ -265,6 +338,48 @@ export function intersect(
     throw new Fault(403, "SKILL_BUNDLE_MISMATCH");
   return {
     ...child,
+    userTokenAccess: !!parent.userTokenAccess && !!child.userTokenAccess,
+    approval:
+      parent.approval || child.approval
+        ? {
+            mode:
+              parent.approval?.mode === "user" ||
+              !parent.approval ||
+              child.approval?.mode === "user" ||
+              !child.approval
+                ? "user"
+                : parent.approval.mode === "guarded" ||
+                    child.approval.mode === "guarded"
+                  ? "guarded"
+                  : "auto",
+          }
+        : undefined,
+    memory:
+      parent.memory?.enabled && child.memory?.enabled
+        ? {
+            ...child.memory,
+            scopes: child.memory.scopes.filter((s) =>
+              parent.memory!.scopes.includes(s),
+            ),
+            maxFileBytes: Math.min(
+              parent.memory.maxFileBytes,
+              child.memory.maxFileBytes,
+            ),
+            maxTotalBytes: Math.min(
+              parent.memory.maxTotalBytes,
+              child.memory.maxTotalBytes,
+            ),
+            maxFiles: Math.min(parent.memory.maxFiles, child.memory.maxFiles),
+            maxIndexBytes: Math.min(
+              parent.memory.maxIndexBytes,
+              child.memory.maxIndexBytes,
+            ),
+            maxWritesPerRun: Math.min(
+              parent.memory.maxWritesPerRun,
+              child.memory.maxWritesPerRun,
+            ),
+          }
+        : undefined,
     tools: both(parent.tools, child.tools) as AgentConfig["tools"],
     skills: both(parent.skills, child.skills),
     mcpServers: both(parent.mcpServers, child.mcpServers),
@@ -277,8 +392,32 @@ export function intersect(
   };
 }
 
-export function agentAllowed(v: AgentVersion, a: Actor) {
+export function agentAllowed(
+  v: Pick<AgentVersion, "enabled" | "allowedUsers">,
+  a: Actor,
+) {
   return (
     v.enabled && (!v.allowedUsers?.length || v.allowedUsers.includes(a.userId))
   );
+}
+
+export type ManagedAgent = {
+  id: string;
+  config: AgentConfig;
+  enabled: boolean;
+  allowedUsers?: string[];
+  updatedAt: string;
+};
+
+export function taskRoot(s: State, r: Run): Run {
+  if (r.rootRunId && s.runs[r.rootRunId]) return s.runs[r.rootRunId]!;
+  let root = r;
+  const seen = new Set<string>();
+  while (root.parentRunId) {
+    if (seen.has(root.id) || !s.runs[root.parentRunId])
+      throw new Fault(409, "INVALID_RUN_TREE");
+    seen.add(root.id);
+    root = s.runs[root.parentRunId]!;
+  }
+  return root;
 }
