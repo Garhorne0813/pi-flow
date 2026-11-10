@@ -92,13 +92,23 @@ export class PersonalService extends HarnessService {
       return w;
     });
   }
+  private sessionWrite<T>(
+    a: Actor,
+    sid: string | undefined,
+    fn: (s: import("./domain.js").State) => T | Promise<T>,
+    entries = false,
+  ) {
+    return this.store.sessionTx
+      ? this.store.sessionTx(a.tenantId, sid, fn, { entries })
+      : this.store.tx(a.tenantId, fn);
+  }
   async createPersonalSession(
     a: Actor,
     input: { agentId: string; cwd?: string; title?: string },
   ) {
     const cwd = workspacePath(input.cwd);
     const w = await this.ensureWorkspace(a);
-    return this.store.tx(a.tenantId, (s) => {
+    return this.sessionWrite(a, undefined, (s) => {
       const av = s.managedAgents?.[input.agentId];
       if (!av || !agentAllowed(av, a)) throw new Fault(404, "AGENT_NOT_FOUND");
       const ses = {
@@ -121,22 +131,27 @@ export class PersonalService extends HarnessService {
     sid: string,
     input: { title?: string; cwd?: string },
   ) {
-    return this.store.tx(a.tenantId, (s) => {
-      const ses = session(s, a, sid, true);
-      if (
-        input.cwd !== undefined &&
-        Object.values(s.runs).some(
-          (r) => r.sessionId === sid && !terminal(r.state),
+    return this.sessionWrite(
+      a,
+      sid,
+      (s) => {
+        const ses = session(s, a, sid, true);
+        if (
+          input.cwd !== undefined &&
+          Object.values(s.runs).some(
+            (r) => r.sessionId === sid && !terminal(r.state),
+          )
         )
-      )
-        throw new Fault(409, "SESSION_BUSY");
-      if (input.title !== undefined) ses.title = input.title;
-      if (input.cwd !== undefined) ses.cwd = workspacePath(input.cwd);
-      return ses;
-    });
+          throw new Fault(409, "SESSION_BUSY");
+        if (input.title !== undefined) ses.title = input.title;
+        if (input.cwd !== undefined) ses.cwd = workspacePath(input.cwd);
+        return ses;
+      },
+      true,
+    );
   }
   async deleteSession(a: Actor, sid: string) {
-    return this.store.tx(a.tenantId, (s) => {
+    return this.sessionWrite(a, sid, (s) => {
       const ses = session(s, a, sid, true);
       if (
         Object.values(s.runs).some(
@@ -150,23 +165,28 @@ export class PersonalService extends HarnessService {
     });
   }
   async forkSession(a: Actor, sid: string) {
-    return this.store.tx(a.tenantId, (s) => {
-      const old = session(s, a, sid, true);
-      if (
-        Object.values(s.runs).some(
-          (r) => r.sessionId === sid && !terminal(r.state),
+    return this.sessionWrite(
+      a,
+      sid,
+      (s) => {
+        const old = session(s, a, sid, true);
+        if (
+          Object.values(s.runs).some(
+            (r) => r.sessionId === sid && !terminal(r.state),
+          )
         )
-      )
-        throw new Fault(409, "SESSION_BUSY");
-      const next = {
-        ...structuredClone(old),
-        id: id(),
-        createdAt: new Date().toISOString(),
-      };
-      s.sessions[next.id] = next;
-      audit(s, a, "session.fork", next.id);
-      return next;
-    });
+          throw new Fault(409, "SESSION_BUSY");
+        const next = {
+          ...structuredClone(old),
+          id: id(),
+          createdAt: new Date().toISOString(),
+        };
+        s.sessions[next.id] = next;
+        audit(s, a, "session.fork", next.id);
+        return next;
+      },
+      true,
+    );
   }
   override async setAccess(a: Actor, selector: string, allowedUsers: string[]) {
     admin(a);

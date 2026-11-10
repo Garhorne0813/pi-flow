@@ -344,6 +344,12 @@ test(
       await backing.pool.query(
         await readFile("migrations/012_personal_queue_frontiers.sql", "utf8"),
       );
+      await backing.pool.query(
+        await readFile(
+          "migrations/013_personal_dispatchable_sessions.sql",
+          "utf8",
+        ),
+      );
       await backing.ready();
       const store = personalStore(backing, registry),
         service = new PersonalService(store, registry);
@@ -874,7 +880,7 @@ test(
 );
 
 test(
-  "personal readiness requires committed migrations 009/010/011/012, normalized schedules and all valid hot-path indexes",
+  "personal readiness requires committed migrations 009/010/011/012/013, normalized schedules and all valid hot-path indexes",
   { skip: !url },
   async () => {
     const { ScheduleService } = await import("../src/schedules/service.js"),
@@ -945,7 +951,15 @@ test(
           "utf8",
         )) +
         "\n" +
-        (await readFile("migrations/012_personal_queue_frontiers.sql", "utf8"));
+        (await readFile(
+          "migrations/012_personal_queue_frontiers.sql",
+          "utf8",
+        )) +
+        "\n" +
+        (await readFile(
+          "migrations/013_personal_dispatchable_sessions.sql",
+          "utf8",
+        ));
       const c = await f.a.pool.connect();
       try {
         await c.query("BEGIN");
@@ -983,7 +997,7 @@ test(
             )
           ).rows[0].version,
         ),
-        10,
+        11,
       );
       for (const index of [
         "personal_runs_running",
@@ -1000,6 +1014,7 @@ test(
         "personal_run_work_expired",
         "personal_workspace_rotation",
         "personal_schedule_fires_history",
+        "personal_run_work_dispatchable",
       ]) {
         await f.a.pool.query(`DROP INDEX ${index}`);
         await assert.rejects(f.a.ready(), /SCHEMA_INDEXES_INCOMPLETE/);
@@ -1807,10 +1822,22 @@ test(
       await f.a.pool.query(
         await readFile("migrations/012_personal_queue_frontiers.sql", "utf8"),
       );
+      await f.a.pool.query(
+        await readFile(
+          "migrations/013_personal_dispatchable_sessions.sql",
+          "utf8",
+        ),
+      );
       await f.a.ready();
       await f.a.pool.query(migration);
       await f.a.pool.query(
         await readFile("migrations/012_personal_queue_frontiers.sql", "utf8"),
+      );
+      await f.a.pool.query(
+        await readFile(
+          "migrations/013_personal_dispatchable_sessions.sql",
+          "utf8",
+        ),
       );
       const records = await f.sb.readMetadata(
         f.actor.userId,
@@ -1939,7 +1966,7 @@ test(
       ]);
       assert.deepEqual(
         (await work()).map((w) => w.runId),
-        [third!.id],
+        [],
       );
       assert.equal(
         await f.b.renewRunLease(f.actor.userId, first!.id, "owner", Date.now()),
@@ -1950,7 +1977,7 @@ test(
       });
       assert.deepEqual(
         (await work()).map((w) => w.runId),
-        [first!.id, third!.id],
+        [first!.id],
       );
       await f.sb.runTx(f.actor.userId, first!.id, (s) => {
         s.runs[first!.id]!.state = "FAILED";
@@ -2010,10 +2037,16 @@ test(
         );
       await f.a.pool.query("TRUNCATE personal_run_work");
       await f.a.pool.query("UPDATE personal_schema SET version=9 WHERE id=1");
-      const migration = await readFile(
-          "migrations/012_personal_queue_frontiers.sql",
-          "utf8",
-        ),
+      const migration =
+          (await readFile(
+            "migrations/012_personal_queue_frontiers.sql",
+            "utf8",
+          )) +
+          "\n" +
+          (await readFile(
+            "migrations/013_personal_dispatchable_sessions.sql",
+            "utf8",
+          )),
         c = await f.a.pool.connect();
       try {
         await c.query("BEGIN");
@@ -2219,6 +2252,569 @@ test(
       await f.close();
       if (previous === undefined) delete process.env.SCHEDULES_ENABLED;
       else process.env.SCHEDULES_ENABLED = previous;
+    }
+  },
+);
+
+async function largeSessionHistory(
+  f: Awaited<ReturnType<typeof reviewDatabase>>,
+) {
+  const { ScheduleService } = await import("../src/schedules/service.js");
+  const history = await f.service.createPersonalSession(f.actor, {
+      agentId: "a",
+    }),
+    base = await f.service.submit(f.actor, history.id, "history");
+  await f.sa.runTx(f.actor.userId, base.id, (s) => {
+    s.runs[base.id]!.state = "COMPLETED";
+  });
+  const noise = await new ScheduleService(f.service).create(f.actor, {
+    agentId: "a",
+    cron: "0 0 1 1 *",
+    prompt: "old",
+  });
+  await f.a.pool.query(
+    `INSERT INTO personal_runs(user_id,run_id,session_id,actor_id,state,created_at,data)
+  SELECT $1,'history-'||n,$2,$1,'COMPLETED',now(),$3::jsonb||jsonb_build_object('id','history-'||n,'taskId','history-'||n,'rootRunId','history-'||n,'state','COMPLETED') FROM generate_series(1,5000)n`,
+    [f.actor.userId, history.id, JSON.stringify(base)],
+  );
+  const cursor = Number(
+    (
+      await f.a.pool.query(
+        "SELECT cursor FROM personal_event_sequences WHERE user_id=$1",
+        [f.actor.userId],
+      )
+    ).rows[0].cursor,
+  );
+  await f.a.pool.query(
+    `INSERT INTO personal_run_events(user_id,run_id,event_id,data)
+  SELECT $1,'history-'||((n-1)%5000+1),$2::bigint+n,jsonb_build_object('eventId',$2::bigint+n,'runId','history-'||((n-1)%5000+1),'seq',n,'type','history','data',repeat('x',1024)) FROM generate_series(1,50000)n`,
+    [f.actor.userId, cursor],
+  );
+  await f.a.pool.query(
+    "UPDATE personal_event_sequences SET cursor=cursor+50000 WHERE user_id=$1",
+    [f.actor.userId],
+  );
+  await f.a.pool.query(
+    "INSERT INTO personal_audit(user_id,id,data) SELECT $1,'audit-'||n,jsonb_build_object('id','audit-'||n,'action','old','payload',repeat('x',1024)) FROM generate_series(1,5000)n",
+    [f.actor.userId],
+  );
+  await f.a.pool.query(
+    "INSERT INTO personal_usage_requests(user_id,id,run_id,at,data) SELECT $1,'usage-'||n,'history-'||n,'2020-01-01',jsonb_build_object('id','usage-'||n,'runId','history-'||n,'at','2020-01-01','tokens',1,'status','confirmed') FROM generate_series(1,5000)n",
+    [f.actor.userId],
+  );
+  await f.a.pool.query(
+    "INSERT INTO personal_schedule_fires(user_id,id,schedule_id,trigger,scheduled_for,data) SELECT $1,'fire-'||n,$2,'cron',n,jsonb_build_object('id','fire-'||n,'scheduleId',$2::text,'trigger','cron','scheduledFor',n,'state','completed','payload',repeat('x',1024)) FROM generate_series(1,5000)n",
+    [f.actor.userId, noise.id],
+  );
+}
+test(
+  "idle Workers do not claim a busy user queue, but still recover expired leases and resume queued work",
+  { skip: !url },
+  async () => {
+    const { sqlMetrics } = await import("./personal-sql-metrics.js");
+    const f = await reviewDatabase(),
+      provider = new DemoSandbox();
+    let entered!: () => void, release!: () => void;
+    const ready = new Promise<void>((r) => (entered = r)),
+      gate = new Promise<void>((r) => (release = r));
+    const owner = new Worker(
+      f.service,
+      {
+        execute: async () => {
+          entered();
+          await gate;
+        },
+      },
+      new SandboxManager(f.sa, provider),
+      new MCPManager(f.sa, {}),
+    );
+    const idle = [
+      new Worker(
+        f.service,
+        { execute: async () => {} },
+        new SandboxManager(f.sa, provider),
+        new MCPManager(f.sa, {}),
+      ),
+      new Worker(
+        f.other,
+        { execute: async () => {} },
+        new SandboxManager(f.sb, provider),
+        new MCPManager(f.sb, {}),
+      ),
+    ];
+    try {
+      const a = await f.service.createPersonalSession(f.actor, {
+          agentId: "a",
+        }),
+        running = await f.service.submit(f.actor, a.id, "long");
+      await owner.tick();
+      await ready;
+      const b = await f.service.createPersonalSession(f.actor, {
+          agentId: "a",
+        }),
+        queued = await f.service.submit(f.actor, b.id, "next");
+      for (const w of idle) await w.tick();
+      const m1 = await sqlMetrics(f.a.pool),
+        m2 = await sqlMetrics(f.b.pool);
+      let claims = 0;
+      for (const store of [f.a, f.b]) {
+        const original = store.claimRun.bind(store);
+        store.claimRun = async (...args) => {
+          claims++;
+          return original(...args);
+        };
+      }
+      m1.start();
+      m2.start();
+      for (let i = 0; i < 10; i++) await Promise.all(idle.map((w) => w.tick()));
+      const reads = [...m1.stop(), ...m2.stop()];
+      assert.equal(claims, 0);
+      const { runWorkQuery } = await import("../src/personal-work-queries.js");
+      assert.equal(reads.filter((r) => r.sql === runWorkQuery).length, 20);
+      assert.equal(
+        reads.filter((r) => r.sql === "BEGIN").length,
+        0,
+        "no pointless claim transaction may lock user/Run rows",
+      );
+      console.log(
+        JSON.stringify({
+          round6BusyWorkers: {
+            ticks: 20,
+            sql: reads.length,
+            candidateSelects: 20,
+            claims,
+          },
+        }),
+      );
+      release();
+      for (let i = 0; i < 100; i++) {
+        if (
+          (
+            await f.sa.readRun(
+              f.actor.userId,
+              running.id,
+              (s) => s.runs[running.id]!,
+            )
+          ).state === "COMPLETED"
+        )
+          break;
+        await new Promise((r) => setTimeout(r, 10));
+      }
+      await idle[0]!.tick();
+      for (let i = 0; i < 100; i++) {
+        if (
+          (
+            await f.sa.readRun(
+              f.actor.userId,
+              queued.id,
+              (s) => s.runs[queued.id]!,
+            )
+          ).state === "COMPLETED"
+        )
+          break;
+        await new Promise((r) => setTimeout(r, 10));
+      }
+      assert.equal(
+        (
+          await f.sa.readRun(
+            f.actor.userId,
+            queued.id,
+            (s) => s.runs[queued.id]!,
+          )
+        ).state,
+        "COMPLETED",
+      );
+      const c = await f.service.createPersonalSession(f.actor, {
+          agentId: "a",
+        }),
+        waiting = await f.service.submit(f.actor, c.id, "after recovery");
+      await f.sa.runTx(f.actor.userId, queued.id, (s) => {
+        const r = s.runs[queued.id]!;
+        r.state = "RUNNING";
+        r.lease = { owner: "lost", expires: Date.now() - 1 };
+      });
+      assert.deepEqual(
+        (await f.a.listRunWork(Date.now(), 64)).map((w) => w.runId),
+        [queued.id],
+      );
+      await idle[0]!.tick();
+      assert.equal(
+        (
+          await f.sa.readRun(
+            f.actor.userId,
+            queued.id,
+            (s) => s.runs[queued.id]!,
+          )
+        ).state,
+        "FAILED",
+      );
+      await idle[1]!.tick();
+      for (let i = 0; i < 100; i++) {
+        if (
+          (
+            await f.sa.readRun(
+              f.actor.userId,
+              waiting.id,
+              (s) => s.runs[waiting.id]!,
+            )
+          ).state === "COMPLETED"
+        )
+          break;
+        await new Promise((r) => setTimeout(r, 10));
+      }
+      assert.equal(
+        (
+          await f.sa.readRun(
+            f.actor.userId,
+            waiting.id,
+            (s) => s.runs[waiting.id]!,
+          )
+        ).state,
+        "COMPLETED",
+      );
+    } finally {
+      release();
+      await owner.stop();
+      for (const w of idle) await w.stop();
+      await f.close();
+    }
+  },
+);
+test(
+  "Session create/update/delete/fork HTTP writes avoid unrelated execution, audit, usage and schedule history",
+  { skip: !url },
+  async () => {
+    const { buildAPI } = await import("../src/api.js"),
+      { sqlMetrics } = await import("./personal-sql-metrics.js");
+    const f = await reviewDatabase();
+    const app = buildAPI(
+      f.service,
+      async () => ({ ...f.actor, personal: false }),
+      new SandboxManager(f.sa, new DemoSandbox()),
+    );
+    try {
+      await largeSessionHistory(f);
+      const m = await sqlMetrics(f.a.pool);
+      const check = () => {
+        const records = m.stop();
+        assert.ok(
+          !records.some((r) =>
+            /FROM personal_(run_events|audit|usage_requests|resource_transitions)\b/.test(
+              r.sql,
+            ),
+          ),
+        );
+        const bytes = records.reduce((n, r) => n + r.bytes, 0);
+        assert.ok(bytes < 20000, `returned ${bytes} bytes`);
+        return { queries: records.length, bytes };
+      };
+      m.start();
+      const created = await app.inject({
+        method: "POST",
+        url: "/api/v1/sessions",
+        payload: { agentId: "a", title: "new" },
+      });
+      assert.equal(created.statusCode, 201, created.body);
+      const creation = check(),
+        sid = created.json().id;
+      await f.a.pool.query(
+        "UPDATE personal_sessions SET data=jsonb_set(data,'{entries}',$3::jsonb) WHERE user_id=$1 AND session_id=$2",
+        [
+          f.actor.userId,
+          sid,
+          JSON.stringify([{ role: "assistant", content: "preserve me" }]),
+        ],
+      );
+      m.start();
+      const updated = await app.inject({
+        method: "PATCH",
+        url: `/api/v1/sessions/${sid}`,
+        payload: { title: "renamed", cwd: "nested" },
+      });
+      assert.equal(updated.statusCode, 200, updated.body);
+      assert.deepEqual(updated.json().entries, [
+        { role: "assistant", content: "preserve me" },
+      ]);
+      const update = check();
+      m.start();
+      const forked = await app.inject({
+        method: "POST",
+        url: `/api/v1/sessions/${sid}/fork`,
+      });
+      assert.equal(forked.statusCode, 201, forked.body);
+      assert.deepEqual(forked.json().entries, updated.json().entries);
+      assert.equal(forked.json().title, "renamed");
+      const fork = check();
+      m.start();
+      const deleted = await app.inject({
+        method: "DELETE",
+        url: `/api/v1/sessions/${sid}`,
+      });
+      assert.equal(deleted.statusCode, 200, deleted.body);
+      const deletion = check();
+      const old = (
+        await f.a.pool.query(
+          "SELECT data FROM personal_sessions WHERE user_id=$1 AND session_id=$2",
+          [f.actor.userId, sid],
+        )
+      ).rows[0].data;
+      assert.deepEqual(old.entries, updated.json().entries);
+      assert.ok(old.deletedAt);
+      console.log(
+        JSON.stringify({
+          round6SessionWrites: { creation, update, fork, deletion },
+        }),
+      );
+      const active = await f.service.submit(
+        f.actor,
+        forked.json().id,
+        "queued",
+      );
+      await assert.rejects(
+        f.other.updateSession(f.actor, forked.json().id, { cwd: "busy" }),
+        { code: "SESSION_BUSY" },
+      );
+      await assert.rejects(f.other.deleteSession(f.actor, forked.json().id), {
+        code: "SESSION_BUSY",
+      });
+      await assert.rejects(f.other.forkSession(f.actor, forked.json().id), {
+        code: "SESSION_BUSY",
+      });
+      const title = await f.other.updateSession(f.actor, forked.json().id, {
+        title: "allowed while busy",
+      });
+      assert.equal(title.title, "allowed while busy");
+      await f.sb.runTx(f.actor.userId, active.id, (s) => {
+        s.runs[active.id]!.state = "CANCELLED";
+      });
+    } finally {
+      await app.close();
+      await f.close();
+    }
+  },
+);
+test(
+  "Session mutations serialize with admission and preserve transcripts when rejecting busy/cross-user access",
+  { skip: !url },
+  async () => {
+    const f = await reviewDatabase();
+    try {
+      for (const action of ["delete", "fork", "cwd"] as const) {
+        const ses = await f.service.createPersonalSession(f.actor, {
+          agentId: "a",
+        });
+        const mutation = () =>
+          action === "delete"
+            ? f.other.deleteSession(f.actor, ses.id)
+            : action === "fork"
+              ? f.other.forkSession(f.actor, ses.id)
+              : f.other.updateSession(f.actor, ses.id, { cwd: "changed" });
+        const results = await Promise.allSettled([
+          f.service.submit(f.actor, ses.id, "race"),
+          mutation(),
+        ]);
+        assert.ok(results.some((r) => r.status === "fulfilled"));
+        if (
+          results[0]!.status === "fulfilled" &&
+          results[1]!.status === "fulfilled"
+        ) {
+          assert.notEqual(
+            action,
+            "delete",
+            "deleted Session cannot admit a Run",
+          );
+          if (action === "cwd")
+            assert.equal(results[0]!.value.cwd, "/workspace/changed");
+        }
+        if (results[1]!.status === "rejected")
+          assert.equal(results[1]!.reason.code, "SESSION_BUSY");
+        if (results[1]!.status === "fulfilled" && action === "delete")
+          assert.equal(
+            results[0]!.status,
+            "rejected",
+            "deletion winning must prevent admission",
+          );
+      }
+      const other = await principal(f.ar, {
+        tenantId: "outside",
+        userId: "other",
+        admin: false,
+      });
+      const own = await f.service.createPersonalSession(f.actor, {
+        agentId: "a",
+      });
+      await assert.rejects(
+        f.other.updateSession(other, own.id, { title: "steal" }),
+        { code: "SESSION_NOT_FOUND" },
+      );
+      await assert.rejects(f.other.deleteSession(other, own.id), {
+        code: "SESSION_NOT_FOUND",
+      });
+      await assert.rejects(f.other.forkSession(other, own.id), {
+        code: "SESSION_NOT_FOUND",
+      });
+    } finally {
+      await f.close();
+    }
+  },
+);
+test(
+  "manual Schedule HTTP uses bounded scheduleTx and retains same-timestamp deduplication under large history",
+  { skip: !url },
+  async () => {
+    const { buildAPI } = await import("../src/api.js"),
+      { ScheduleService } = await import("../src/schedules/service.js"),
+      { sqlMetrics } = await import("./personal-sql-metrics.js");
+    const f = await reviewDatabase();
+    const task = await new ScheduleService(f.service).create(f.actor, {
+      agentId: "a",
+      cron: "0 0 1 1 *",
+      prompt: "manual",
+      sessionMode: "new",
+    });
+    const before = process.env.SCHEDULES_ENABLED;
+    process.env.SCHEDULES_ENABLED = "true";
+    const app = buildAPI(
+      f.service,
+      async () => ({ ...f.actor, personal: false }),
+      new SandboxManager(f.sa, new DemoSandbox()),
+    );
+    const originalNow = Date.now;
+    try {
+      await largeSessionHistory(f);
+      const metrics = await sqlMetrics(f.a.pool),
+        now = originalNow();
+      Date.now = () => now;
+      metrics.start();
+      const responses = await Promise.all(
+        [1, 2].map(() =>
+          app.inject({
+            method: "POST",
+            url: `/api/v1/schedules/${task.id}/run`,
+          }),
+        ),
+      );
+      const records = metrics.stop();
+      Date.now = originalNow;
+      for (const response of responses)
+        assert.equal(response.statusCode, 202, response.body);
+      assert.equal(responses[0]!.json().id, responses[1]!.json().id);
+      assert.equal(responses[0]!.json().runId, responses[1]!.json().runId);
+      assert.ok(
+        !records.some((r) =>
+          /FROM personal_(run_events|audit|usage_requests|resource_transitions)\b/.test(
+            r.sql,
+          ),
+        ),
+      );
+      const bytes = records.reduce((n, r) => n + r.bytes, 0);
+      assert.ok(bytes < 30000, `returned ${bytes} bytes`);
+      assert.equal(
+        (
+          await f.a.pool.query(
+            "SELECT count(*)::int n FROM personal_schedule_fires WHERE user_id=$1 AND schedule_id=$2",
+            [f.actor.userId, task.id],
+          )
+        ).rows[0].n,
+        1,
+      );
+      assert.equal(
+        (
+          await f.a.pool.query(
+            "SELECT count(*)::int n FROM personal_runs WHERE user_id=$1 AND data->'schedule'->>'id'=$2",
+            [f.actor.userId, task.id],
+          )
+        ).rows[0].n,
+        1,
+      );
+      console.log(
+        JSON.stringify({
+          round6ManualSchedule: {
+            requests: 2,
+            queries: records.length,
+            bytes,
+            fires: 1,
+          },
+        }),
+      );
+    } finally {
+      Date.now = originalNow;
+      await app.close();
+      await f.close();
+      if (before === undefined) delete process.env.SCHEDULES_ENABLED;
+      else process.env.SCHEDULES_ENABLED = before;
+    }
+  },
+);
+
+test(
+  "013 backfills busy users and tracks RUNNING transitions without leases",
+  { skip: !url },
+  async () => {
+    const f = await reviewDatabase();
+    try {
+      const ses = await f.service.createPersonalSession(f.actor, {
+          agentId: "a",
+        }),
+        first = await f.service.submit(f.actor, ses.id, "running"),
+        other = await f.service.createPersonalSession(f.actor, {
+          agentId: "a",
+        }),
+        queued = await f.service.submit(f.actor, other.id, "queued");
+      await f.a.pool.query(
+        "UPDATE personal_runs SET state='RUNNING',data=jsonb_set(data,'{state}','\"RUNNING\"') WHERE user_id=$1 AND run_id=$2",
+        [f.actor.userId, first.id],
+      );
+      // Simulate the old projection before upgrading an already busy database.
+      await f.a.pool.query(
+        "UPDATE personal_run_work SET running=false WHERE user_id=$1",
+        [f.actor.userId],
+      );
+      await f.a.pool.query("UPDATE personal_schema SET version=10 WHERE id=1");
+      await assert.rejects(f.a.ready(), /SCHEMA_MISMATCH/);
+      await f.a.pool.query(
+        await readFile(
+          "migrations/013_personal_dispatchable_sessions.sql",
+          "utf8",
+        ),
+      );
+      await f.a.ready();
+      assert.deepEqual(
+        (await f.a.listRunWork(Date.now(), 10)).map((r) => r.runId),
+        [],
+      );
+      await f.a.pool.query(
+        "DELETE FROM personal_runs WHERE user_id=$1 AND run_id=$2",
+        [f.actor.userId, first.id],
+      );
+      assert.deepEqual(
+        (await f.a.listRunWork(Date.now(), 10)).map((r) => r.runId),
+        [queued.id],
+      );
+      // INSERT and DELETE must update the flag even for RUNNING records without leases.
+      await f.a.pool.query(
+        "INSERT INTO personal_runs(user_id,run_id,session_id,actor_id,state,created_at,data) VALUES($1,$2,$3,$1,'RUNNING',now(),$4)",
+        [
+          f.actor.userId,
+          first.id,
+          ses.id,
+          JSON.stringify({ ...first, state: "RUNNING" }),
+        ],
+      );
+      assert.deepEqual(
+        (await f.a.listRunWork(Date.now(), 10)).map((r) => r.runId),
+        [],
+      );
+      await f.a.pool.query(
+        "DELETE FROM personal_runs WHERE user_id=$1 AND run_id=$2",
+        [f.actor.userId, first.id],
+      );
+      assert.deepEqual(
+        (await f.a.listRunWork(Date.now(), 10)).map((r) => r.runId),
+        [queued.id],
+      );
+    } finally {
+      await f.close();
     }
   },
 );

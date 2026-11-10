@@ -202,9 +202,11 @@ export class ScheduleService {
     return fire;
   }
   async manual(a: Actor, sid: string) {
-    return this.service.store.tx(a.tenantId, (s) =>
-      this.fire(s, this.get(s, a, sid), Date.now(), "manual"),
-    );
+    const now = Date.now(),
+      fire = (s: State) => this.fire(s, this.get(s, a, sid), now, "manual");
+    return this.service.store.scheduleTx
+      ? this.service.store.scheduleTx(a.tenantId, sid, fire, { manualFor: now })
+      : this.service.store.tx(a.tenantId, fire);
   }
   async tick() {
     if (this.service.store.listScheduleWork && this.service.store.scheduleTx) {

@@ -9,7 +9,11 @@ import {
   saveExecutionMetadata,
   type ExecutionScope,
 } from "./personal-execution-store.js";
-import { appendRecordAudit, loadRecords } from "./personal-records.js";
+import {
+  appendRecordAudit,
+  loadRecords,
+  saveRecords,
+} from "./personal-records.js";
 import { personalConnection } from "./personal-context.js";
 import { EventEmitter } from "node:events";
 import { telemetry } from "./telemetry.js";
@@ -43,7 +47,7 @@ import type {
   CapacityState,
 } from "./adapters/sandbox-policy.js";
 import { type WorkerHealth } from "./health.js";
-const SCHEMA_VERSION = 10;
+const SCHEMA_VERSION = 11;
 function candidateLimit(limit: number) {
   if (!Number.isInteger(limit) || limit < 1 || limit > 100)
     throw new Error("Invalid candidate limit");
@@ -370,7 +374,8 @@ export class PersonalPostgresStore implements Store {
       EXISTS(SELECT 1 FROM pg_index WHERE indexrelid=to_regclass('personal_run_work_queued') AND indrelid=to_regclass('personal_run_work') AND indisvalid AND indisready) AS work_queued,
       EXISTS(SELECT 1 FROM pg_index WHERE indexrelid=to_regclass('personal_run_work_expired') AND indrelid=to_regclass('personal_run_work') AND indisvalid AND indisready) AS work_expired,
       EXISTS(SELECT 1 FROM pg_index WHERE indexrelid=to_regclass('personal_workspace_rotation') AND indrelid=to_regclass('personal_workspace_runtime') AND indisvalid AND indisready) AS rotation,
-      EXISTS(SELECT 1 FROM pg_index WHERE indexrelid=to_regclass('personal_schedule_fires_history') AND indrelid=to_regclass('personal_schedule_fires') AND indisvalid AND indisready) AS fire_history`);
+      EXISTS(SELECT 1 FROM pg_index WHERE indexrelid=to_regclass('personal_schedule_fires_history') AND indrelid=to_regclass('personal_schedule_fires') AND indisvalid AND indisready) AS fire_history,
+      EXISTS(SELECT 1 FROM pg_index WHERE indexrelid=to_regclass('personal_run_work_dispatchable') AND indrelid=to_regclass('personal_run_work') AND indisvalid AND indisready) AS dispatchable`);
     if (Object.values(indexes.rows[0]).some((v) => v !== true))
       throw new Error("SCHEMA_INDEXES_INCOMPLETE");
     const triggers = await this.healthPool
@@ -568,6 +573,86 @@ export class PersonalPostgresStore implements Store {
       workspace: State["workspaces"][string];
     }[];
   }
+  async sessionTx<T>(
+    user: string,
+    sessionId: string | undefined,
+    fn: (s: State) => T | Promise<T>,
+    options: { entries?: boolean } = {},
+  ) {
+    const c = await this.pool.connect();
+    try {
+      await c.query("BEGIN");
+      const meta = await c.query(
+        "SELECT state->'workspaces' AS workspaces FROM personal_user_state WHERE user_id=$1 FOR NO KEY UPDATE",
+        [user],
+      );
+      const state = {
+        ...emptyState(),
+        workspaces: meta.rows[0]?.workspaces ?? {},
+      };
+      if (sessionId) {
+        const sessions = await c.query(
+          "SELECT " +
+            (options.entries ? "data" : "data-'entries' AS data") +
+            " FROM personal_sessions WHERE user_id=$1 AND session_id=$2 FOR UPDATE",
+          [user, sessionId],
+        );
+        if (sessions.rows[0]) state.sessions[sessionId] = sessions.rows[0].data;
+        const busy = await c.query(
+          "SELECT run_id,session_id,state FROM personal_runs WHERE user_id=$1 AND session_id=$2 AND state IN ('QUEUED','RUNNING','WAITING_INPUT') LIMIT 1",
+          [user, sessionId],
+        );
+        for (const r of busy.rows)
+          state.runs[r.run_id] = {
+            id: r.run_id,
+            sessionId: r.session_id,
+            state: r.state,
+          } as State["runs"][string];
+      }
+      const before = structuredClone(state);
+      const result = await personalConnection.run(
+        { pool: this.pool, client: c },
+        () => fn(state),
+      );
+      if (
+        JSON.stringify(metadata(before)) !== JSON.stringify(metadata(state)) ||
+        JSON.stringify(before.runs) !== JSON.stringify(state.runs) ||
+        JSON.stringify(before.events) !== JSON.stringify(state.events) ||
+        JSON.stringify(before.usage) !== JSON.stringify(state.usage) ||
+        JSON.stringify(before.schedules) !== JSON.stringify(state.schedules) ||
+        JSON.stringify(before.scheduleFires) !==
+          JSON.stringify(state.scheduleFires)
+      )
+        throw new Error("sessionTx scope violation");
+      if (sessionId && before.sessions[sessionId] && !state.sessions[sessionId])
+        throw new Error("sessionTx cannot remove its target");
+      for (const [sid, s] of Object.entries(state.sessions)) {
+        if (JSON.stringify(before.sessions[sid]) === JSON.stringify(s))
+          continue;
+        if (sid === sessionId && before.sessions[sid]) {
+          await c.query(
+            "UPDATE personal_sessions SET data=CASE WHEN $3::jsonb ? 'entries' THEN $3::jsonb ELSE $3::jsonb||jsonb_build_object('entries',data->'entries') END WHERE user_id=$1 AND session_id=$2",
+            [user, sid, JSON.stringify(s)],
+          );
+        } else {
+          if (s.userId !== user)
+            throw new Error("sessionTx owner scope violation");
+          await c.query(
+            "INSERT INTO personal_sessions(user_id,session_id,workspace_id,data) VALUES($1,$2,$3,$4)",
+            [user, sid, s.workspaceId, JSON.stringify(s)],
+          );
+        }
+      }
+      await saveRecords(c, user, before, state);
+      await c.query("COMMIT");
+      return structuredClone(result);
+    } catch (error) {
+      await c.query("ROLLBACK");
+      throw error;
+    } finally {
+      c.release();
+    }
+  }
   async workspaceTx<T>(
     tenant: string,
     fn: (s: State) => T | Promise<T>,
@@ -762,6 +847,7 @@ export class PersonalPostgresStore implements Store {
     tenant: string,
     scheduleId: string,
     fn: (state: State) => T | Promise<T>,
+    options: { manualFor?: number } = {},
   ): Promise<T> {
     const c = await this.pool.connect();
     try {
@@ -786,8 +872,8 @@ export class PersonalPostgresStore implements Store {
       if (task) s.schedules![task.id] = task;
       if (task) {
         const existing = await c.query(
-          "SELECT data FROM personal_schedule_fires WHERE user_id=$1 AND schedule_id=$2 AND trigger='cron' AND scheduled_for=$3",
-          [tenant, scheduleId, task.nextFireAt],
+          "SELECT data FROM personal_schedule_fires WHERE user_id=$1 AND schedule_id=$2 AND ((trigger='cron' AND scheduled_for=$3) OR (trigger='manual' AND scheduled_for=$4::bigint))",
+          [tenant, scheduleId, task.nextFireAt, options.manualFor ?? null],
         );
         for (const { data } of existing.rows)
           s.scheduleFires![fireKey(data)] = data;

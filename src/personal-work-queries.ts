@@ -1,10 +1,10 @@
 // Bound every candidate source before the small final fairness sort.
 export const runWorkQuery = `WITH candidates AS (
  (SELECT user_id,queued_run_id AS run_id,1 AS priority FROM personal_run_work
-  WHERE queued_run_id IS NOT NULL AND user_id>$2 ORDER BY user_id LIMIT $3)
+  WHERE queued_run_id IS NOT NULL AND NOT running AND user_id>$2 ORDER BY user_id LIMIT $3)
  UNION ALL
  (SELECT user_id,queued_run_id AS run_id,1 AS priority FROM personal_run_work
-  WHERE queued_run_id IS NOT NULL AND user_id<=$2 ORDER BY user_id LIMIT $3)
+  WHERE queued_run_id IS NOT NULL AND NOT running AND user_id<=$2 ORDER BY user_id LIMIT $3)
  UNION ALL
  (SELECT user_id,lease_run_id AS run_id,0 AS priority FROM personal_run_work
   WHERE lease_run_id IS NOT NULL AND lease_expires<$1 ORDER BY lease_expires,user_id LIMIT $3)

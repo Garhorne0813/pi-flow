@@ -1,6 +1,6 @@
 # PR #60 评审修复
 
-1. **Compose 初始化**：挂载全部 001–012 迁移。`npm run smoke:compose` 用独立项目、随机端口和全新数据库卷启动 PostgreSQL/API，检查两个 schema 版本并通过 HTTP 完成一个个人 Run；结束后只删除该项目的资源。CI 执行完整构建及启动。可通过 `COMPOSE_SMOKE_IMAGE` 使用已经构建的镜像。
+1. **Compose 初始化**：挂载全部 001–013 迁移。`npm run smoke:compose` 用独立项目、随机端口和全新数据库卷启动 PostgreSQL/API，检查两个 schema 版本并通过 HTTP 完成一个个人 Run；结束后只删除该项目的资源。CI 执行完整构建及启动。可通过 `COMPOSE_SMOKE_IMAGE` 使用已经构建的镜像。
 2. **模型执行快照**：管理模型目录时生成只追加的 `modelGatewayVersions` 和 `modelSecretVersions`，密钥版本只保存加密密文。Run 保存私有 `modelGatewayRef`，审批续跑继承该引用；Worker 按引用解析 URL 和密钥版本，不再用当前目录重新批准旧 Run。`null` 固定使用部署环境网关。启动时为既有目录补齐版本；没有该字段的升级前 Run 保留兼容解析，但无法恢复升级前已丢失的历史网关/密钥。版本随平台配置持久化，当前不自动清理；更换 `CONFIG_SECRET_KEY` 前须重新封装仍被引用的密文。
 3. **工具撤销边界**：平台策略在事务取得锁后读取，沙箱租约授权、准备结束和实际 Provider 调用前均重新检查 Run/工具策略。内存工具派生写入也使用原工具授权；MCP 在 HTTP dispatch 前复核。已发送的远程命令不能原子撤回，也不保证取消会回滚已产生的效果。
 4. **定时任务更新**：修改 Agent、cwd 或 Session 模式会清除复用 Session 绑定，下次触发创建正确的 Session。更新及触发都检查 Agent 可访问性和用户 Token 限制。旧 Run 不随任务编辑改变；Session 缺失、删除或配置不匹配时也不会复用。
@@ -75,3 +75,7 @@
 ## 第五轮一致性与大积压验证
 
 修复 Schedule 审计双写及单 Schedule Fire 历史读取，新增事务维护的 Run 队首投影、维护复合索引和锁定批次 TID 更新；012 发布个人 schema v10。完整执行计划、分页契约及维护反向分布的剩余扫描风险见 [第五轮说明](pr60-round5.md)。
+
+## 第六轮可执行候选与定向写事务
+
+013 发布个人 schema v11，维护 RUNNING 标记以抑制无效队列认领，同时保留过期租约恢复。Session 创建/修改/删除/Fork 使用定向 sessionTx；手动 Schedule 使用 scheduleTx 并保留同时间戳 Fire 去重。真实多 Worker SQL 计数、大历史量 HTTP、并发互斥及迁移回填结果见 [第六轮说明](pr60-round6.md)。

@@ -31,6 +31,13 @@ export function personalStore(backing: Store, registry: Registry): Store {
   };
   return new Proxy(backing, {
     get(target, key) {
+      if (key === "sessionTx" && target.sessionTx)
+        return async (
+          user: string,
+          sid: string | undefined,
+          fn: (s: State) => unknown,
+          options?: { entries?: boolean },
+        ) => target.sessionTx!(user, sid, await overlay(fn), options);
       if (key === "executionTx" && target.executionTx)
         return async (
           user: string,
@@ -55,8 +62,12 @@ export function personalStore(backing: Store, registry: Registry): Store {
         return async (user: string, rid: string, fn: (s: State) => unknown) =>
           target[key]!(user, rid, await overlay(fn));
       if (key === "scheduleTx" && target.scheduleTx)
-        return async (user: string, sid: string, fn: (s: State) => unknown) =>
-          target.scheduleTx!(user, sid, await overlay(fn));
+        return async (
+          user: string,
+          sid: string,
+          fn: (s: State) => unknown,
+          options?: { manualFor?: number },
+        ) => target.scheduleTx!(user, sid, await overlay(fn), options);
       if (key === "readRun")
         return async (
           user: string,
