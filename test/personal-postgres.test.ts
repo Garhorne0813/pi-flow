@@ -304,6 +304,10 @@ test(
       await backing.pool.query(
         await readFile("migrations/008_editable_agents.sql", "utf8"),
       );
+      await assert.rejects(backing.ready(), /SCHEMA_MISMATCH/);
+      await backing.pool.query(
+        await readFile("migrations/009_personal_execution_indexes.sql", "utf8"),
+      );
       await backing.ready();
       const store = personalStore(backing, registry),
         service = new PersonalService(store, registry);
@@ -405,7 +409,7 @@ test(
   },
 );
 
-async function reviewDatabase() {
+async function reviewDatabase(includeExecutionMigration = true) {
   const control = new pg.Pool({ connectionString: url }),
     schema = "review_" + id().replaceAll("-", "");
   await control.query(`CREATE SCHEMA ${schema}`);
@@ -414,7 +418,11 @@ async function reviewDatabase() {
   const a = new PersonalPostgresStore(scoped.toString()),
     b = new PersonalPostgresStore(scoped.toString());
   for (const name of (await readdir("migrations"))
-    .filter((n) => n.endsWith(".sql"))
+    .filter(
+      (n) =>
+        n.endsWith(".sql") &&
+        (includeExecutionMigration || !n.startsWith("009")),
+    )
     .sort())
     await a.pool.query(await readFile("migrations/" + name, "utf8"));
   const ar = new PostgresRegistry(a.pool),
@@ -689,6 +697,249 @@ test(
       await f.close();
       if (previous === undefined) delete process.env.CONFIG_SECRET_KEY;
       else process.env.CONFIG_SECRET_KEY = previous;
+    }
+  },
+);
+
+test(
+  "approval refresh persists task-bound tokens across PostgreSQL clients and dispatches bash with refreshed credentials",
+  { skip: !url },
+  async () => {
+    const { openToken } = await import("../src/security/token-vault.js");
+    const previous = process.env.RUN_TOKEN_KEY;
+    process.env.RUN_TOKEN_KEY = Buffer.alloc(32, 12).toString("base64");
+    const f = await reviewDatabase(),
+      provider = new DemoSandbox();
+    const worker = new Worker(
+      f.service,
+      {
+        execute: async (c) => {
+          await c.call("bash", { command: "user-api" });
+        },
+      },
+      new SandboxManager(f.sa, provider),
+      new MCPManager(f.sa, {}),
+    );
+    const seen: string[] = [];
+    const execute = provider.execute.bind(provider);
+    provider.execute = async (sid, op, args) => {
+      if (op === "bash") {
+        seen.push(String(args._userToken));
+        if (args._userToken !== "new-postgres-token")
+          throw new Error("USER_API_TOKEN_EXPIRED");
+        return { stdout: "ok", exitCode: 0 };
+      }
+      return execute(sid, op, args);
+    };
+    const otherWorker = new Worker(
+      f.other,
+      new DemoRuntime(),
+      new SandboxManager(f.sb, provider),
+      new MCPManager(f.sb, {}),
+    );
+    const finish = async (w: Worker, rid: string) => {
+      for (let i = 0; i < 200; i++) {
+        await w.tick();
+        const r = await f.sb.readRun(f.actor.userId, rid, (s) => s.runs[rid]!);
+        if (
+          ["WAITING_INPUT", "COMPLETED", "FAILED"].includes(r.state) &&
+          !r.lease
+        )
+          return r;
+        await new Promise((r) => setTimeout(r, 5));
+      }
+      throw new Error("Run did not settle");
+    };
+    try {
+      await f.ar.tx((s) => {
+        s.managedAgents!.a!.config = AgentConfig.parse({
+          ...f.config,
+          tools: ["bash"],
+          userTokenAccess: true,
+        });
+      });
+      const ses = await f.service.createPersonalSession(f.actor, {
+        agentId: "a",
+      });
+      const root = await f.service.submit(
+        f.actor,
+        ses.id,
+        "call",
+        undefined,
+        undefined,
+        undefined,
+        "old-postgres-token",
+      );
+      assert.equal((await finish(worker, root.id)).state, "WAITING_INPUT");
+      await worker.stop();
+      const iid = await f.sb.read(
+        f.actor.userId,
+        (s) => Object.values(s.interactions)[0]!.id,
+      );
+      await f.sb.runTx(f.actor.userId, root.id, (s) => {
+        s.runs[root.id]!.actor.expiresAt = Date.now() - 1;
+      });
+      await f.br.tx((s) => {
+        s.managedAgents!.a!.config.userTokenAccess = false;
+        s.managedAgents!.a!.config.systemPrompt = "changed";
+      });
+      const next = (await f.other.respond(
+        { ...f.actor, expiresAt: Date.now() + 60000 },
+        iid,
+        "approve",
+        "new-postgres-token",
+      ))!;
+      const stored = await f.sa.readRun(
+        f.actor.userId,
+        next.id,
+        (s) => s.runs[next.id]!,
+      );
+      assert.equal(
+        openToken(stored.userTokenRef!, f.actor.userId + ":" + root.taskId),
+        "new-postgres-token",
+      );
+      assert.deepEqual(stored.capabilities, root.capabilities);
+      assert.equal((await finish(otherWorker, next.id)).state, "COMPLETED");
+      assert.deepEqual(seen, ["new-postgres-token"]);
+      assert.equal(
+        await f.sa.readRun(
+          f.actor.userId,
+          root.id,
+          (s) => s.runs[root.id]!.userTokenRef,
+        ),
+        undefined,
+      );
+      assert.equal(
+        await f.sa.readRun(
+          f.actor.userId,
+          next.id,
+          (s) => s.runs[next.id]!.userTokenRef,
+        ),
+        undefined,
+      );
+      const rows = await f.a.pool.query(
+        "SELECT data FROM personal_runs WHERE user_id=$1",
+        [f.actor.userId],
+      );
+      assert.doesNotMatch(
+        JSON.stringify(rows.rows),
+        /old-postgres-token|new-postgres-token/,
+      );
+    } finally {
+      await worker.stop();
+      await otherWorker.stop();
+      await f.close();
+      if (previous === undefined) delete process.env.RUN_TOKEN_KEY;
+      else process.env.RUN_TOKEN_KEY = previous;
+    }
+  },
+);
+
+test(
+  "personal readiness requires committed migration 009, normalized schedules and all valid hot-path indexes",
+  { skip: !url },
+  async () => {
+    const { ScheduleService } = await import("../src/schedules/service.js"),
+      { buildAPI } = await import("../src/api.js");
+    const f = await reviewDatabase(false),
+      scheduler = new ScheduleService(f.service);
+    const app = buildAPI(
+      f.service,
+      async () => f.actor,
+      new SandboxManager(f.sa, new DemoSandbox()),
+    );
+    try {
+      const task = await scheduler.create(f.actor, {
+        agentId: "a",
+        cron: "* * * * *",
+        prompt: "legacy",
+      });
+      const fire = {
+        id: id(),
+        scheduleId: task.id,
+        trigger: "cron",
+        scheduledFor: 1,
+        state: "completed",
+      };
+      await f.a.pool.query(
+        "DELETE FROM personal_scheduled_tasks WHERE user_id=$1 AND schedule_id=$2",
+        [f.actor.userId, task.id],
+      );
+      await f.a.pool.query(
+        "UPDATE personal_user_state SET state=state||jsonb_build_object('schedules',$2::jsonb,'scheduleFires',$3::jsonb) WHERE user_id=$1",
+        [
+          f.actor.userId,
+          JSON.stringify({ [task.id]: task }),
+          JSON.stringify({ legacy: fire }),
+        ],
+      );
+      await assert.rejects(f.a.ready(), /SCHEMA_MISMATCH/);
+      assert.equal(
+        (await app.inject({ url: "/health/ready" })).statusCode,
+        503,
+      );
+      const migration = await readFile(
+        "migrations/009_personal_execution_indexes.sql",
+        "utf8",
+      );
+      const c = await f.a.pool.connect();
+      try {
+        await c.query("BEGIN");
+        await c.query(migration);
+        await assert.rejects(f.a.ready(), /SCHEMA_MISMATCH/);
+        await c.query("ROLLBACK");
+        await assert.rejects(f.a.ready(), /SCHEMA_MISMATCH/);
+        await c.query("BEGIN");
+        await c.query(migration);
+        await c.query("COMMIT");
+      } finally {
+        await c.query("ROLLBACK");
+        c.release();
+      }
+      await f.a.ready();
+      assert.equal(
+        (await app.inject({ url: "/health/ready" })).statusCode,
+        200,
+      );
+      const migrated = await f.sb.readMetadata(
+        f.actor.userId,
+        ["schedules", "scheduleFires"],
+        (s) => ({
+          task: s.schedules![task.id],
+          fires: Object.values(s.scheduleFires!),
+        }),
+      );
+      assert.equal(migrated.task!.prompt, "legacy");
+      assert.equal(migrated.fires[0]!.id, fire.id);
+      assert.equal(
+        Number(
+          (
+            await f.a.pool.query(
+              "SELECT version FROM personal_schema WHERE id=1",
+            )
+          ).rows[0].version,
+        ),
+        7,
+      );
+      for (const index of [
+        "personal_runs_running",
+        "personal_scheduled_tasks_due",
+        "personal_schedule_fires_pending",
+      ]) {
+        await f.a.pool.query(`DROP INDEX ${index}`);
+        await assert.rejects(f.a.ready(), /SCHEMA_INDEXES_INCOMPLETE/);
+        assert.equal(
+          (await app.inject({ url: "/health/ready" })).statusCode,
+          503,
+        );
+        await f.a.pool.query(migration);
+        await f.a.ready();
+      }
+      await f.a.pool.query("DROP TABLE personal_schedule_fires");
+      await assert.rejects(f.a.ready(), /SCHEMA_INCOMPLETE/);
+    } finally {
+      await app.close();
+      await f.close();
     }
   },
 );

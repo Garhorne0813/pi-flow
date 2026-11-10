@@ -948,3 +948,217 @@ test("schedule reuse is invalidated by Agent/cwd edits and rejects inaccessible 
   assert.equal(final.cwd, "/workspace/next");
   await f.worker.stop();
 });
+
+test("approval reauthentication seals the fresh caller token for bash without changing the Run snapshot", async () => {
+  const { openToken } = await import("../src/security/token-vault.js");
+  const previous = process.env.RUN_TOKEN_KEY;
+  process.env.RUN_TOKEN_KEY = Buffer.alloc(32, 11).toString("base64");
+  let calls = 0,
+    expired = false;
+  const f = await fixture({
+    execute: async (c) => {
+      if (calls++ === 0) await c.call("bash", { command: "call-user-api" });
+    },
+  });
+  const original = config({ tools: ["bash"], userTokenAccess: true });
+  await f.registry.tx((s) =>
+    replaceAgents(s, [{ key: "assistant", config: original }], f.alice),
+  );
+  const seen: string[] = [];
+  const execute = f.provider.execute.bind(f.provider);
+  f.provider.execute = async (sid, op, args) => {
+    if (op === "bash") {
+      seen.push(String(args._userToken));
+      if (args._userToken !== "fresh-caller-token")
+        throw new Error("USER_API_TOKEN_EXPIRED");
+      return { stdout: "authorized", exitCode: 0 };
+    }
+    return execute(sid, op, args);
+  };
+  const app = buildAPI(
+    f.service,
+    async (header) => {
+      if (header === "Bearer other-user-token") return f.bob;
+      if (header === "Bearer fresh-caller-token")
+        return { ...f.alice, expiresAt: Date.now() + 60000 };
+      if (header === "Bearer expired-caller-token" && !expired)
+        return { ...f.alice, expiresAt: Date.now() + 60000 };
+      const { Fault } = await import("../src/domain.js");
+      throw new Fault(401, "UNAUTHENTICATED");
+    },
+    f.sandbox,
+  );
+  try {
+    const ses = await f.service.createPersonalSession(f.alice, {
+      agentId: "assistant",
+    });
+    const submitted = await app.inject({
+      method: "POST",
+      url: `/api/v1/sessions/${ses.id}/runs`,
+      headers: { authorization: "Bearer expired-caller-token" },
+      payload: { message: "call" },
+    });
+    assert.equal(submitted.statusCode, 202, submitted.body);
+    const r = await f.store.readRun(
+      f.alice.tenantId,
+      submitted.json().id,
+      (s) => s.runs[submitted.json().id]!,
+    );
+    assert.equal((await drain(f, r)).state, "WAITING_INPUT");
+    const interaction = await f.store.read(
+      f.alice.tenantId,
+      (s) => Object.values(s.interactions)[0]!,
+    );
+    expired = true;
+    await f.store.tx(f.alice.tenantId, (s) => {
+      s.runs[r.id]!.actor.expiresAt = Date.now() - 1;
+    });
+    const otherSession = await f.service.createPersonalSession(f.alice, {
+      agentId: "assistant",
+    });
+    const unrelated = await f.service.submit(
+      f.alice,
+      otherSession.id,
+      "another task",
+      undefined,
+      undefined,
+      undefined,
+      "other-task-token",
+    );
+    // A later Agent edit cannot turn off the continuation's captured token capability.
+    await f.registry.tx((s) =>
+      replaceAgents(
+        s,
+        [
+          {
+            key: "assistant",
+            config: config({
+              systemPrompt: "edited",
+              tools: [],
+              userTokenAccess: false,
+            }),
+          },
+        ],
+        f.alice,
+      ),
+    );
+    const endpoint = `/api/v1/interactions/${interaction.id}/response`;
+    assert.equal(
+      (
+        await app.inject({
+          method: "POST",
+          url: endpoint,
+          headers: { authorization: "Bearer expired-caller-token" },
+          payload: { response: "approve" },
+        })
+      ).statusCode,
+      401,
+    );
+    assert.equal(
+      (
+        await app.inject({
+          method: "POST",
+          url: endpoint,
+          headers: { authorization: "Bearer other-user-token" },
+          payload: { response: "approve" },
+        })
+      ).statusCode,
+      404,
+    );
+    await assert.rejects(
+      f.service.respond(f.alice, interaction.id, "approve"),
+      { code: "USER_TOKEN_REQUIRED" },
+    );
+    assert.equal(
+      await f.store.read(
+        f.alice.tenantId,
+        (s) => s.interactions[interaction.id]!.resolved,
+      ),
+      false,
+    );
+    assert.equal(
+      await f.store.readRun(
+        f.alice.tenantId,
+        r.id,
+        (s) => s.runs[r.id]!.userTokenRef,
+      ),
+      r.userTokenRef,
+    );
+    const approved = await app.inject({
+      method: "POST",
+      url: endpoint,
+      headers: { authorization: "Bearer fresh-caller-token" },
+      payload: { response: "approve" },
+    });
+    assert.equal(approved.statusCode, 202, approved.body);
+    const next = await f.store.readRun(
+      f.alice.tenantId,
+      approved.json().id,
+      (s) => s.runs[approved.json().id]!,
+    );
+    assert.deepEqual(next.capabilities, r.capabilities);
+    assert.equal(next.configDigest, r.configDigest);
+    assert.equal(next.modelGatewayRef, r.modelGatewayRef);
+    assert.equal(next.taskId, r.taskId);
+    assert.equal(next.rootRunId, r.rootRunId);
+    assert.equal(
+      await f.store.readRun(
+        f.alice.tenantId,
+        unrelated.id,
+        (s) => s.runs[unrelated.id]!.userTokenRef,
+      ),
+      unrelated.userTokenRef,
+    );
+    assert.equal(
+      openToken(next.userTokenRef!, f.alice.userId + ":" + next.taskId),
+      "fresh-caller-token",
+    );
+    assert.throws(
+      () => openToken(next.userTokenRef!, f.bob.userId + ":" + next.taskId),
+      { code: "RUN_TOKEN_UNAVAILABLE" },
+    );
+    const retry = await app.inject({
+      method: "POST",
+      url: endpoint,
+      headers: { authorization: "Bearer fresh-caller-token" },
+      payload: { response: "approve" },
+    });
+    assert.equal(retry.json().id, next.id);
+    assert.equal(
+      await f.store.readRun(
+        f.alice.tenantId,
+        next.id,
+        (s) => s.runs[next.id]!.userTokenRef,
+      ),
+      next.userTokenRef,
+    );
+    assert.equal((await drain(f, next)).state, "COMPLETED");
+    assert.deepEqual(seen, ["fresh-caller-token"]);
+    assert.equal(
+      await f.store.readRun(
+        f.alice.tenantId,
+        next.id,
+        (s) => s.runs[next.id]!.userTokenRef,
+      ),
+      undefined,
+    );
+    assert.equal(
+      await f.store.readRun(
+        f.alice.tenantId,
+        r.id,
+        (s) => s.runs[r.id]!.userTokenRef,
+      ),
+      undefined,
+    );
+    const persisted = await f.store.read(f.alice.tenantId, (s) =>
+      JSON.stringify(s),
+    );
+    assert.doesNotMatch(persisted, /expired-caller-token|fresh-caller-token/);
+    assert.doesNotMatch(approved.body, /userTokenRef|fresh-caller-token/);
+  } finally {
+    await app.close();
+    await f.worker.stop();
+    if (previous === undefined) delete process.env.RUN_TOKEN_KEY;
+    else process.env.RUN_TOKEN_KEY = previous;
+  }
+});

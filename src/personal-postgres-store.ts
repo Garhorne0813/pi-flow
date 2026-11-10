@@ -29,7 +29,7 @@ import type {
   CapacityState,
 } from "./adapters/sandbox-policy.js";
 import { type WorkerHealth } from "./health.js";
-const SCHEMA_VERSION = 6;
+const SCHEMA_VERSION = 7;
 function candidateLimit(limit: number) {
   if (!Number.isInteger(limit) || limit < 1 || limit > 100)
     throw new Error("Invalid candidate limit");
@@ -204,10 +204,19 @@ export class PersonalPostgresStore implements Store {
     if (result.rows[0]?.version !== SCHEMA_VERSION)
       throw new Error("SCHEMA_MISMATCH");
     const tables = await this.healthPool.query(
-      "SELECT to_regclass('personal_agents') AS agents, to_regclass('personal_user_state') AS tenants, to_regclass('personal_sandbox_capacity') AS capacity, to_regclass('personal_sandbox_leases') AS leases, to_regclass('personal_worker_health') AS workers, to_regclass('personal_runs') AS runs, to_regclass('personal_sessions') AS sessions, to_regclass('personal_run_events') AS events, to_regclass('personal_event_sequences') AS sequences",
+      "SELECT to_regclass('personal_agents') AS agents, to_regclass('personal_user_state') AS tenants, to_regclass('personal_sandbox_capacity') AS capacity, to_regclass('personal_sandbox_leases') AS leases, to_regclass('personal_worker_health') AS workers, to_regclass('personal_runs') AS runs, to_regclass('personal_sessions') AS sessions, to_regclass('personal_run_events') AS events, to_regclass('personal_event_sequences') AS sequences, to_regclass('personal_scheduled_tasks') AS schedules, to_regclass('personal_schedule_fires') AS fires",
     );
     if (Object.values(tables.rows[0]).some((v) => v === null))
       throw new Error("SCHEMA_INCOMPLETE");
+    const indexes = await this.healthPool.query(`SELECT
+      EXISTS(SELECT 1 FROM pg_index WHERE indexrelid=to_regclass('personal_runs_running')
+        AND indrelid=to_regclass('personal_runs') AND indisvalid AND indisready) AS running,
+      EXISTS(SELECT 1 FROM pg_index WHERE indexrelid=to_regclass('personal_scheduled_tasks_due')
+        AND indrelid=to_regclass('personal_scheduled_tasks') AND indisvalid AND indisready) AS due,
+      EXISTS(SELECT 1 FROM pg_index WHERE indexrelid=to_regclass('personal_schedule_fires_pending')
+        AND indrelid=to_regclass('personal_schedule_fires') AND indisvalid AND indisready) AS pending`);
+    if (Object.values(indexes.rows[0]).some((v) => v !== true))
+      throw new Error("SCHEMA_INDEXES_INCOMPLETE");
   }
   async workerHeartbeat(health: WorkerHealth) {
     await this.healthPool.query(

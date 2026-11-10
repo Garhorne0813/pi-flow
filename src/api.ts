@@ -953,6 +953,7 @@ export function buildAPI(
             actor(req),
             uuid.parse(params(req.params).id),
             b.response,
+            req.headers.authorization?.slice(7),
           ),
         ),
       );

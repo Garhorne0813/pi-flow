@@ -24,7 +24,7 @@ npm start
 npm run worker
 ```
 
-个人 schema 版本为 **6**；迁移文件顺序为 `005_agent_task_versions.sql`、`006_logical_agent_acl.sql`、`007_personal_platform.sql`、`008_editable_agents.sql`、`009_personal_execution_indexes.sql`，两个 schema 独立管理。v6 将已有个人平台的 active Agent 转为当前可编辑配置，并保留旧 Run 快照和等待交互任务；旧版本表仅作历史档案。`harness_*` 表不自动迁移、不重命名，也不推断旧工作区的数据归属。应备份数据库后在部署窗口执行迁移。
+个人 schema 版本为 **7**；迁移文件顺序为 `005_agent_task_versions.sql`、`006_logical_agent_acl.sql`、`007_personal_platform.sql`、`008_editable_agents.sql`、`009_personal_execution_indexes.sql`，两个 schema 独立管理。v6 将已有个人平台的 active Agent 转为当前可编辑配置，并保留旧 Run 快照和等待交互任务；009 在完成调度记录归一化和热路径索引后推进到 v7，readiness 同时要求相关表和有效索引；旧版本表仅作历史档案。`harness_*` 表不自动迁移、不重命名，也不推断旧工作区的数据归属。应备份数据库后在部署窗口执行迁移。
 
 ## 当前契约
 
@@ -58,7 +58,7 @@ npm run worker
 - `GET/POST /admin/config/global`：POST 接受 `{revision,policy:{disabledTools},modelCatalog?,secrets?}`。两个作用域有独立 revision，不匹配返回 409。revision 仅用于防止并发编辑覆盖；全局编辑不会修改 Agent 的 revision，不维护发布或草稿状态。
 - `modelCatalog` 条目为 `{provider,modelId,baseUrl,secretRef,default}`，非空目录要求唯一默认模型。`secrets` 为引用名到密钥的映射，使用 `CONFIG_SECRET_KEY` 加密，GET 不返回密钥。目录非空时只允许目录中的模型；目录为空才回退 `LLM_*`。每个模型会话有独立凭证上下文。Run 通过私有 `modelGatewayRef` 固定网关与加密密钥版本；目录替换和同名密钥轮换不改变已排队任务或审批续跑。
 - `approval.mode=user|guarded|auto`；默认 user。guarded 当前仅对精确 `pwd` shell 命令自动放行。平台 disabledTools 对旧 Run 也生效。
-- `userTokenAccess=true` 时提交 Bearer 以 `RUN_TOKEN_KEY` 密封，只有 bash 获得 `USER_TOKEN`，终态移除密文。两个加密密钥都应为 base64 编码的 32 随机字节，并在 API/Worker 之间保持一致。
+- `userTokenAccess=true` 时提交 Bearer 以 `RUN_TOKEN_KEY` 密封，只有 bash 获得 `USER_TOKEN`。审批/提问续跑根据原 Run 的 `userTokenAccess` 快照，用本次请求已认证的 Bearer 刷新同一调用者的未结束任务链；配置快照不变，缺少 Token 时不消费交互。重复相同响应返回已有续跑 Run，不再次改写其凭证。终态移除密文。两个加密密钥都应为 base64 编码的 32 随机字节，并在 API/Worker 之间保持一致。
 
 ## 尚需完成的目标能力
 

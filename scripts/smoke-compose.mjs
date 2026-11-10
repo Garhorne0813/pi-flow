@@ -98,7 +98,7 @@ try {
     ],
     true,
   );
-  assert.equal(schema, "6:6");
+  assert.equal(schema, "6:7");
   const port = docker(["port", "api", "8080"], true);
   const url = "http://" + port;
   const api = async (path, body) => {

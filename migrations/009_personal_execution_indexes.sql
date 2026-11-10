@@ -16,3 +16,5 @@ CREATE INDEX IF NOT EXISTS personal_scheduled_tasks_due
  ON personal_scheduled_tasks(((data->>'nextFireAt')::bigint),user_id,schedule_id) WHERE (data->>'enabled')::boolean;
 CREATE INDEX IF NOT EXISTS personal_schedule_fires_pending
  ON personal_schedule_fires(user_id,schedule_id,scheduled_for,id) WHERE data->>'state'='submitted';
+-- Publish readiness only after normalization and every required index succeeds.
+UPDATE personal_schema SET version=7 WHERE id=1;

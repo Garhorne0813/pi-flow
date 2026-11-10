@@ -569,7 +569,7 @@ export class HarnessService {
       return r;
     });
   }
-  async respond(a: Actor, iid: string, response: string) {
+  async respond(a: Actor, iid: string, response: string, bearerToken?: string) {
     return this.store.tx(a.tenantId, (s) => {
       const i = s.interactions[iid];
       if (!i) throw new Fault(404, "INTERACTION_NOT_FOUND");
@@ -583,11 +583,32 @@ export class HarnessService {
         throw new Fault(403, "INTERACTION_ACTOR_REQUIRED");
       if (r.state !== "WAITING_INPUT") throw new Fault(409, "RUN_NOT_WAITING");
       if (r.lease) throw new Fault(409, "CHECKPOINT_PENDING");
-      r.actor = a; // The same UCS subject may have refreshed its JWT while waiting.
-      authorizedRun(s, r);
       if (i.kind === "approval" && !["approve", "deny"].includes(response))
         throw new Fault(400, "INVALID_APPROVAL");
-      const userTokenRef = r.userTokenRef;
+      const taskId = taskIdentity(s, r);
+      const members = Object.values(s.runs).filter(
+        (member) =>
+          !terminal(member.state) &&
+          member.actor.userId === a.userId &&
+          member.actor.tenantId === a.tenantId &&
+          taskIdentity(s, member) === taskId,
+      );
+      // Authentication may have been refreshed while this task was waiting.
+      // Update only this caller's unfinished task chain; config snapshots stay
+      // unchanged. Failed authorization rolls back the entire transaction.
+      for (const member of members) member.actor = structuredClone(a);
+      const { config } = authorizedRun(s, r);
+      const tokenMembers = members.filter(
+        (member) => runConfig(s, member).userTokenAccess,
+      );
+      let userTokenRef: string | undefined;
+      if (tokenMembers.length) {
+        if (!bearerToken) throw new Fault(401, "USER_TOKEN_REQUIRED");
+        const sealed = sealToken(bearerToken, a.userId + ":" + taskId);
+        for (const member of tokenMembers) member.userTokenRef = sealed;
+        if (config.userTokenAccess) userTokenRef = sealed;
+        audit(s, a, "task.token.refresh", taskId);
+      }
       i.resolved = true;
       i.response = response;
       r.state = "COMPLETED";
@@ -611,8 +632,8 @@ export class HarnessService {
           model: r.model,
           modelGatewayRef: r.modelGatewayRef,
           cwd: r.cwd,
-          taskId: r.taskId ?? r.id,
-          rootRunId: r.rootRunId ?? r.id,
+          taskId,
+          rootRunId: r.rootRunId ?? taskId,
           depth: r.depth,
           parentRunId: r.parentRunId,
           capabilities: r.capabilities,
