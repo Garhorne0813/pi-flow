@@ -160,11 +160,16 @@ SELECT jsonb_build_object(
    WHERE t.state->'workspaces' ? wid), '{}'::jsonb)
 ) || CASE WHEN $6 THEN jsonb_build_object(
  'agents', COALESCE((SELECT jsonb_object_agg(aid,t.state->'agents'->aid)
-   FROM (SELECT DISTINCT data->>'agentVersionId' AS aid FROM sessions) a
+   FROM (SELECT DISTINCT COALESCE(c.data->>'agentVersionId',s.data->>'agentVersionId') AS aid FROM chain c JOIN sessions s ON s.data->>'id'=c.data->>'sessionId') a
    WHERE t.state->'agents' ? aid), '{}'::jsonb),
+ 'logicalAgents', COALESCE((SELECT jsonb_object_agg(lid,t.state->'logicalAgents'->lid)
+   FROM (SELECT DISTINCT COALESCE(t.state->'agents'->COALESCE(c.data->>'agentVersionId',s.data->>'agentVersionId')->>'agentId',c.data->>'agentVersionId',s.data->>'agentVersionId') AS lid
+     FROM chain c JOIN sessions s ON s.data->>'id'=c.data->>'sessionId') l
+   WHERE t.state->'logicalAgents' ? lid), '{}'::jsonb),
+ 'mcp', COALESCE(t.state->'mcp','{}'::jsonb),
  'skills', COALESCE((SELECT jsonb_object_agg(sk,t.state->'skills'->sk)
    FROM (SELECT DISTINCT jsonb_array_elements_text(COALESCE(
-     COALESCE(c.data->'capabilities',t.state->'agents'->(s.data->>'agentVersionId')->'config')->'skills',
+     COALESCE(c.data->'capabilities',t.state->'agents'->COALESCE(c.data->>'agentVersionId',s.data->>'agentVersionId')->'config')->'skills',
      '[]'::jsonb)) AS sk FROM chain c JOIN sessions s ON s.data->>'id'=c.data->>'sessionId') keys
    WHERE t.state->'skills' ? sk), '{}'::jsonb)
 ) ELSE '{}'::jsonb END AS state,

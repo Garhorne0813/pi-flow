@@ -36,6 +36,8 @@ jobs:
           cache: npm
       - run: sudo apt-get update && sudo apt-get install -y openssl python3 bash
       - run: npm ci
+      - name: Install browser for mandatory console acceptance
+        run: npx playwright-core install --with-deps chromium
       - name: TypeScript check
         run: npm run check
       - name: Check JavaScript syntax

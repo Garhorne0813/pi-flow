@@ -73,7 +73,7 @@ export class EnterpriseResourceLoader implements ResourceLoader {
         .filter((s) => !s.disableModelInvocation)
         .map(
           (s) =>
-            `Skill ${s.name}: ${s.description}. Read ${s.path} with remote_read when needed.`,
+            `Skill ${s.name}: ${s.description}. Read ${s.path} with read when needed.`,
         ),
     ];
   }

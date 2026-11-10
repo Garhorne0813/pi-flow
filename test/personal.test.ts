@@ -162,7 +162,7 @@ test("approval continuation inherits the original snapshot, task identity and cw
   const f = await fixture({
     execute: async (c) => {
       if (c.prompt === "write")
-        await c.call("remote_write", { path: "note.txt", content: "saved" });
+        await c.call("write", { path: "note.txt", content: "saved" });
     },
   });
   const ses = await f.service.createPersonalSession(f.alice, {
@@ -202,7 +202,7 @@ test("approval continuation inherits the original snapshot, task identity and cw
 test("kill switch applies to existing Run snapshots; auto approvals are audited", async () => {
   const f = await fixture({
     execute: async (c) => {
-      await c.call("remote_write", { path: "x", content: "saved" });
+      await c.call("write", { path: "x", content: "saved" });
     },
   });
   await f.registry.tx((s) =>
@@ -325,7 +325,7 @@ test("scheduled runs deduplicate fires, fail closed on approval, and never creat
   );
   const f = await fixture({
       execute: async (c) => {
-        await c.call("remote_write", { path: "x", content: "no" });
+        await c.call("write", { path: "x", content: "no" });
       },
     }),
     schedules = new ScheduleService(f.service);
@@ -369,7 +369,7 @@ test("scheduled runs deduplicate fires, fail closed on approval, and never creat
 test("memory topic writes bypass cards, rebuild a bounded index, and reserve the index from model writes", async () => {
   const f = await fixture({
     execute: async (c) => {
-      await c.call("remote_write", {
+      await c.call("write", {
         path:
           c.prompt === "reserved"
             ? "memory/MEMORY.md"

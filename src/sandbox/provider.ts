@@ -1,3 +1,4 @@
+import { Fault } from "../domain.js";
 import type { Skill } from "../domain.js";
 export type CreatedSandbox = {
   sandboxId: string;
@@ -29,4 +30,21 @@ export interface SandboxProvider {
   snapshot(sandboxId: string, name?: string): Promise<string>;
   deleteSnapshot(snapshotId: string): Promise<void>;
   destroyVolume(volumeId: string): Promise<void>;
+}
+
+// Only providers that know no instance remains may assert cleanupConfirmed.
+// Preserve the public failure code while carrying cleanup state to capacity.
+export class SandboxCreationError extends Fault {
+  constructor(
+    readonly failure: unknown,
+    readonly cleanupConfirmed: boolean,
+    readonly sandboxId?: string,
+    readonly cleanupFailure?: unknown,
+  ) {
+    super(
+      failure instanceof Fault ? failure.status : 502,
+      failure instanceof Fault ? failure.code : "SANDBOX_CREATION_FAILED",
+    );
+    this.cause = failure;
+  }
 }

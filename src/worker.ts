@@ -345,7 +345,7 @@ export class Worker {
       approved = false,
     ): Promise<unknown> => {
       controller.signal.throwIfAborted();
-      const bare = name.replace(/^remote_/, "");
+      const bare = name;
       const mcpTool = name.startsWith("mcp_");
       if (
         initial.schedule &&
@@ -549,6 +549,14 @@ export class Worker {
             },
             controller.signal,
             config.skills,
+            (s) => {
+              const r = this.owned(s, initial.id);
+              const { config } = authorizedRun(s, r);
+              if ((r.deadline ?? Infinity) <= Date.now())
+                throw new Fault(408, "RUN_TIMEOUT");
+              if (!config.tools.includes(bare as AgentConfig["tools"][number]))
+                throw new Fault(403, "TOOL_DENIED");
+            },
           );
           if (bare === "read") {
             const fresh = await get();

@@ -110,7 +110,7 @@ Agent 当前配置 A ── 创建 Run 1 ── 快照 A ── 排队/执行/�
 
 ## 6. 数据迁移与兼容
 
-Schema 版本为 **6**，新增 `006_editable_agents.sql`。
+Schema 版本为 **6**，新增 `008_editable_agents.sql`。
 
 - 将 v5 的 active Agent 配置迁入 `personal_agents`，保留稳定 key 和实时访问限制。
 - 为旧 Run 补足必要快照和 agentId；保留已有解析模型与任务链。

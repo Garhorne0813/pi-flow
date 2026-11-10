@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile, readdir } from "node:fs/promises";
 import { PostgresStore } from "../src/store.js";
-import { emptyState, id, event, type Run } from "../src/domain.js";
+import { emptyState, id, event, type Run, AgentConfig } from "../src/domain.js";
 const url = process.env.TEST_DATABASE_URL;
 if (process.env.REQUIRE_POSTGRES_TESTS === "true" && !url)
   throw new Error("TEST_DATABASE_URL required");
@@ -39,7 +39,7 @@ async function migrate(store: PostgresStore) {
   }
 }
 test(
-  "001–004 upgrade and offline rollback preserve current Runs, checkpoints, event IDs, unknown capacity and generations",
+  "001–006 upgrade and offline rollback preserve current Runs, checkpoints, event IDs, unknown capacity and generations",
   { skip: !url },
   async () => {
     const f = await isolated();
@@ -49,6 +49,19 @@ test(
       );
       const state = emptyState(),
         actor = { tenantId: "legacy", userId: "u", admin: true };
+      state.agents.a = {
+        id: "a",
+        enabled: true,
+        digest: "legacy",
+        publishedAt: new Date().toISOString(),
+        config: AgentConfig.parse({
+          name: "legacy",
+          systemPrompt: "legacy",
+          model: { provider: "demo", modelId: "demo" },
+          tools: [],
+          skillBundle: "default",
+        }),
+      };
       state.sessions.s = {
         id: "s",
         workspaceId: "w",
@@ -111,6 +124,20 @@ test(
       );
       await migrate(f.store);
       await f.store.ready();
+      state.agents.a!.agentId = "a";
+      state.logicalAgents.a = {
+        id: "a",
+        activeVersionId: "a",
+        allowedUsers: [],
+      };
+      state.sessions.s!.agentId = "a";
+      state.sessions.s!.effectiveVersionId = "a";
+      Object.assign(state.runs.r!, {
+        agentVersionId: "a",
+        taskId: "r",
+        rootRunId: "r",
+        capabilities: state.agents.a!.config,
+      });
       assert.deepEqual(await f.store.read("legacy", (s) => s), state);
       assert.deepEqual(await f.store.capacityRead((s) => s.entries), entries);
       await migrate(f.store);
@@ -189,7 +216,7 @@ test(
   },
 );
 test(
-  "001–004 migration failure rolls back all partial tables, flags and legacy JSON changes",
+  "001–006 migration failure rolls back all partial tables, flags and legacy JSON changes",
   { skip: !url },
   async () => {
     const f = await isolated();
@@ -238,6 +265,246 @@ test(
         ).rows[0].version,
         1,
       );
+    } finally {
+      await f.close();
+    }
+  },
+);
+
+test(
+  "005 reconstructs waiting continuations and subagent task chains, with immutable Run authorization snapshots",
+  { skip: !url },
+  async () => {
+    const f = await isolated();
+    try {
+      for (const name of [
+        "001_initial.sql",
+        "002_sandbox_leases.sql",
+        "003_runs_sessions_events.sql",
+        "004_schema_readiness.sql",
+      ])
+        await f.store.pool.query(await readFile("migrations/" + name, "utf8"));
+      const actor = { tenantId: "legacy-chain", userId: "u", admin: true };
+      const cfg = AgentConfig.parse({
+        name: "old",
+        systemPrompt: "V1",
+        model: { provider: "demo", modelId: "demo" },
+        tools: [],
+        skillBundle: "default",
+      });
+      await f.store.tx(actor.tenantId, (s) => {
+        s.agents.a = {
+          id: "a",
+          config: cfg,
+          digest: "old",
+          publishedAt: new Date().toISOString(),
+          enabled: true,
+        };
+        s.workspaces.w = {
+          id: "w",
+          name: "w",
+          ownerId: "u",
+          members: { u: "owner" },
+        };
+        s.sessions.s = {
+          id: "s",
+          workspaceId: "w",
+          agentVersionId: "a",
+          entries: [{ checkpoint: true }],
+          createdAt: new Date().toISOString(),
+        };
+        s.sessions.child = { ...s.sessions.s, id: "child" };
+        for (const [rid, sid, state, extra] of [
+          ["root", "s", "COMPLETED", {}],
+          ["continued", "s", "WAITING_INPUT", { resumedFrom: "i" }],
+          [
+            "child",
+            "child",
+            "WAITING_INPUT",
+            { parentRunId: "continued", capabilities: cfg },
+          ],
+        ] as const)
+          s.runs[rid] = {
+            id: rid,
+            sessionId: sid,
+            state,
+            actor,
+            prompt: rid,
+            requestDigest: rid,
+            createdAt: new Date().toISOString(),
+            depth: 0,
+            steps: 0,
+            ...extra,
+          };
+        s.interactions.i = {
+          id: "i",
+          runId: "root",
+          kind: "question",
+          resolved: true,
+          response: "answer",
+          continuationRunId: "continued",
+          payload: {},
+        };
+      });
+      await migrate(f.store);
+      await migrate(f.store);
+      await f.store.read(actor.tenantId, (s) => {
+        assert.equal(s.logicalAgents.a!.activeVersionId, "a");
+        assert.equal(s.sessions.s!.effectiveVersionId, "a");
+        for (const r of Object.values(s.runs)) {
+          assert.equal(r.taskId, "root");
+          assert.equal(r.rootRunId, "root");
+          assert.equal(r.agentVersionId, "a");
+          assert.deepEqual(r.capabilities, cfg);
+        }
+        assert.deepEqual(s.sessions.s!.entries, [{ checkpoint: true }]);
+      });
+      // Optimized reads must use Run versions, even when Session observations differ.
+      await f.store.tx(actor.tenantId, (s) => {
+        s.agents.b = {
+          ...s.agents.a!,
+          id: "b",
+          config: { ...cfg, systemPrompt: "V2" },
+        };
+        s.sessions.s!.agentVersionId = "b";
+      });
+      const { authorizedRun } = await import("../src/service.js");
+      assert.equal(
+        await f.store.readRun(
+          actor.tenantId,
+          "continued",
+          (s) => authorizedRun(s, s.runs.continued!).config.systemPrompt,
+        ),
+        "V1",
+      );
+      await f.store.pool.query(
+        await readFile("migrations/005_agent_task_versions.sql", "utf8"),
+      );
+      assert.equal(
+        await f.store.read(
+          actor.tenantId,
+          (s) => s.runs.continued!.agentVersionId,
+        ),
+        "a",
+      );
+    } finally {
+      await f.close();
+    }
+  },
+);
+
+test(
+  "006 migrates current ACL once; rollback and optimized Worker snapshots enforce the logical policy",
+  { skip: !url },
+  async () => {
+    const f = await isolated();
+    try {
+      await migrate(f.store);
+      const actor = { tenantId: "acl-migration", userId: "alice", admin: true };
+      const cfg = AgentConfig.parse({
+        name: "agent",
+        systemPrompt: "V1",
+        model: { provider: "demo", modelId: "demo" },
+        tools: [],
+        skillBundle: "default",
+      });
+      await f.store.tx(actor.tenantId, (s) => {
+        s.agents.v1 = {
+          id: "v1",
+          agentId: "logical",
+          config: cfg,
+          digest: "v1",
+          publishedAt: new Date().toISOString(),
+          enabled: true,
+          allowedUsers: ["alice", "bob"],
+        };
+        s.agents.v2 = {
+          ...s.agents.v1,
+          id: "v2",
+          config: { ...cfg, systemPrompt: "V2" },
+          allowedUsers: ["alice"],
+        };
+        s.logicalAgents.logical = { id: "logical", activeVersionId: "v2" };
+        s.workspaces.w = {
+          id: "w",
+          name: "w",
+          ownerId: "alice",
+          members: { alice: "owner", bob: "editor" },
+        };
+        s.sessions.s = {
+          id: "s",
+          workspaceId: "w",
+          agentVersionId: "v1",
+          agentId: "logical",
+          effectiveVersionId: "v1",
+          entries: [],
+          createdAt: new Date().toISOString(),
+        };
+        s.runs.r = {
+          id: "r",
+          sessionId: "s",
+          agentVersionId: "v1",
+          taskId: "r",
+          rootRunId: "r",
+          actor: { ...actor, userId: "bob", admin: false },
+          prompt: "old",
+          state: "QUEUED",
+          createdAt: new Date().toISOString(),
+          requestDigest: "old",
+          depth: 0,
+          steps: 0,
+        };
+      });
+      const migration = await readFile(
+        "migrations/006_logical_agent_acl.sql",
+        "utf8",
+      );
+      await f.store.pool.query(migration);
+      const { HarnessService, authorizedRun } = await import(
+        "../src/service.js"
+      );
+      const service = new HarnessService(f.store, [], ["default"]);
+      assert.deepEqual(
+        await f.store.read(
+          actor.tenantId,
+          (s) => s.logicalAgents.logical!.allowedUsers,
+        ),
+        ["alice"],
+      );
+      await service.activate(actor, "logical", "v1");
+      await assert.rejects(
+        f.store.readRun(actor.tenantId, "r", (s) =>
+          authorizedRun(s, s.runs.r!),
+        ),
+        { code: "AGENT_REVOKED" },
+      );
+      await f.store.pool.query(migration);
+      assert.deepEqual(
+        await f.store.read(
+          actor.tenantId,
+          (s) => s.logicalAgents.logical!.allowedUsers,
+        ),
+        ["alice"],
+      );
+      await service.setAccess(actor, "v1", ["alice", "bob"]);
+      assert.equal(
+        await f.store.readRun(
+          actor.tenantId,
+          "r",
+          (s) => authorizedRun(s, s.runs.r!).config.systemPrompt,
+        ),
+        "V1",
+      );
+      await service.setAccess(actor, "logical", ["charlie"]);
+      await f.store.pool.query(migration);
+      assert.deepEqual(
+        await f.store.read(
+          actor.tenantId,
+          (s) => s.logicalAgents.logical!.allowedUsers,
+        ),
+        ["charlie"],
+      );
+      await f.store.ready();
     } finally {
       await f.close();
     }

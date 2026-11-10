@@ -60,7 +60,7 @@ for (const stage of ["createVolume", "create", "connect", "kill"] as const)
       f.service,
       {
         execute: async (ctx) => {
-          if (ctx.prompt === "blocked") await ctx.call("remote_ls", {});
+          if (ctx.prompt === "blocked") await ctx.call("ls", {});
           else await ctx.emit("message.completed", { message: "next" });
         },
       },
@@ -272,7 +272,7 @@ test("a timed-out provisioning request frees the same Worker's slot for the next
     f.service,
     {
       execute: async (ctx) => {
-        if (ctx.prompt === "blocked") await ctx.call("remote_ls", {});
+        if (ctx.prompt === "blocked") await ctx.call("ls", {});
       },
     },
     f.sandbox,
@@ -363,7 +363,7 @@ test("Run remaining deadline bounds provisioning even when the remote timeout is
     f.service,
     {
       execute: async (ctx) => {
-        await ctx.call("remote_ls", {});
+        await ctx.call("ls", {});
       },
     },
     sandbox,

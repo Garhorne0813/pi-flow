@@ -1,6 +1,6 @@
 # HTTP / SSE API
 
-Base: `/api/v1`。除 `/health` 外，所有请求必须提供 `Authorization: Bearer <UCS JWT>`；Demo 使用 `DEV_TOKEN`。Tenant 只来自认证后的声明。所有 JSON 请求采用严格字段校验。错误形如：
+Base: `/api/v1`。除健康检查端点和控制台入口 `GET /admin/ui`、仅返回静态 HTML 的 `GET /admin/agents/ui` 外，所有 API 请求必须提供 `Authorization: Bearer <UCS JWT>`；Demo 使用 `DEV_TOKEN`。Agent 管理页面在同源路径 `/admin/agents/ui`，页面通过浏览器内存中的管理员 Bearer Token 调用 `/api/v1/admin/*`，不将令牌保存到 URL 或浏览器存储。Tenant 只来自认证后的声明。所有 JSON 请求采用严格字段校验。错误形如：
 
 ```json
 {
@@ -41,23 +41,24 @@ curl -N 'http://127.0.0.1:8080/api/v1/runs/<runId>/events' \
 
 | 方法       | 路径                                     | Body / 行为                                             |
 | ---------- | ---------------------------------------- | ------------------------------------------------------- |
+| GET        | `/logical-agents`                        | 可使用逻辑 Agent，`{id,activeVersionId}`，支持分页       |
 | GET        | `/agents`                                | 可使用的已发布版本，`{items:[]}`                        |
 | GET/POST   | `/workspaces`                            | 列表 / 创建 `{name}`；创建 201                          |
 | GET/DELETE | `/workspaces/{id}`                       | 获取 / owner 删除，必须无活跃 Run/租约                  |
 | PUT        | `/workspaces/{id}/members/{userId}`      | owner 设置 `{role:"editor"\|"viewer"\|null}`；null 移除 |
 | POST       | `/workspaces/{id}/sandbox/pause`         | 暂停空闲 Sandbox，204                                   |
-| GET/POST   | `/workspaces/{id}/sessions`              | 列表 / 创建 `{agentVersionId}`，201                     |
+| GET/POST   | `/workspaces/{id}/sessions`              | 列表 / 创建 `{agentId}` 或兼容 `{agentVersionId}`，201                     |
 | GET        | `/sessions/{id}`                         | Session、规范 Pi history entries、todos                 |
 | POST       | `/sessions/{id}/runs`                    | `{message}`；接受 202，可选 Idempotency-Key             |
 | GET        | `/runs/{id}`                             | 状态、错误码、父 Run、预算计数和时间戳                  |
 | GET        | `/runs/{id}/events`                      | SSE；`Last-Event-ID` 或 `?after=<eventId>`              |
-| POST       | `/runs/{id}/cancel`                      | 幂等取消；RUNNING 状态会异步收敛                        |
+| POST       | `/runs/{id}/cancel`                      | 取消该 Run 所属完整 taskId 任务链；RUNNING 异步收敛                        |
 | POST       | `/interactions/{id}/response`            | `{response}`；审批为 approve / deny；返回新 Run，202    |
 | GET        | `/workspaces/{id}/files?path=/workspace` | 列出目录，最多 1000 项                                  |
 | POST       | `/workspaces/{id}/files`                 | UTF-8 `{path,content}`，返回 `{fileId}`，201            |
 | GET        | `/workspaces/{id}/files/{fileId}`        | `{path,text,sha256}`（真实 Cube）；Demo `{text}`             |
 
-幂等键以 Tenant + User + Session 为范围。同键同 message 返回原 Run；同键不同 message 返回 `IDEMPOTENCY_CONFLICT`。新的不同键在 Session 已有活跃 Run 时返回 `SESSION_BUSY`。文件 ID 是路径的 base64url 表示，不承担访问授权；下载仍检查 Workspace ACL 和 Sandbox 内真实路径。File API 只允许工作区路径；Skill 内容通过已授权 Agent 的 remote_read 读取。文件 API 使用单独的临时无 Skill Sandbox，读操作不改变 Agent Sandbox 的 ID、scope、state 或 lastUsedAt，可与 Agent 工具并发；写操作保持工作区工具互斥。临时实例计入 owner/全局活跃配额，请求后确认释放；配额不足返回 429。失败清理保留容量记录，后续文件请求会先清理已知实例再创建；没有 ID 的未知结果仍需运维对账。
+幂等键以 Tenant + User + Session 为范围。同键同 message 返回原 Run；同键不同 message 返回 `IDEMPOTENCY_CONFLICT`。新的不同键在 Session 已有活跃 Run 时返回 `SESSION_BUSY`。文件 ID 是路径的 base64url 表示，不承担访问授权；下载仍检查 Workspace ACL 和 Sandbox 内真实路径。File API 只允许工作区路径；Skill 内容通过已授权 Agent 的 read 读取。文件 API 使用单独的临时无 Skill Sandbox，读操作不改变 Agent Sandbox 的 ID、scope、state 或 lastUsedAt，可与 Agent 工具并发；写操作保持工作区工具互斥。临时实例计入 owner/全局活跃配额，请求后确认释放；配额不足返回 429。失败清理保留容量记录，后续文件请求会先清理已知实例再创建；没有 ID 的未知结果仍需运维对账。
 
 ## SSE 协议
 
@@ -134,7 +135,7 @@ Agent 发布示例：
 
 `maxSteps` 统计模型 turn 和实际工具执行，共享于父子任务树。Subagents 引用已发布 AgentVersion ID；委派能力需要 tools 中的 `delegate_to_agent`。每次发布生成新 UUID，不修改旧配置；access/status 是独立的治理字段，允许即时撤销。没有运行时扩展代码或自定义 URL 字段。
 
-Skills 登记（不会上传或执行文件）：
+手动 Skills 登记（不会上传或执行文件；ZIP 上传见本文末尾）：
 
 ```json
 {
@@ -147,7 +148,9 @@ Skills 登记（不会上传或执行文件）：
 }
 ```
 
-Skill 登记只保存元数据。生产部署必须在 `SKILL_VOLUMES_JSON` 为该 ID 配置一致的 Bundle 和路径；每个技能版本独占一个预发布 Volume，根目录存放 `SKILL.md` 和辅助文件。只有 Agent 的 `skills` 列表对应的 Volume 会被只读挂载到各自 SKILL.md 的父目录。Bundle 是租户授权分组，不是整包挂载源。重复或相互包含的挂载路径会在发布 Agent 时拒绝。空列表不挂载技能。受信任的远程适配器在所有工具执行前验证已选 SKILL.md 的规范路径与摘要；read/grep 对实际读取的 manifest 字节再次校验，`..` 和指向 manifest 的符号链接别名遵循相同规则。无法确认登记 manifest 身份时返回 `SKILL_IDENTITY_UNCONFIRMED`，摘要不匹配返回 `SKILL_DIGEST_MISMATCH` (409)，不返回内容。登记 manifest 本身必须是规范路径下的普通文件，不能是符号链接；辅助文件在校验通过后仍可正常读取。bash 使用执行前校验，技能存储必须保持不可变。
+手动 Skill 登记只保存元数据。手动部署需要在 `SKILL_VOLUMES_JSON` 为该 ID 配置一致的 Bundle 和路径；ZIP 上传的版本自动解析挂载，无需该映射；每个技能版本默认使用经部署 allowlist 批准的 `hostPath` 目录，也可显式选择预发布 Volume（两者互斥），根目录存放 `SKILL.md` 和辅助文件。只有 Agent 的 `skills` 列表对应的存储源会被只读挂载到各自 SKILL.md 的父目录。Bundle 是租户授权分组，不是整包挂载源。重复或相互包含的挂载路径会在发布 Agent 时拒绝。空列表不挂载技能。受信任的远程适配器在所有工具执行前验证已选 SKILL.md 的规范路径与摘要；read/grep 对实际读取的 manifest 字节再次校验，`..` 和指向 manifest 的符号链接别名遵循相同规则。无法确认登记 manifest 身份时返回 `SKILL_IDENTITY_UNCONFIRMED`，摘要不匹配返回 `SKILL_DIGEST_MISMATCH` (409)，不返回内容。登记 manifest 本身必须是规范路径下的普通文件，不能是符号链接；辅助文件在校验通过后仍可正常读取。bash 使用执行前校验，技能存储必须保持不可变。
+
+默认部署使用 `SKILL_VOLUMES_JSON` 的 `hostPath`；`SKILL_HOST_ROOTS_JSON` 未设置时默认为 `["/data/agent-skills"]`，显式列表替换默认值，`[]` 禁用 Host 源。手动部署技能的存储绑定仍需显式配置；上传的技能从租户登记元数据自动解析 Host 挂载，Skill 登记与 Agent 发布请求不接受 `hostPath`/`volume` 字段；Agent 仍只指定 Skill ID，可混用两种后端。未经批准的源路径返回 `SKILL_HOST_PATH_DENIED`，不可访问、符号链接或特殊文件源返回 `SKILL_HOST_SOURCE_UNSAFE`，缺失或非只读挂载返回 `SKILL_HOST_MOUNT_UNCONFIRMED`。同一 Agent 所选 Skills 的目标冲突返回 `SKILL_MOUNT_CONFLICT`，源目录重复/嵌套返回 `SKILL_HOST_SOURCE_CONFLICT`。预检失败且实例已确认删除时释放配额，修正配置后可重试；删除无法确认时保留 `unknown` 配额及实例 ID（容量记录、工作区状态和审计日志）。源路径/后端变更触发实例重建；快照 scope 不一致拒绝恢复。Host 源目录必须在 API/Worker 与 Cubelet 上以相同路径共享同一文件系统；本版本不能验证的远程节点本地目录会被拒绝。完整目录、环境配置、注册/发布及节点生命周期示例见 [部署文档](deployment.md#local-host-skills--cubelet-宿主机技能目录)。
 
 MCP 只发现该 Agent 的 `mcpServers` 列表；其他 Server 不出现在模型工具列表中，猜测工具名也不能调用或申请审批。子 Agent 使用父子 Server/技能列表的交集。管理 API 的注册目录仅供管理员管理，不作为 Agent 的工具发现目录。
 
@@ -197,3 +200,74 @@ Run 终态错误在 Run.error / run.failed 中给出，包括 `AGENT_REVOKED`、
 Agent `mcpServers` 最多 16 项。Worker 将 Run 的 AbortSignal 与 deadline 传给 discovery；完整发现预算取剩余 Run 时间与 30 秒上限的较小值。每个 connect/listTools 请求仍最多等待 10 秒，分页最多 10 页，单 Server 白名单工具最多 100 个。发现开始、Server/分页循环和结果返回前检查取消；SDK 请求与实际 HTTPS fetch 都绑定信号，并以本地取消等待兜底。耗尽发现预算返回 `MCP_DISCOVERY_TIMEOUT`，耗尽 Run deadline 为 `RUN_TIMEOUT`；取消仍按 Run 取消状态处理。
 
 连接和传输都尝试关闭，单次 cleanup 最多等待 250 ms；关闭异常不会覆盖原始取消/超时原因。配额相关过期回调不会释放或标记新请求的记录：所有转换绑定持久唯一 operation，CAS 接管失败返回 `CAPACITY_LEASE_LOST`。Sandbox 创建/连接期间取消时不执行工具；已返回 ID 的实例按取消策略确认清理后退还配额，创建无 ID 或 Kill 未确认返回 `REMOTE_CANCEL_UNCONFIRMED` 并保持保守占用。持久 Workspace Volume 不随取消删除。
+
+## 逻辑 Agent 与任务版本
+
+`POST /admin/agents` 创建逻辑 Agent 的首个不可变版本，响应增加 `agentId`。`POST /admin/agents/{agentId}/versions` 使用相同 AgentConfig Body 发布并激活后续版本；`PUT /admin/agents/{agentId}/active-version` 接受 `{agentVersionId}`，激活同逻辑 Agent 下已启用的版本（也可回滚）。普通发布和激活不禁用旧版本。`GET /logical-agents` 返回用户可用的 `{id,activeVersionId}`；原 `/agents` 与管理员列表保留版本列表供历史审计。
+
+创建 Session 必须恰好提供 `agentId` 或兼容参数 `agentVersionId`。版本参数解析所属逻辑 Agent 的当前版本，不允许用旧版本选择器绕过生效规则。Session 返回 `agentId`、`effectiveVersionId` 及兼容别名 `agentVersionId`。新独立任务在同一事务中锁定最新版并更新有效版本；响应 Run 含 `agentVersionId`、`taskId`、`rootRunId` 等执行元数据；完整能力快照 `capabilities` 仅保存在内部 Run 记录供 Worker 执行，不通过 HTTP 响应返回。续跑和子任务保留任务身份和版本（子任务使用父配置指定的不可变子版本），不触发 Session 升级。
+
+`session.version.upgraded` SSE 事件与审计记录包含 `{from,to,timestamp,actor,reason:"new_root_task"}`。幂等重试不产生重复升级事件。未结束后代任务也会阻止原 Session 提交独立新任务。
+
+跨 skillBundle 升级返回 409 `WORKSPACE_BUNDLE_MIGRATION_REQUIRED`，需创建与新 bundle 匹配的 Workspace；不静默迁移持久 Volume。共享 Workspace 中存在技能 scope 不兼容的未结束任务时返回 409 `WORKSPACE_VERSION_BUSY`，结束旧任务后重试。租约冲突返回 `WORKSPACE_BUSY`。相同 bundle 内的 scope 变化由现有 Sandbox 租约保护重建，保留 Volume；ACTIVE、PAUSED、RELEASED 都支持下一次使用配置适配。Sandbox pause/release 不触发升级，WAITING_INPUT 恢复仍使用原版本。
+
+`allowedUsers` 由逻辑 Agent 统一管理，新 AgentVersion 不再保存 ACL。发布、激活/回滚、历史版本列表查询和执行授权均使用当前逻辑策略。`PUT /admin/logical-agents/{id}/access` 接受 `{allowedUsers}`（空数组表示租户内可用）；原 `/admin/agents/{versionId}/access` 保留为所属逻辑 Agent 的策略更新别名。版本回滚不会恢复过期 ACL，旧版本配置也不能通过旧 ACL 被读取。Migration 006 从当前生效版本迁移旧策略，不覆盖已存在的逻辑策略。Workspace 分别保存逻辑技能身份 `sandboxLogicalSkillScope` 与包含实际 Volume/Host 挂载配置的 `sandboxSkillScope`；新任务兼容性只比较逻辑身份，工具获取租约后仍由 Provider 校验实际挂载。旧记录缺少逻辑 scope 时从已有技能身份推导。
+
+显式 `/workspaces/{id}/sandbox/resume` 是生命周期操作，不解析逻辑 Agent 最新版本，也不升级 Session。它在租约获取事务中选择 Workspace 记录的技能；全部仍授权时恢复原环境，任一技能已撤销或不属于当前 bundle 时改为不挂载任何技能的环境并保留 Volume。后续新任务按锁定版本适配技能环境；WAITING_INPUT 的原任务不切换版本，恢复交互仍执行动态撤销检查。此规则避免 Resume 被已撤销的旧技能阻塞，同时不会重新挂载被撤销技能。
+
+创建独立 root task 时，在提交事务内检查该 Workspace 中已释放 checkpoint 租约的 WAITING_INPUT 任务。如果逻辑 ACL、AgentVersion、Skill、MCP 或原执行者的 Workspace 成员写权限已撤销，则将其整个任务链中可安全终结的 QUEUED/WAITING_INPUT Run 标记为 FAILED，记录 run.failed（reason=task_revoked、code、taskId）和 task.revoked 审计。有实际执行或未释放租约的成员只请求停止；不绕过活跃执行环境的兼容性边界。历史 scope 使用与 enabled 状态无关的不可变技能身份计算；有效的旧等待任务仍阻止不兼容新任务。JWT 到期本身不触发失效，允许原主体刷新后响应。失效交互不能再次续跑。
+
+`POST /runs/{id}/cancel` 取消该 Run 的完整 `taskId`，包括原 Run 已 COMPLETED 后产生的审批/提问续跑、所有子任务和子任务续跑。QUEUED/WAITING_INPUT 直接 CANCELLED；RUNNING 设置 cancelRequested 并按现有 Worker/远端清理机制异步收敛。重复取消不会重复生成终态事件。兼容旧记录时沿 parentRunId 和 resumedFrom Interaction.runId 恢复任务身份。
+
+Run 查询、任务提交（含幂等重试）、交互续跑和取消响应统一使用公开字段白名单，只返回任务/版本身份、状态、计数和时间等执行元数据。它们不返回 capabilities、systemPrompt、agentsMd、模型/Tools/Skills/MCP 配置、actor、lease 或其他内部字段。Workspace 成员可按原有权限查询执行状态，不因此获得 Agent 配置；配置查询仍通过逻辑 Agent ACL 授权。
+
+等待任务的权限失效包含 WORKSPACE_NOT_FOUND（成员被移除）和 READ_ONLY（降级 viewer）。有未释放 checkpoint 租约的等待 Run 仍不提前失效；新任务返回原有兼容性错误，租约释放后重试即可自动清理被撤销的旧等待任务。
+## 管理控制台
+
+`GET /admin/ui` 重定向到 `GET /admin/agents/ui`。HTML 外壳公开；下列 API 均要求管理员身份，数据限制在认证后的 Tenant 内。
+
+| 方法 / 路径 | 行为 |
+| --- | --- |
+| `GET /api/v1/admin/configuration` | 返回 `defaultsRevision`、租户 ID、获批模型、获授权 Bundle / Endpoint 名称、只读 Sandbox 策略与新 Agent 默认值；不返回密钥或 Endpoint URL |
+| `PUT /api/v1/admin/configuration/defaults` | 保存当前租户的新草稿默认值；必须携带 GET 返回的 `expectedRevision`，事务内校验，不匹配返回 `409 DEFAULTS_CONFLICT`；不影响已有 Agent / Session |
+| `POST /api/v1/admin/mcp-servers/:id/check` | 请求体 `{}`；检查已启用且获授权的服务，执行工具发现，返回 `{status, tools: [{name, description}], checkedAt}`；不调用工具，总时限 10 秒 |
+
+默认值请求体示例：
+
+```json
+{
+  "expectedRevision": 0,
+  "model": { "provider": "enterprise", "modelId": "coding-model" },
+  "tools": ["read", "ls", "grep", "find"],
+  "skillBundle": "default",
+  "maxSteps": 30,
+  "maxTokens": 100000,
+  "timeoutSeconds": 600,
+  "maxSubagents": 2,
+  "maxDepth": 1
+}
+```
+
+默认值使用 AgentConfig 的相同字段限制，拒绝未知字段；生产保存到租户元数据，Demo 保存在内存。部署设置由服务端管理，修改后重启相关进程。Skill / MCP 登记及启停复用现有 API，所有变更进入审计记录。Skill 版本不可变，MCP 检查沿用服务器凭证、HTTPS、租户授权与工具白名单。
+
+默认值保存成功返回 `{agentDefaults, defaultsRevision}`，修订号递增。旧数据的初始修订号为 0；未提供 `expectedRevision` 返回 400。客户端收到 409 后需重新读取最新配置，保留草稿，并由管理员明确选择重新载入或使用最新修订号重试；重复并发冲突仍返回 409，不自动覆盖。
+
+管理控制台按逻辑 Agent 显示版本身份和生效状态；“发布后续版本”调用 `/admin/agents/{agentId}/versions`，“激活此版本”调用 `/admin/agents/{agentId}/active-version`。管理员版本列表额外返回 `agentId`、`activeVersionId` 和当前逻辑 Agent 的 `allowedUsers`，不使用历史 ACL 快照。控制台权限保存调用 `/admin/logical-agents/{agentId}/access`。
+
+
+## 上传单 Skill ZIP
+
+`POST /api/v1/admin/skills/upload` 要求管理员身份和当前租户的 Bundle 授权。使用 `multipart/form-data`：`id`（如 `review@v1`）、`name`、`bundle`、可选 `description`，以及唯一文件字段 `archive`。不接受 `hostPath`、目标路径、Volume 或客户端摘要。成功返回 201 和已启用的 Skill，包含自动生成的 Sandbox 路径、SKILL.md SHA-256 及 `hostUpload` 包身份/文件数/字节数；不返回宿主机路径。
+
+```bash
+curl -X POST http://127.0.0.1:8080/api/v1/admin/skills/upload \
+  -H 'Authorization: Bearer <admin-token>' \
+  -F 'id=review@v1' -F 'name=Code Review' -F 'bundle=default' \
+  -F 'description=Review workspace code' -F 'archive=@review.zip;type=application/zip'
+```
+
+ZIP 内必须恰有一个 `SKILL.md`，位于 ZIP 根目录或唯一顶层 Skill 目录内；保留 scripts/references 等辅助文件和执行位，忽略常见 macOS 打包元数据。拒绝路径穿越、绝对路径、链接/特殊文件、加密、重复/冲突路径、损坏的 CRC、无效 UTF-8 清单和多个 Skill。限制为 ZIP 10 MiB、解压总量 32 MiB、单文件 8 MiB、SKILL.md 128 KiB、1000 个文件及 10000 个目录树条目；每个 API 进程最多同时处理两次上传。现有 JSON API 的 350000 字节限制不变。
+
+`GET /admin/configuration` 返回 `skillUploads` 的 enabled 与各项大小/数量限制。`SKILL_HOST_ROOTS_JSON=[]` 禁用上传；默认 `SKILL_UPLOAD_ROOT` 是第一个获批 Host 根目录。实际共享目录必须由部署端预先准备并允许 API 写入 `uploads/`，见[部署说明](deployment.md#skill-zip-uploads--技能-zip-上传)。新 Worker 根据租户持久化元数据和相同上传根目录解析只读挂载，不需要修改 `SKILL_VOLUMES_JSON` 或重启。
+
+失败返回 400（格式/授权 Bundle/ZIP 校验）、401/403（身份）、409（不可变版本/包已存在）、413（大小/数量超限）、415（非 multipart）、429（上传并发已满）、503（上传禁用或共享存储不可用）。上传审计记录文件数/字节数，不包含文件内容。重复 ID 不覆盖现有版本；不同租户的相同 ID 写入不同目录。确定未登记的失败会清理新目录；无法确认数据库提交结果时保留目录，避免删除可能已被引用的版本，需先刷新登记列表或由运维核对数据库后处理孤立目录。

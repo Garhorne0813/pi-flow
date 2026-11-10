@@ -63,15 +63,7 @@ export const argumentsSchemas: Record<
 };
 export function specs(names: string[]): ToolSpec[] {
   return names.map((name) => ({
-    name: [
-      "todo",
-      "ask_user_question",
-      "delegate_to_agent",
-      "web_search",
-      "web_fetch",
-    ].includes(name)
-      ? name
-      : `remote_${name}`,
+    name,
     description: `${name} in the authorized workspace. Mutations and shell require approval.`,
     schema: z.toJSONSchema(argumentsSchemas[name]!) as Record<string, unknown>,
   }));

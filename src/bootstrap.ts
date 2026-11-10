@@ -5,6 +5,14 @@ import { personalStore } from "./store/personal.js";
 import { PersonalService } from "./personal-service.js";
 import { seedDemo } from "./config/agents.js";
 import { z } from "zod";
+import { HostSkillPackages, skillUploadRoot } from "./skill-packages.js";
+import {
+  SkillVolumeSchema,
+  HostSkillRootsSchema,
+  DEFAULT_HOST_SKILL_ROOTS,
+  validateSkillBindings,
+  validateHostSkillSource,
+} from "./adapters/skill-mounts.js";
 import { MemoryStore } from "./store.js";
 import {
   CubeProvider,
@@ -68,21 +76,27 @@ export async function bootstrap() {
     );
   if (!Object.keys(bundles).length)
     throw new Error("Skill bundle mapping required");
+  const hostSkillRoots = HostSkillRootsSchema.parse(
+    JSON.parse(
+      process.env.SKILL_HOST_ROOTS_JSON ??
+        JSON.stringify(DEFAULT_HOST_SKILL_ROOTS),
+    ),
+  );
   const skillVolumes = z
-    .record(
-      z.string(),
-      z
-        .object({
-          bundle: z.string().min(1),
-          path: z.string().regex(/^\/skills\/(?:[a-zA-Z0-9_-]+\/)+SKILL\.md$/),
-          volume: z.string().min(1),
-        })
-        .strict(),
-    )
+    .record(z.string(), SkillVolumeSchema)
     .parse(JSON.parse(process.env.SKILL_VOLUMES_JSON ?? "{}"));
+  validateSkillBindings(skillVolumes, hostSkillRoots);
+  for (const binding of Object.values(skillVolumes))
+    if ("hostPath" in binding) await validateHostSkillSource(binding.hostPath);
   for (const skill of Object.values(skillVolumes))
     if (!Object.hasOwn(bundles, skill.bundle))
       throw new Error("Unknown skill volume bundle");
+  const uploadRoot = skillUploadRoot(
+    hostSkillRoots,
+    process.env.SKILL_UPLOAD_ROOT,
+    skillVolumes,
+  );
+  const skillPackages = new HostSkillPackages(uploadRoot);
   const endpoints = z
     .record(
       z.string(),
@@ -104,6 +118,8 @@ export async function bootstrap() {
         skillVolumes,
         process.env.CUBE_EXEC_USER!,
         process.env.CUBE_VOLUME_DRIVER!,
+        hostSkillRoots,
+        uploadRoot,
       );
   const service = new PersonalService(
     store,
@@ -158,5 +174,5 @@ export async function bootstrap() {
       : undefined,
   );
   if (demo) await registry.tx(seedDemo);
-  return { store, service, sandbox, worker };
+  return { store, service, sandbox, worker, mcp, skillPackages };
 }

@@ -112,7 +112,7 @@ try {
   const config = AgentConfig.parse({
     name: "DeepSeek live test",
     systemPrompt:
-      "You are a concise test agent. Follow the user. Use remote_read when requested. Never guess unread file contents.",
+      "You are a concise test agent. Follow the user. Use read when requested. Never guess unread file contents.",
     model: { provider, modelId: model },
     tools: ["read"],
     skillBundle: "default",
@@ -174,12 +174,12 @@ try {
     content: JSON.stringify({ nonce }),
   });
   const tool = await turn(
-    "Use remote_read to read live-probe.txt. Reply only with the nonce field from that file.",
+    "Use read to read live-probe.txt. Reply only with the nonce field from that file.",
     "tool",
   );
   assert.ok(
     tool.events.some(
-      (e) => e.type === "tool.completed" && e.data.name === "remote_read",
+      (e) => e.type === "tool.completed" && e.data.name === "read",
     ),
   );
   assert.match(tool.text, new RegExp(nonce));

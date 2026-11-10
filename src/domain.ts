@@ -79,14 +79,30 @@ export const AgentConfig = z
   })
   .strict();
 export type AgentConfig = z.infer<typeof AgentConfig>;
-export type AgentVersion = {
+export type Agent = {
   id: string;
+  activeVersionId: string;
+  allowedUsers?: string[];
+};
+export const AgentDefaults = AgentConfig.pick({
+  model: true,
+  tools: true,
+  skillBundle: true,
+  maxTokens: true,
+  maxSteps: true,
+  timeoutSeconds: true,
+  maxSubagents: true,
+  maxDepth: true,
+});
+export type AgentDefaults = z.infer<typeof AgentDefaults>;
+export type AgentVersion = {
   agentId?: string;
+  id: string;
   config: AgentConfig;
   digest: string;
   publishedAt: string;
   enabled: boolean;
-  allowedUsers?: string[];
+  allowedUsers?: string[]; // Legacy snapshot; logical Agent ACL governs access.
 };
 export type Workspace = {
   id: string;
@@ -95,7 +111,8 @@ export type Workspace = {
   members: Record<string, "owner" | "editor" | "viewer">;
   volumeId?: string;
   sandboxId?: string;
-  sandboxSkillScope?: string;
+  sandboxSkillScope?: string; // Provider identity, including physical mounts.
+  sandboxLogicalSkillScope?: string; // Bundle and immutable Skill identities.
   // Per-sandbox data-plane token returned by Cube create; connect does not
   // re-issue it, so it must survive Worker restarts with the Sandbox record.
   sandboxTrafficToken?: string;
@@ -120,6 +137,7 @@ export type Session = {
   cwd?: string;
   title?: string;
   deletedAt?: string;
+  effectiveVersionId?: string;
   /** Legacy shared-workspace sessions only. */
   agentVersionId?: string;
   entries: unknown[];
@@ -203,6 +221,12 @@ export type Interaction = {
   continuationRunId?: string;
 };
 export type Skill = {
+  hostUpload?: {
+    key: string;
+    archiveDigest: string;
+    files: number;
+    bytes: number;
+  };
   id: string;
   name: string;
   description: string;
@@ -241,7 +265,10 @@ export type State = {
     { id: string; issuer: string; subject: string; enabled: boolean }
   >;
   policy?: { disabledTools: string[] };
+  agentDefaults?: AgentDefaults;
+  defaultsRevision?: number;
   usage?: import("./usage.js").UsageState;
+  logicalAgents: Record<string, Agent>;
   agents: Record<string, AgentVersion>;
   workspaces: Record<string, Workspace>;
   sessions: Record<string, Session>;
@@ -255,6 +282,7 @@ export type State = {
   sequence: number;
 };
 export const emptyState = (): State => ({
+  logicalAgents: {},
   agents: {},
   workspaces: {},
   sessions: {},
@@ -392,13 +420,38 @@ export function intersect(
   };
 }
 
+// Legacy records use the current active version only until ACL migration.
 export function agentAllowed(
-  v: Pick<AgentVersion, "enabled" | "allowedUsers">,
+  v: Pick<AgentVersion, "enabled" | "allowedUsers"> & {
+    id?: string;
+    agentId?: string;
+  },
   a: Actor,
+  s?: State,
 ) {
-  return (
-    v.enabled && (!v.allowedUsers?.length || v.allowedUsers.includes(a.userId))
-  );
+  const logical =
+    s && v.id && !s.managedAgents?.[v.id]
+      ? s.logicalAgents[v.agentId ?? v.id]
+      : undefined;
+  const active = logical ? s!.agents[logical.activeVersionId] : undefined;
+  if (logical && logical.allowedUsers === undefined && !active) return false;
+  const users = logical
+    ? (logical.allowedUsers ?? active?.allowedUsers)
+    : v.allowedUsers;
+  return v.enabled && (!users?.length || users.includes(a.userId));
+}
+export function logicalAgent(s: State, selector: string): Agent {
+  const version = s.agents[selector];
+  const key = version?.agentId ?? selector;
+  let logical = s.logicalAgents[key];
+  if (!logical) {
+    if (!version) throw new Fault(404, "AGENT_NOT_FOUND");
+    logical = s.logicalAgents[key] = { id: key, activeVersionId: version.id };
+  }
+  logical.allowedUsers ??= [
+    ...(s.agents[logical.activeVersionId]?.allowedUsers ?? []),
+  ];
+  return logical;
 }
 
 export type ManagedAgent = {

@@ -139,6 +139,18 @@ export class PersonalService extends HarnessService {
       return next;
     });
   }
+  override async setAccess(a: Actor, selector: string, allowedUsers: string[]) {
+    admin(a);
+    return this.registry.tx((s) => {
+      const agent = s.managedAgents?.[selector];
+      if (!agent) throw new Fault(404, "AGENT_NOT_FOUND");
+      agent.allowedUsers = [...allowedUsers];
+      s.configRevisions ??= { global: 0, agents: 0 };
+      s.configRevisions.agents++;
+      audit(s, a, "agent.access", selector);
+      return { allowedUsers: agent.allowedUsers };
+    });
+  }
   override async publish(a: Actor, _input: unknown): Promise<never> {
     admin(a);
     throw new Fault(410, "USE_AGENT_CONFIGURATION");

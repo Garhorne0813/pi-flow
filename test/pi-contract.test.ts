@@ -3,9 +3,13 @@ import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { ModelRuntime, SessionManager } from "@earendil-works/pi-coding-agent";
 import { AgentConfig } from "../src/domain.js";
-import { PiRuntime, type RuntimeContext } from "../src/runtime.js";
+import {
+  EnterpriseResourceLoader,
+  PiRuntime,
+  type RuntimeContext,
+} from "../src/runtime.js";
 import { specs } from "../src/tool-specs.js";
-test("real Pi 0.99.2 uses only remote tools and restores canonical session entries", async () => {
+test("real Pi 0.99.2 uses canonical custom read/bash and restores canonical session entries", async () => {
   const requests: Record<string, any>[] = [];
   let count = 0;
   const server = createServer(async (req, res) => {
@@ -28,8 +32,17 @@ test("real Pi 0.99.2 uses only remote tools and restores canonical session entri
             id: "call_read",
             type: "function",
             function: {
-              name: "remote_read",
+              name: "read",
               arguments: '{"path":"hello.txt"}',
+            },
+          },
+          {
+            index: 1,
+            id: "call_bash",
+            type: "function",
+            function: {
+              name: "bash",
+              arguments: '{"command":"exit 73","timeoutSeconds":60}',
             },
           },
         ],
@@ -77,9 +90,9 @@ test("real Pi 0.99.2 uses only remote tools and restores canonical session entri
     let reservedRequests = 0;
     const cfg = AgentConfig.parse({
       name: "test",
-      systemPrompt: "Use remote_read to read the file.",
+      systemPrompt: "Use read and bash in the sandbox.",
       model: { provider: "test-gateway", modelId: "test-model" },
-      tools: ["read"],
+      tools: ["read", "bash"],
       skillBundle: "default",
     });
     const context = (): RuntimeContext => ({
@@ -98,10 +111,14 @@ test("real Pi 0.99.2 uses only remote tools and restores canonical session entri
         recordedUsage.push(usage);
       },
       call: async (name, args) => {
-        assert.equal(name, "remote_read");
-        assert.deepEqual(args, { path: "hello.txt" });
+        if (name === "read") {
+          assert.deepEqual(args, { path: "hello.txt" });
+        } else {
+          assert.equal(name, "bash");
+          assert.equal(args.command, "exit 73");
+        }
         calls++;
-        return { text: "remote-only" };
+        return { text: `remote-only-${name}` };
       },
       emit: async (type) => {
         events.push(type);
@@ -111,7 +128,7 @@ test("real Pi 0.99.2 uses only remote tools and restores canonical session entri
       },
     });
     await runtime.execute(context());
-    assert.equal(calls, 1);
+    assert.equal(calls, 2);
     assert.ok(
       entries.some(
         (e: any) => e.type === "message" && e.message.role === "toolResult",
@@ -121,13 +138,14 @@ test("real Pi 0.99.2 uses only remote tools and restores canonical session entri
     for (const req of requests) {
       assert.equal(req.max_tokens ?? req.max_completion_tokens, 12);
       const names = req.tools.map((t: any) => t.function.name);
-      assert.deepEqual(names, ["remote_read"]);
+      assert.deepEqual(names, ["read", "bash"]);
     }
     assert.ok(
       !requests[0]!.messages.some((m: any) =>
         String(m.content).includes("SKILL.md"),
       ),
     );
+    const savedEntries = structuredClone(entries);
     const restored = SessionManager.inMemory(
       "/harness",
       undefined,
@@ -135,15 +153,27 @@ test("real Pi 0.99.2 uses only remote tools and restores canonical session entri
     );
     assert.ok(restored.getEntries().length > 0);
     await runtime.execute({ ...context(), prompt: "Continue" });
-    assert.equal(calls, 1);
-    assert.ok(
-      requests
-        .at(-1)!
-        .messages.some(
-          (m: any) =>
-            m.role === "tool" && String(m.content).includes("remote-only"),
-        ),
+    assert.equal(calls, 2);
+    const resumedRequest = requests.at(-1)!;
+    assert.deepEqual(
+      resumedRequest.tools.map((t: any) => t.function.name),
+      ["read", "bash"],
     );
+    assert.deepEqual(
+      resumedRequest.messages.flatMap((m: any) =>
+        (m.tool_calls ?? []).map((t: any) => t.function.name),
+      ),
+      ["read", "bash"],
+    );
+    assert.deepEqual(entries.slice(0, savedEntries.length), savedEntries);
+    for (const name of ["read", "bash"])
+      assert.ok(
+        resumedRequest.messages.some(
+          (m: any) =>
+            m.role === "tool" &&
+            String(m.content).includes(`remote-only-${name}`),
+        ),
+      );
     assert.equal(recordedUsage.length, requests.length);
     assert.ok(recordedUsage.every((u: any) => u.totalTokens === 7));
     const beforeDenied = requests.length;
@@ -196,4 +226,55 @@ test("configured native DeepSeek provider retains Pi reasoning and compatibility
       else process.env[name] = before[name];
     }
   }
+});
+
+test("sandbox tool specs expose canonical names and retain auxiliary tool names", () => {
+  const names = [
+    "read",
+    "write",
+    "edit",
+    "bash",
+    "ls",
+    "find",
+    "grep",
+    "todo",
+    "ask_user_question",
+    "delegate_to_agent",
+  ];
+  assert.deepEqual(
+    specs(names).map((tool) => tool.name),
+    names,
+  );
+  assert.deepEqual(
+    specs(["read"]).map((tool) => tool.name),
+    ["read"],
+  );
+  const config = AgentConfig.parse({
+    name: "test",
+    systemPrompt: "safe",
+    model: { provider: "demo", modelId: "demo" },
+    tools: ["read"],
+    skillBundle: "default",
+  });
+  const loader = new EnterpriseResourceLoader(config, [
+    {
+      id: "probe",
+      name: "probe",
+      description: "test skill",
+      path: "/skills/probe/SKILL.md",
+      digest: "a".repeat(64),
+      bundle: "default",
+      enabled: true,
+    },
+  ]);
+  assert.ok(
+    loader
+      .getAppendSystemPrompt()
+      .some((line) => line.includes("with read when needed")),
+  );
+  assert.ok(
+    loader
+      .getAppendSystemPrompt()
+      .every((line) => !line.includes("remote_read")),
+  );
 });

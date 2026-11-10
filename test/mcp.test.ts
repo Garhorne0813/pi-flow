@@ -10,6 +10,9 @@ import {
   ListToolsRequestSchema,
   CallToolRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
+import { buildAPI } from "../src/api.js";
+import { HarnessService } from "../src/service.js";
+import { DemoSandbox, SandboxManager } from "../src/adapters/sandbox.js";
 import { MemoryStore } from "../src/store.js";
 import { MCPManager } from "../src/adapters/mcp.js";
 import { AgentConfig, type Actor } from "../src/domain.js";
@@ -127,6 +130,32 @@ test("real Streamable HTTP MCP uses trusted HTTPS endpoint, filters tools and ch
         tokenEnv: "MCP_TEST_TOKEN",
       },
     });
+    const app = buildAPI(
+      new HarnessService(store, ["trusted"], ["default"]),
+      async () => a,
+      new SandboxManager(store, new DemoSandbox()),
+      mgr,
+    );
+    try {
+      const checked = await app.inject({
+        method: "POST",
+        url: "/api/v1/admin/mcp-servers/kb/check",
+        payload: {},
+      });
+      assert.equal(checked.statusCode, 200);
+      assert.deepEqual(
+        checked.json().tools.map((t: { name: string }) => t.name),
+        ["mcp_kb_search"],
+      );
+      assert.equal(
+        invocations,
+        0,
+        "admin connection check must not invoke tools",
+      );
+      assert.equal(hiddenRequests, 0);
+    } finally {
+      await app.close();
+    }
     const config = AgentConfig.parse({
       name: "mcp",
       systemPrompt: "test",

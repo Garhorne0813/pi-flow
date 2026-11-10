@@ -1,14 +1,25 @@
+import type { State } from "./domain.js";
 import { PersonalService } from "./personal-service.js";
 import { principal } from "./store/registry.js";
 import { personalRoutes } from "./api/personal.js";
 import { alerts } from "./alerts.js";
+import { agentAdminHTML, editableAgentAdminHTML } from "./agent-admin-ui.js";
+import { randomBytes } from "node:crypto";
 import Fastify from "fastify";
+import multipart from "@fastify/multipart";
+import {
+  HostSkillPackages,
+  SkillUploadFields,
+  skillZipLimits,
+} from "./skill-packages.js";
 import { usageReport, policyFromEnv } from "./usage.js";
 import { telemetry, traceContext } from "./telemetry.js";
 import { bounded } from "./health.js";
 import { z } from "zod";
 import {
   Fault,
+  AgentDefaults,
+  AgentConfig,
   id,
   admin,
   agentAllowed,
@@ -17,10 +28,12 @@ import {
   run,
   audit,
   type Actor,
+  type Run,
 } from "./domain.js";
 import type { Auth } from "./auth.js";
-import type { HarnessService } from "./service.js";
+import { digest, type HarnessService } from "./service.js";
 import type { SandboxManager } from "./adapters/sandbox.js";
+import type { MCPManager } from "./adapters/mcp.js";
 const uuid = z.string().uuid();
 const filePath = z
   .string()
@@ -40,10 +53,39 @@ const page = z.object({
   offset: z.coerce.number().int().min(0).default(0),
   limit: z.coerce.number().int().min(1).max(100).default(50),
 });
+// Status APIs expose execution metadata, never the private Worker config snapshot.
+function publicRun(r: Run | undefined) {
+  if (!r) throw new Fault(404, "RUN_NOT_FOUND");
+  return {
+    id: r.id,
+    sessionId: r.sessionId,
+    agentVersionId: r.agentVersionId,
+    agentId: r.agentId,
+    cwd: r.cwd,
+    model: r.model,
+    configDigest: r.configDigest,
+    taskId: r.taskId,
+    rootRunId: r.rootRunId,
+    parentRunId: r.parentRunId,
+    resumedFrom: r.resumedFrom,
+    state: r.state,
+    cancelRequested: r.cancelRequested,
+    error: r.error,
+    depth: r.depth,
+    steps: r.steps,
+    children: r.children,
+    tokens: r.tokens,
+    createdAt: r.createdAt,
+    startedAt: r.startedAt,
+    endedAt: r.endedAt,
+  };
+}
 export function buildAPI(
   service: HarnessService,
   auth: Auth,
   sandbox: SandboxManager,
+  mcp?: MCPManager,
+  skillPackages?: HostSkillPackages,
 ) {
   const app = Fastify({
     logger: {
@@ -53,6 +95,26 @@ export function buildAPI(
     bodyLimit: 350000,
     requestTimeout: 30000,
   });
+  void app.register(multipart);
+  const configurationStore =
+    service instanceof PersonalService
+      ? {
+          readMetadata: <T>(
+            _tenant: string,
+            _keys: (keyof State)[],
+            fn: (s: State) => T | Promise<T>,
+          ) => service.registry.read(fn),
+          tx: <T>(_tenant: string, fn: (s: State) => T | Promise<T>) =>
+            service.registry.tx(fn),
+        }
+      : service.store;
+  const agentKey = (value: unknown) =>
+    service instanceof PersonalService
+      ? z
+          .string()
+          .regex(/^[a-z][a-z0-9_-]{0,63}$/)
+          .parse(value)
+      : uuid.parse(value);
   const actors = new WeakMap<object, Actor>();
   const actor = (req: object) => actors.get(req)!;
   app.setErrorHandler((err, req, reply) => {
@@ -82,6 +144,12 @@ export function buildAPI(
   });
   app.addHook("onRequest", async (req, reply) => {
     reply.header("X-Request-ID", req.id);
+    // Only the static shell is public; all data and mutations still require admin auth.
+    if (
+      req.method === "GET" &&
+      ["/admin/agents/ui", "/admin/ui"].includes(req.url.split("?")[0]!)
+    )
+      return;
     if (
       ["/health", "/health/live", "/health/ready"].includes(
         req.url.split("?")[0]!,
@@ -90,12 +158,7 @@ export function buildAPI(
       return;
     const authenticated = await auth(req.headers.authorization);
     if (service instanceof PersonalService) {
-      if (
-        req.url.startsWith("/api/v1/workspaces") ||
-        req.url.startsWith("/api/v1/admin/agents") ||
-        req.url.startsWith("/api/v1/admin/skills") ||
-        req.url.startsWith("/api/v1/admin/mcp")
-      )
+      if (req.url.startsWith("/api/v1/workspaces"))
         throw new Fault(404, "ROUTE_NOT_FOUND");
       actors.set(req, await principal(service.registry, authenticated));
     } else actors.set(req, authenticated);
@@ -113,6 +176,149 @@ export function buildAPI(
       });
   });
   app.get("/health", async () => ({ status: "ok" }));
+  app.get("/admin/ui", async (_req, reply) =>
+    reply.redirect("/admin/agents/ui"),
+  );
+  app.get("/admin/agents/ui", async (_req, reply) => {
+    const nonce = randomBytes(16).toString("base64");
+    return reply
+      .header("Cache-Control", "no-store")
+      .header("X-Content-Type-Options", "nosniff")
+      .header("Referrer-Policy", "no-referrer")
+      .header(
+        "Content-Security-Policy",
+        `default-src 'none'; script-src 'nonce-${nonce}'; style-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`,
+      )
+      .type("text/html; charset=utf-8")
+      .send(
+        (service instanceof PersonalService
+          ? editableAgentAdminHTML
+          : agentAdminHTML
+        ).replace("__AGENT_UI_NONCE__", nonce),
+      );
+  });
+  app.get("/api/v1/admin/configuration", async (req, reply) => {
+    const a = actor(req);
+    const deployment = service.adminConfiguration(a);
+    reply.header("Cache-Control", "no-store");
+    const settings = await configurationStore.readMetadata(
+      a.tenantId,
+      ["agentDefaults", "defaultsRevision"],
+      (s) => ({
+        agentDefaults: s.agentDefaults,
+        defaultsRevision: s.defaultsRevision ?? 0,
+      }),
+    );
+    return {
+      tenantId: a.tenantId,
+      agentMode: service instanceof PersonalService ? "editable" : "versioned",
+      agentsRevision:
+        service instanceof PersonalService
+          ? await service.registry.read((s) => s.configRevisions?.agents ?? 0)
+          : undefined,
+      deployment: {
+        ...deployment,
+        sandbox: sandbox.policy,
+        editable: false,
+        changesRequireRestart: true,
+      },
+      skillUploads: skillPackages?.configuration ?? {
+        enabled: false,
+        ...skillZipLimits,
+      },
+      defaultsRevision: settings.defaultsRevision,
+      agentDefaults: settings.agentDefaults ?? {
+        model:
+          deployment.models[0] ??
+          (process.env.HARNESS_MODE === "demo"
+            ? { provider: "demo", modelId: "demo" }
+            : { provider: "", modelId: "" }),
+        tools: ["read", "ls", "grep", "find"],
+        skillBundle: deployment.bundles[0] ?? "",
+        maxSteps: 30,
+        maxTokens: 100000,
+        timeoutSeconds: 600,
+        maxSubagents: 2,
+        maxDepth: 1,
+      },
+      defaultsScope: "tenant-new-agent-drafts",
+    };
+  });
+  app.put("/api/v1/admin/configuration/defaults", async (req) => {
+    const a = actor(req);
+    const deployment = service.adminConfiguration(a);
+    const { expectedRevision, ...defaults } = AgentDefaults.extend({
+      expectedRevision: z
+        .number()
+        .int()
+        .min(0)
+        .max(Number.MAX_SAFE_INTEGER - 1),
+    }).parse(req.body);
+    if (
+      deployment.modelApprovalRequired &&
+      !deployment.models.some(
+        (m) =>
+          m.provider === defaults.model.provider &&
+          m.modelId === defaults.model.modelId,
+      )
+    )
+      throw new Fault(403, "MODEL_NOT_APPROVED");
+    if (!service.hasBundle(defaults.skillBundle, a.tenantId))
+      throw new Fault(400, "UNKNOWN_SKILL_BUNDLE");
+    return configurationStore.tx(a.tenantId, (s) => {
+      if ((s.defaultsRevision ?? 0) !== expectedRevision)
+        throw new Fault(
+          409,
+          "DEFAULTS_CONFLICT",
+          "Defaults were updated by another administrator",
+        );
+      s.agentDefaults = defaults;
+      s.defaultsRevision = expectedRevision + 1;
+      audit(s, a, "configuration.defaults", a.tenantId);
+      return { agentDefaults: defaults, defaultsRevision: s.defaultsRevision };
+    });
+  });
+  app.post("/api/v1/admin/mcp-servers/:id/check", async (req) => {
+    const a = actor(req);
+    admin(a);
+    z.object({})
+      .strict()
+      .parse(req.body ?? {});
+    const key = params(req.params).id!;
+    const reg = await configurationStore.readMetadata(
+      a.tenantId,
+      ["mcp"],
+      (s) => s.mcp[key],
+    );
+    if (!reg) throw new Fault(404, "MCP_NOT_FOUND");
+    if (!reg.enabled) throw new Fault(403, "MCP_DISABLED");
+    if (!service.hasEndpoint(reg.endpointRef, a.tenantId))
+      throw new Fault(403, "MCP_ENDPOINT_NOT_GRANTED");
+    if (!mcp) throw new Fault(503, "MCP_CHECK_UNAVAILABLE");
+    // Discovery only: no tool execution. Existing MCP transport enforces HTTPS,
+    // server-side credentials, grants, whitelists, pagination and a total deadline.
+    const result = await mcp.discover(
+      a,
+      AgentConfig.parse({
+        name: "connection-check",
+        systemPrompt: "",
+        model: { provider: "check", modelId: "check" },
+        tools: [],
+        skillBundle: "check",
+        mcpServers: [key],
+      }),
+      undefined,
+      Date.now() + 10000,
+    );
+    return {
+      status: "ok",
+      tools: result.specs.map((t) => ({
+        name: t.name,
+        description: t.description,
+      })),
+      checkedAt: new Date().toISOString(),
+    };
+  });
   app.get("/api/v1/admin/usage", async (req) => {
     const a = actor(req);
     admin(a);
@@ -180,13 +386,13 @@ export function buildAPI(
       p = page.parse(req.query);
     return service.store.readMetadata(
       a.tenantId,
-      ["agents", "managedAgents"],
+      ["agents", "managedAgents", "logicalAgents"],
       (s) => ({
         items: (service instanceof PersonalService
           ? Object.values(s.managedAgents ?? {})
           : Object.values(s.agents)
         )
-          .filter((v) => agentAllowed(v, a))
+          .filter((v) => agentAllowed(v, a, s))
           .slice(p.offset, p.offset + p.limit),
       }),
     );
@@ -194,49 +400,221 @@ export function buildAPI(
   app.post("/api/v1/admin/agents", async (req, reply) =>
     reply.code(201).send(await service.publish(actor(req), req.body)),
   );
+  app.post("/api/v1/admin/agents/:id/versions", async (req, reply) =>
+    reply
+      .code(201)
+      .send(
+        await service.publish(
+          actor(req),
+          req.body,
+          uuid.parse(params(req.params).id),
+        ),
+      ),
+  );
+  app.put("/api/v1/admin/agents/:id/active-version", async (req) => {
+    const b = z.object({ agentVersionId: uuid }).strict().parse(req.body);
+    return service.activate(
+      actor(req),
+      uuid.parse(params(req.params).id),
+      b.agentVersionId,
+    );
+  });
+  app.get("/api/v1/logical-agents", async (req) => {
+    const a = actor(req),
+      p = page.parse(req.query);
+    return service.store.readMetadata(
+      a.tenantId,
+      ["logicalAgents", "agents"],
+      (s) => ({
+        items: Object.values(s.logicalAgents)
+          .filter(
+            (v) =>
+              s.agents[v.activeVersionId] &&
+              agentAllowed(s.agents[v.activeVersionId]!, a, s),
+          )
+          .slice(p.offset, p.offset + p.limit),
+      }),
+    );
+  });
   app.get("/api/v1/admin/agents", async (req) => {
     const a = actor(req);
     admin(a);
     const p = page.parse(req.query);
-    return service.store.readMetadata(a.tenantId, ["agents"], (s) => ({
-      items: Object.values(s.agents).slice(p.offset, p.offset + p.limit),
-    }));
+    if (service instanceof PersonalService)
+      return service.registry.read((s) => ({
+        items: Object.values(s.managedAgents ?? {})
+          .slice(p.offset, p.offset + p.limit)
+          .map((v) => ({
+            ...v,
+            agentId: v.id,
+            activeVersionId: v.id,
+            publishedAt: v.updatedAt,
+            digest: digest(v.config),
+          })),
+      }));
+    return configurationStore.readMetadata(
+      a.tenantId,
+      ["agents", "logicalAgents"],
+      (s) => ({
+        items: Object.values(s.agents)
+          .slice(p.offset, p.offset + p.limit)
+          .map((version) => {
+            const logical = s.logicalAgents[version.agentId ?? version.id];
+            return {
+              ...version,
+              agentId: logical?.id ?? version.agentId ?? version.id,
+              activeVersionId: logical?.activeVersionId ?? version.id,
+              allowedUsers: logical
+                ? (logical.allowedUsers ?? [])
+                : (version.allowedUsers ?? []),
+            };
+          }),
+      }),
+    );
   });
   app.put("/api/v1/admin/agents/:id/status", async (req) => {
     const a = actor(req);
     admin(a);
-    const key = uuid.parse(params(req.params).id);
+    const key = agentKey(params(req.params).id);
     const b = z.object({ enabled: z.boolean() }).strict().parse(req.body);
-    return service.store.tx(a.tenantId, (s) => {
-      if (!s.agents[key]) throw new Fault(404, "AGENT_NOT_FOUND");
-      s.agents[key]!.enabled = b.enabled;
+    return configurationStore.tx(a.tenantId, (s) => {
+      const agent =
+        service instanceof PersonalService
+          ? s.managedAgents?.[key]
+          : s.agents[key];
+      if (!agent) throw new Fault(404, "AGENT_NOT_FOUND");
+      agent.enabled = b.enabled;
+      if (service instanceof PersonalService) {
+        s.configRevisions ??= { global: 0, agents: 0 };
+        s.configRevisions.agents++;
+      }
       audit(s, a, "agent.status", key);
-      return s.agents[key];
+      return agent;
     });
   });
-  app.put("/api/v1/admin/agents/:id/access", async (req) => {
-    const a = actor(req);
-    admin(a);
-    const key = uuid.parse(params(req.params).id);
-    const b = z
-      .object({ allowedUsers: z.array(z.string().min(1).max(200)).max(1000) })
-      .strict()
-      .parse(req.body);
-    return service.store.tx(a.tenantId, (s) => {
-      if (!s.agents[key]) throw new Fault(404, "AGENT_NOT_FOUND");
-      s.agents[key]!.allowedUsers = b.allowedUsers;
-      audit(s, a, "agent.access", key);
-      return { allowedUsers: b.allowedUsers };
+  for (const path of [
+    "/api/v1/admin/agents/:id/access",
+    "/api/v1/admin/logical-agents/:id/access",
+  ]) {
+    app.put(path, async (req) => {
+      const b = z
+        .object({ allowedUsers: z.array(z.string().min(1).max(200)).max(1000) })
+        .strict()
+        .parse(req.body);
+      return service.setAccess(
+        actor(req),
+        agentKey(params(req.params).id),
+        b.allowedUsers,
+      );
     });
-  });
+  }
   app.get("/api/v1/admin/skills", async (req) => {
     const a = actor(req);
     admin(a);
     const p = page.parse(req.query);
-    return service.store.readMetadata(a.tenantId, ["skills"], (s) => ({
+    return configurationStore.readMetadata(a.tenantId, ["skills"], (s) => ({
       items: Object.values(s.skills).slice(p.offset, p.offset + p.limit),
     }));
   });
+  app.post(
+    "/api/v1/admin/skills/upload",
+    { bodyLimit: skillZipLimits.maxArchiveBytes + 65536 },
+    async (req, reply) => {
+      const a = actor(req);
+      admin(a);
+      if (!skillPackages?.configuration.enabled)
+        throw new Fault(
+          503,
+          "SKILL_UPLOAD_DISABLED",
+          "Host Skill uploads are not configured",
+        );
+      return skillPackages.withSlot(async () => {
+        if (!req.isMultipart())
+          throw new Fault(
+            415,
+            "SKILL_ZIP_CONTENT_TYPE",
+            "Send a multipart form with one archive file",
+          );
+        const fields: Record<string, unknown> = Object.create(null);
+        let archive: Buffer | undefined;
+        for await (const part of req.parts({
+          limits: {
+            files: 1,
+            fields: 4,
+            parts: 5,
+            fileSize: skillZipLimits.maxArchiveBytes,
+            fieldSize: 8192,
+          },
+        })) {
+          if (part.type === "file") {
+            if (part.fieldname !== "archive" || archive)
+              throw new Fault(
+                400,
+                "INVALID_REQUEST",
+                "Exactly one archive file is required",
+              );
+            archive = await part.toBuffer();
+            if (part.file.truncated) throw new Fault(413, "SKILL_ZIP_LIMIT");
+          } else {
+            if (Object.hasOwn(fields, part.fieldname) || part.valueTruncated)
+              throw new Fault(
+                400,
+                "INVALID_REQUEST",
+                "Duplicate or truncated upload field",
+              );
+            fields[part.fieldname] = part.value;
+          }
+        }
+        const input = SkillUploadFields.parse(fields);
+        if (!archive)
+          throw new Fault(400, "INVALID_REQUEST", "Choose a Skill ZIP archive");
+        if (!service.hasBundle(input.bundle, a.tenantId))
+          throw new Fault(400, "UNKNOWN_SKILL_BUNDLE");
+        await configurationStore.readMetadata(a.tenantId, ["skills"], (s) => {
+          if (s.skills[input.id])
+            throw new Fault(409, "IMMUTABLE_SKILL_VERSION");
+        });
+        if (req.raw.aborted) throw new Fault(400, "UPLOAD_ABORTED");
+        if (a.expiresAt !== undefined && a.expiresAt <= Date.now())
+          throw new Fault(401, "UNAUTHENTICATED");
+        const prepared = await skillPackages.prepare(
+          a.tenantId,
+          input,
+          archive,
+        );
+        let metadataMayHaveCommitted = false;
+        try {
+          if (req.raw.aborted) throw new Fault(400, "UPLOAD_ABORTED");
+          if (a.expiresAt !== undefined && a.expiresAt <= Date.now())
+            throw new Fault(401, "UNAUTHENTICATED");
+          const skill = await configurationStore.tx(a.tenantId, (s) => {
+            if (req.raw.aborted) throw new Fault(400, "UPLOAD_ABORTED");
+            if (a.expiresAt !== undefined && a.expiresAt <= Date.now())
+              throw new Fault(401, "UNAUTHENTICATED");
+            if (s.skills[input.id])
+              throw new Fault(409, "IMMUTABLE_SKILL_VERSION");
+            s.skills[input.id] = prepared.skill;
+            audit(
+              s,
+              a,
+              "skill.upload",
+              input.id,
+              JSON.stringify({
+                files: prepared.skill.hostUpload!.files,
+                bytes: prepared.skill.hostUpload!.bytes,
+              }),
+            );
+            metadataMayHaveCommitted = true;
+            return prepared.skill;
+          });
+          return reply.code(201).send(skill);
+        } catch (error) {
+          if (!metadataMayHaveCommitted) await prepared.discard();
+          throw error;
+        }
+      });
+    },
+  );
   app.post("/api/v1/admin/skills", async (req, reply) => {
     const a = actor(req);
     admin(a);
@@ -254,7 +632,7 @@ export function buildAPI(
     if (!service.hasBundle(b.bundle, a.tenantId))
       throw new Fault(400, "UNKNOWN_SKILL_BUNDLE");
     return reply.code(201).send(
-      await service.store.tx(a.tenantId, (s) => {
+      await configurationStore.tx(a.tenantId, (s) => {
         if (s.skills[b.id]) throw new Fault(409, "IMMUTABLE_SKILL_VERSION");
         s.skills[b.id] = { ...b, enabled: true };
         audit(s, a, "skill.register", b.id);
@@ -267,16 +645,17 @@ export function buildAPI(
     admin(a);
     const key = params(req.params).id!;
     const b = z.object({ enabled: z.boolean() }).strict().parse(req.body);
-    return service.store.tx(a.tenantId, (s) => {
+    return configurationStore.tx(a.tenantId, (s) => {
       if (!s.skills[key]) throw new Fault(404, "SKILL_NOT_FOUND");
       s.skills[key]!.enabled = b.enabled;
+      audit(s, a, "skill.status", key);
       return s.skills[key];
     });
   });
   app.get("/api/v1/admin/mcp-servers", async (req) => {
     const a = actor(req);
     admin(a);
-    return service.store.readMetadata(a.tenantId, ["mcp"], (s) => ({
+    return configurationStore.readMetadata(a.tenantId, ["mcp"], (s) => ({
       items: Object.values(s.mcp),
     }));
   });
@@ -294,7 +673,7 @@ export function buildAPI(
     if (!service.hasEndpoint(b.endpointRef, a.tenantId))
       throw new Fault(400, "MCP_ENDPOINT_NOT_REGISTERED");
     return reply.code(201).send(
-      await service.store.tx(a.tenantId, (s) => {
+      await configurationStore.tx(a.tenantId, (s) => {
         if (s.mcp[b.id]) throw new Fault(409, "MCP_ALREADY_REGISTERED");
         s.mcp[b.id] = { ...b, enabled: true };
         audit(s, a, "mcp.register", b.id);
@@ -307,9 +686,10 @@ export function buildAPI(
     admin(a);
     const key = params(req.params).id!;
     const b = z.object({ enabled: z.boolean() }).strict().parse(req.body);
-    return service.store.tx(a.tenantId, (s) => {
+    return configurationStore.tx(a.tenantId, (s) => {
       if (!s.mcp[key]) throw new Fault(404, "MCP_NOT_FOUND");
       s.mcp[key]!.enabled = b.enabled;
+      audit(s, a, "mcp.status", key);
       return s.mcp[key];
     });
   });
@@ -479,14 +859,21 @@ export function buildAPI(
     },
   );
   app.post("/api/v1/workspaces/:id/sessions", async (req, reply) => {
-    const b = z.object({ agentVersionId: uuid }).strict().parse(req.body);
+    const b = z
+      .object({ agentId: uuid.optional(), agentVersionId: uuid.optional() })
+      .strict()
+      .refine(
+        (b) => !!b.agentId !== !!b.agentVersionId,
+        "Provide exactly one Agent selector",
+      )
+      .parse(req.body);
     return reply
       .code(201)
       .send(
         await service.createSession(
           actor(req),
           uuid.parse(params(req.params).id),
-          b.agentVersionId,
+          (b.agentId ?? b.agentVersionId)!,
         ),
       );
   });
@@ -520,21 +907,23 @@ export function buildAPI(
     const key =
       k === undefined ? undefined : z.string().min(1).max(128).parse(k);
     return reply.code(202).send(
-      await service.submit(
-        actor(req),
-        uuid.parse(params(req.params).id),
-        b.message,
-        key,
-        req.id,
-        (() => {
-          const trace = traceContext(
-            typeof req.headers.traceparent === "string"
-              ? req.headers.traceparent
-              : undefined,
-          );
-          return `00-${trace.traceId}-${trace.spanId}-01`;
-        })(),
-        req.headers.authorization?.slice(7),
+      publicRun(
+        await service.submit(
+          actor(req),
+          uuid.parse(params(req.params).id),
+          b.message,
+          key,
+          req.id,
+          (() => {
+            const trace = traceContext(
+              typeof req.headers.traceparent === "string"
+                ? req.headers.traceparent
+                : undefined,
+            );
+            return `00-${trace.traceId}-${trace.spanId}-01`;
+          })(),
+          req.headers.authorization?.slice(7),
+        ),
       ),
     );
   });
@@ -543,16 +932,13 @@ export function buildAPI(
       rid = uuid.parse(params(req.params).id);
     return service.store.readRun(a.tenantId, rid, (s) => {
       const r = run(s, a, rid);
-      return {
-        ...r,
-        lease: undefined,
-        actor: undefined,
-        userTokenRef: undefined,
-      };
+      return publicRun(r);
     });
   });
   app.post("/api/v1/runs/:id/cancel", async (req) =>
-    service.cancel(actor(req), uuid.parse(params(req.params).id)),
+    publicRun(
+      await service.cancel(actor(req), uuid.parse(params(req.params).id)),
+    ),
   );
   app.post("/api/v1/interactions/:id/response", async (req, reply) => {
     const b = z
@@ -562,10 +948,12 @@ export function buildAPI(
     return reply
       .code(202)
       .send(
-        await service.respond(
-          actor(req),
-          uuid.parse(params(req.params).id),
-          b.response,
+        publicRun(
+          await service.respond(
+            actor(req),
+            uuid.parse(params(req.params).id),
+            b.response,
+          ),
         ),
       );
   });

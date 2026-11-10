@@ -442,7 +442,7 @@ try {
     });
     const r = await turn(
       ses,
-      "Use the registered probe skill. Read its SKILL.md using remote_read and return only the marker it contains.",
+      "Use the registered probe skill. Read its SKILL.md using read and return only the marker it contains.",
     );
     await wait(r);
     const es = await events(r.id);
@@ -450,14 +450,14 @@ try {
       es.some(
         (e) =>
           e.type === "tool.completed" &&
-          e.data.name === "remote_read" &&
+          e.data.name === "read" &&
           e.data.result.sha256 === digest(skillText),
       ),
     );
     assert.ok(text(es).includes(skillNonce));
     const hidden = await turn(
       ses,
-      `Call remote_read exactly once with path ${hiddenSkillPath}. If the file is unavailable reply SKILL_ACCESS_DENIED and do not retry.`,
+      `Call read exactly once with path ${hiddenSkillPath}. If the file is unavailable reply SKILL_ACCESS_DENIED and do not retry.`,
     );
     await wait(hidden);
     const hiddenEvents = await events(hidden.id);
@@ -478,7 +478,7 @@ try {
     const bad = await session({ tools: ["read"], skills: ["probe@bad"] });
     const badRun = await turn(
       bad,
-      `Call remote_read once with path ${skillPath}; if it fails report the error and do not retry.`,
+      `Call read once with path ${skillPath}; if it fails report the error and do not retry.`,
     );
     await wait(badRun);
     assert.ok(

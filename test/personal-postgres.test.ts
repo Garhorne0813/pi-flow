@@ -209,7 +209,7 @@ test(
       const names = (await readdir("migrations"))
         .filter((n) => n.endsWith(".sql"))
         .sort();
-      for (const name of names.filter((n) => n < "006"))
+      for (const name of names.filter((n) => n < "008"))
         await backing.pool.query(await readFile("migrations/" + name, "utf8"));
       const registry = new PostgresRegistry(backing.pool),
         actor = await principal(registry, {
@@ -302,7 +302,7 @@ test(
         };
       });
       await backing.pool.query(
-        await readFile("migrations/006_editable_agents.sql", "utf8"),
+        await readFile("migrations/008_editable_agents.sql", "utf8"),
       );
       await backing.ready();
       const store = personalStore(backing, registry),

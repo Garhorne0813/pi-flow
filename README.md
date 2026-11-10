@@ -1,98 +1,54 @@
 > **Current implementation:** [Personal platform setup and status](docs/personal-platform.md). Bootstrap now uses private user workspaces and editable database-backed Agents with per-Run snapshots. Shared workspace API examples below describe the legacy engine.
 
-# Pi-Flow
+<div align="center">
+  <h1>Pi-Flow</h1>
+  <p><strong>An AI agent backend for shared workspaces.</strong></p>
+  <p>Persistent conversations, streaming execution, human approvals, and remote tools through REST and SSE.</p>
+  <p>
+    <a href="README.zh-CN.md">简体中文</a>
+    · <a href="#quick-start">Quick Start</a>
+    · <a href="#architecture">Architecture</a>
+    · <a href="#client-integration">Client Integration</a>
+  </p>
+  <p>
+    <img src="https://img.shields.io/badge/Node.js-%E2%89%A524-339933?logo=nodedotjs&logoColor=white" alt="Node.js 24+" />
+    <img src="https://img.shields.io/badge/License-Apache--2.0-blue.svg" alt="Apache-2.0 License" />
+  </p>
+</div>
 
-**An agent backend for shared workspaces, streamed conversations, and controlled tool execution.**
+---
 
-Pi-Flow lets you build agent applications around persistent workspaces and conversations. Users submit tasks, follow live responses, approve tool actions, and access workspace files through REST and SSE. Administrators publish versioned agents and control their models, skills, and MCP tools.
+Pi-Flow runs agents on Pi and executes remote tools through CubeSandbox. Connect your own chat client, while administrators manage versioned agents, skills, and MCP services through the built-in console.
 
-Built on Pi, with CubeSandbox for remote execution. The current release is a **0.1 backend**; bring your own chat UI or API client.
+The current release is a **0.1 backend integration baseline**. Demo uses a simulated model so you can try the API without external services; real models and remote execution require the corresponding services. Enterprise production acceptance is still pending.
 
-[简体中文](README.zh-CN.md)
+## Highlights
 
-## Features
-
-### Agent conversations
-
-- **Streaming responses** — receive message deltas, tool results, task status, and interaction requests over SSE.
-- **Persistent sessions** — keep conversation history and Todo state in a workspace; each session pins an agent version.
-- **Reconnect and cancel** — replay missed events using `Last-Event-ID`; disconnecting leaves the task running, while an explicit cancel stops it.
-- **Reliable submissions** — an idempotency key prevents duplicate task creation; one active Run is allowed per session.
-
-### Human interaction
-
-- **Approval before action** — model-initiated writes, edits, shell commands, and MCP calls require approval.
-- **Questions and answers** — agents can request user input and continue after a response.
-- **Task lists** — agents maintain Todos that clients can display alongside the conversation.
-
-Approval or an answer returns a **new Run ID**. Subscribe to that Run to follow the continuation.
-
-### Workspace files and execution
-
-- **Remote tools** — agents read, write, edit, list, search, and run Bash in CubeSandbox.
-- **Workspace storage** — production workspaces use independent persistent volumes; authorized skills mount as read-only volumes.
-- **File API** — list, upload, and download UTF-8 files up to 256 KiB after creating a session.
-- **Sandbox controls** — inspect capacity, pause, resume, or release an instance; idle instances are reclaimed automatically. Snapshot restore retains current workspace files and conversation history. Cube currently rejects cross-workspace snapshot clones.
-
-### Skills, MCP, and subagents
-
-- **Versioned skills** — enable selected skills for each agent, with manifest integrity checks.
-- **MCP integrations** — expose selected tools from configured Streamable HTTP servers, with tool allowlists and approval.
-- **Subagent delegation** — delegate to separate child sessions with intersected permissions, shared task budgets, and cascading cancellation. Child tasks currently execute sequentially and cannot wait for user interaction.
-
-### Access and usage controls
-
-- **Tenant isolation** — authenticate through UCS OIDC and share workspaces with owner, editor, or viewer roles.
-- **Agent administration** — publish immutable configurations, restrict access, and disable agents, skills, or MCP servers.
-- **Budgets and reporting** — enforce configured token and estimated cost budgets; inspect user, Run, and tenant usage.
-- **Operational visibility** — request IDs, audit records, metrics, and Worker health help trace task execution.
-
-## User interface
-
-Pi-Flow's interface is HTTP. A client typically follows this flow:
-
-```text
-Choose an agent → Create a workspace → Create a session → Submit a Run
-                                                             ↓
-                                                    Follow the SSE stream
-                                                             ↓
-                                              Answer / approve when requested
-                                                             ↓
-                                                  Follow the returned new Run
-```
-
-All paths below use the `/api/v1` prefix and require `Authorization: Bearer <token>`.
-
-| User action | Interface |
+| Area | What Pi-Flow provides |
 | --- | --- |
-| Choose an available agent | `GET /agents` |
-| Create or browse workspaces | `POST /workspaces`, `GET /workspaces` |
-| Share a workspace | `PUT /workspaces/{id}/members/{userId}` |
-| Create or browse conversations | `POST /workspaces/{id}/sessions`, `GET /workspaces/{id}/sessions` |
-| Read conversation history and Todos | `GET /sessions/{id}` |
-| Send a message | `POST /sessions/{id}/runs` with `{ "message": "…" }` |
-| Follow output or inspect task status | `GET /runs/{id}/events`, `GET /runs/{id}` |
-| Cancel a task | `POST /runs/{id}/cancel` |
-| Answer or approve / deny an action | `POST /interactions/{id}/response` with `{ "response": "…" }` |
-| List / upload / download files | `GET /workspaces/{id}/files`, `POST /workspaces/{id}/files`, `GET /workspaces/{id}/files/{fileId}` |
-| Inspect or manage an execution environment | `/workspaces/{id}/sandbox`, `/workspaces/{id}/sandbox/snapshots`, `/sandbox-capacity` |
-| Inspect personal or task usage | `GET /usage`, `GET /runs/{id}/usage` |
-
-Administrators use `/admin/agents`, `/admin/skills`, `/admin/mcp-servers`, `/admin/audit`, `/admin/stats`, and `/admin/usage`. See the [API reference](docs/api.md) for methods, payloads, event types, and errors.
-
-For browser clients, use `fetch` streaming or an SSE client that supports authorization headers. Native `EventSource` cannot set this header. After token expiry, reconnect with a fresh token and the last event ID.
+| Streaming conversations | Persistent sessions, message and tool events, Todos, SSE replay, idempotent submissions, and cancellation |
+| Human interaction | Approval before writes, edits, shell commands, and MCP calls; questions and resumable answers |
+| Shared workspaces | Owner/editor/viewer access, independent persistent volumes, and a workspace file API |
+| Remote execution | CubeSandbox file and Bash tools, capacity controls, pause/resume, and idle reclamation |
+| Versioned agents | Immutable configurations, logical agent activation, and pinned versions for task chains |
+| Extensibility | Read-only versioned skills, allowlisted Streamable HTTP MCP tools, and subagent delegation |
+| Administration and operations | UCS OIDC tenant isolation, budgets and usage, audit records, metrics, and Worker health |
 
 ## Quick start
 
 Requires **Node.js 24+** and npm. No model key, database, or Cube cluster is needed for the in-memory demo.
 
 ```bash
+git clone https://github.com/Garhorne0813/pi-flow.git
+cd pi-flow
 npm ci
 npm run build
 HARNESS_MODE=demo DEV_TOKEN=local-demo-token-2026 npm start
 ```
 
 The API listens at `http://127.0.0.1:8080`. Demo mode seeds a Demo Agent and runs its Worker inside the API process. It uses a simulated model and in-memory files; restarting clears in-memory state.
+
+Open **http://127.0.0.1:8080/admin/ui** and enter the `DEV_TOKEN` above to inspect the management console. Conversations use the API or your own chat client.
 
 In another terminal, create your first conversation:
 
@@ -106,7 +62,7 @@ curl -sS -X POST http://127.0.0.1:8080/api/v1/workspaces \
 curl -sS -X POST 'http://127.0.0.1:8080/api/v1/workspaces/<workspaceId>/sessions' \
   -H 'Authorization: Bearer local-demo-token-2026' \
   -H 'Content-Type: application/json' \
-  -d '{"agentVersionId":"00000000-0000-4000-8000-000000000001"}'
+  -d '{"agentId":"00000000-0000-4000-8000-000000000001"}'
 
 # 3. Replace <sessionId> with the returned id / 替换为返回的会话 id
 curl -sS -X POST 'http://127.0.0.1:8080/api/v1/sessions/<sessionId>/runs' \
@@ -119,13 +75,74 @@ curl -N 'http://127.0.0.1:8080/api/v1/runs/<runId>/events' \
   -H 'Authorization: Bearer local-demo-token-2026'
 ```
 
-The seeded agent ID above is for Demo only. In production, select an accessible published version from `GET /api/v1/agents`.
+The seeded logical agent ID above is for Demo only. In production, choose an accessible agent from `GET /api/v1/logical-agents` and use its returned `id` as `agentId`. Look for `message.delta` and `run.completed` in the SSE stream to confirm the conversation completed.
 
 To keep demo metadata in PostgreSQL, use Docker Compose. Simulated files still remain in memory:
 
 ```bash
 DEV_TOKEN=local-demo-token-2026 docker compose -f compose.demo.yml up --build
 ```
+
+## Architecture
+
+```mermaid
+flowchart LR
+    Client[API client / chat frontend] -->|REST / SSE| API[Fastify API]
+    Console[Management console] --> API
+    API <--> DB[(PostgreSQL)]
+    Worker[Worker] <--> DB
+    Worker --> Pi[Pi runtime]
+    Pi --> Gateway[Model gateway]
+    API --> Cube[CubeSandbox / workspace volumes and host skills]
+    Worker --> Cube
+    Worker --> MCP[Streamable HTTP MCP]
+```
+
+Production normally runs API and Worker as separate processes with the same database and capability policies. PostgreSQL persists sessions, Runs, and events; workspace files live on independent persistent volumes. Demo runs an inline Worker with a simulated model and in-memory Sandbox.
+
+See the [architecture reference](docs/architecture.md) for components, execution flow, and security boundaries.
+
+## Client integration
+
+```text
+Choose a logical agent → Create workspace → Create session → Submit Run → Follow SSE
+                                                                            ↓
+                                                                  Answer / approve
+                                                                            ↓
+                                                               Follow the new Run
+```
+
+All paths below use the `/api/v1` prefix and require `Authorization: Bearer <token>`.
+
+| Action | Interface |
+| --- | --- |
+| Choose a logical agent | `GET /logical-agents` |
+| Create a workspace | `POST /workspaces` with `{ "name": "…" }` |
+| Create a session | `POST /workspaces/{id}/sessions` with `{ "agentId": "…" }` |
+| Send a message | `POST /sessions/{id}/runs` with `Idempotency-Key` and `{ "message": "…" }` |
+| Follow events or inspect status | `GET /runs/{id}/events`, `GET /runs/{id}` |
+| Answer or approve / deny an action | `POST /interactions/{id}/response` with `{ "response": "…" }` |
+| Cancel a task chain | `POST /runs/{id}/cancel` |
+
+A Session follows a stable logical agent. New independent tasks use its active version; accepted tasks and approval continuations retain their pinned version. One active Run is allowed per session. `GET /agents` and the `{agentVersionId}` session selector remain compatibility interfaces; do not send both selectors.
+
+Approval or an answer returns a **new Run ID**. Subscribe to that Run to follow the continuation. Disconnecting SSE leaves the task running; replay missed events using `Last-Event-ID`, or explicitly cancel the task chain.
+
+Browser clients should use `fetch` streaming or an SSE client that supports authorization headers. Native `EventSource` cannot set this header. After token expiry, reconnect with a fresh token and the last event ID.
+
+See the [API reference](docs/api.md) for workspace sharing, history and Todos, files, sandbox management, usage, complete payloads, and event types.
+
+## Management console
+
+The Agent editor groups logical versions, separates configuration into keyboard-navigable panels, and shows a summary and diff before publication. Unsaved drafts are protected when navigating or changing connections. See the [delivery plan](docs/agent-console-roadmap.md) and [Studio isolation RFC](docs/agent-studio-rfc.md) for subsequent increments.
+
+Skills supports uploading a single-Skill ZIP into shared hostPath storage, automatically registering an immutable version. The API needs write access to the configured upload namespace; see [deployment](docs/deployment.md#skill-zip-uploads--技能-zip-上传).
+
+After starting the API, open **http://127.0.0.1:8080/admin/ui** (`/admin/agents/ui` remains supported). Demo accepts `DEV_TOKEN`; production uses a UCS JWT with the `harness-admin` role. No separate frontend build is needed.
+
+Manage agent versions and access, skills, MCP servers, and subagent delegation. Inspect deployment capabilities and save tenant defaults for new agent drafts. Deployment credentials, volumes, endpoints, and capability grants are configured server-side.
+
+See the [management console guide](docs/admin-console.md) for operations, token handling, and configuration conflict rules.
 
 ## Connect real services
 
@@ -141,7 +158,18 @@ node --env-file=.env dist/main.js
 node --env-file=.env dist/worker-main.js
 ```
 
-API and Workers must share the database and capability policies. After startup, publish an agent through the admin API before creating a session. Deployment requirements, skill volumes, credentials, and live-model checks are covered in [Deployment](docs/deployment.md).
+API and Workers must share the database and capability policies. After startup, publish an agent through the admin API before creating a session. Deployment requirements, skill host directories (default) or volumes, credentials, and live-model checks are covered in [Deployment](docs/deployment.md).
+
+## Current status and limits
+
+- The management console is included; bring your own chat frontend. Long-term memory and session branching APIs are not provided.
+- File APIs require a session and support UTF-8 files up to **256 KiB**, without binary file support.
+- Subagents intersect parent/child permissions, share task budgets, and support cascading cancellation. Child tasks currently execute sequentially and cannot wait for user interaction.
+- MCP uses deployment service credentials; delegated user OAuth is pending.
+- Budgets and reports account for tokens and estimate costs rather than reconcile provider invoices.
+- Instance snapshot restore retains current workspace files and history, and does not replace volume or database backups. Cube currently rejects cross-workspace snapshot clones.
+
+See [acceptance requirements](docs/acceptance.md) for production gates and validation evidence.
 
 ## Development
 
@@ -154,7 +182,9 @@ npm run smoke
 
 The smoke check starts and stops its own demo on port `18081`, covering a conversation, SSE, idempotency, and file upload/download. Some tests require `openssl`, Python 3, and Bash. PostgreSQL checks use `TEST_DATABASE_URL`; see [CI checks](docs/ci.md).
 
-## Documentation and status
+Native form-validation regression tests run when Chromium is installed at `/usr/bin/chromium` or `/usr/bin/chromium-browser`, or when `CHROMIUM_PATH` is set. They use the development-only `playwright-core` dependency and do not download a browser; without Chromium, only the native-browser test is skipped.
+
+## Documentation
 
 | Guide | Contents |
 | --- | --- |
@@ -165,8 +195,11 @@ The smoke check starts and stops its own demo on port `18081`, covering a conver
 | [Health](docs/health.md) · [Observability](docs/observability.md) | Probes, Worker monitoring, metrics, and tracing |
 | [Implementation](docs/implementation.md) · [Acceptance](docs/acceptance.md) | Implementation notes, evidence, and outstanding production gates |
 | [Integration notes](docs/local-deployment.md) | Real-service deployment findings |
+| [Management console](docs/admin-console.md) · [管理控制台](docs/admin-console.zh-CN.md) | Version publication, access, skills, MCP, and configuration defaults |
 
-This release is a runnable integration baseline; enterprise production acceptance is still pending. It has no bundled frontend, long-term memory, or session branching API. File APIs do not support binary files. MCP uses deployment service credentials; delegated user OAuth is pending. Budget reports estimate costs rather than reconcile provider invoices, and instance snapshots do not back up workspace volumes.
+## Contributing
+
+Issues and pull requests are welcome. Run relevant tests plus `npm run check` and `npm run build` before submitting changes; runtime behavior changes should include regression coverage. See [CI checks](docs/ci.md) for the validation workflow.
 
 ## License
 

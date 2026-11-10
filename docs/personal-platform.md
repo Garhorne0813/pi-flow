@@ -24,7 +24,7 @@ npm start
 npm run worker
 ```
 
-迁移号为 **6**。v6 将已有个人平台的 active Agent 转为当前可编辑配置，并保留旧 Run 快照和等待交互任务；旧版本表仅作历史档案。`harness_*` 表不自动迁移、不重命名，也不推断旧工作区的数据归属。应备份数据库后在部署窗口执行迁移。
+个人 schema 版本为 **6**；迁移文件顺序为 `005_agent_task_versions.sql`、`006_logical_agent_acl.sql`、`007_personal_platform.sql`、`008_editable_agents.sql`，两个 schema 独立管理。v6 将已有个人平台的 active Agent 转为当前可编辑配置，并保留旧 Run 快照和等待交互任务；旧版本表仅作历史档案。`harness_*` 表不自动迁移、不重命名，也不推断旧工作区的数据归属。应备份数据库后在部署窗口执行迁移。
 
 ## 当前契约
 
@@ -48,7 +48,9 @@ npm run worker
 
 目录导入器可将 HOUSE.md、SYSTEM.md、AGENTS.md 和 subagents 文件合并为普通 AgentConfig；运行时只使用数据库中的结果。Demo 仅在清单为空时创建内建示例，重启不会覆盖已有配置。生产镜像不必携带配置目录；如要使用目录导入 CLI，需自行挂载并指定 CONFIG_DIR。
 
-`config/skills/<id>/SKILL.md` 及辅助文件按内容归档；拒绝符号链接，限制文件数和总大小；支持 `disable-model-invocation` 和 `agents/<name>.md`。`npm run skills:deliver` 将版本原子物化到 `SKILL_DELIVER_DIR`。Cube 仍需通过 `SKILL_VOLUMES_JSON` 提供实际只读卷；物化目录本身不等于 Provider 已挂载。MCP 注册可放入 `config/mcp/servers.yaml`，格式为 `{id,endpointRef,allowedTools,enabled}` 数组；endpointRef 必须对应 Worker 的 `MCP_ENDPOINTS_JSON`。
+`config/skills/<id>/SKILL.md` 及辅助文件按内容归档；拒绝符号链接，限制文件数和总大小；支持 `disable-model-invocation` 和 `agents/<name>.md`。`npm run skills:deliver` 将版本原子物化到 `SKILL_DELIVER_DIR`。Cube 支持通过 `SKILL_VOLUMES_JSON` 配置只读卷或受 `SKILL_HOST_ROOTS_JSON` 限制的 hostPath。ZIP 上传通过 `SKILL_UPLOAD_ROOT` 原子写入 hostPath，并由 Provider 只读挂载；目录物化本身不等于 Provider 已挂载。MCP 注册可放入 `config/mcp/servers.yaml`，格式为 `{id,endpointRef,allowedTools,enabled}` 数组；endpointRef 必须对应 Worker 的 `MCP_ENDPOINTS_JSON`。
+
+`/admin/ui` 管理控制台支持个人 Agent 的原地编辑、访问权限、禁用、Skill/MCP 登记和 ZIP 上传。保存 Agent 使用整份清单的 revision 防止并发覆盖，并保留编辑器尚未支持的配置字段；排队和审批续跑任务继续使用原快照。管理配置与 Skill/MCP 写入平台 registry，对所有个人身份一致生效。旧共享引擎保留逻辑版本和 ACL 行为，个人运行不创建或升级 AgentVersion。
 
 管理接口：
 
@@ -64,9 +66,9 @@ COP 适配器当前接受成功响应 `{code:200|0,data:{userId|id,roleKeys?}}` 
 
 以下为明确未覆盖的目标，不应作为当前部署承诺：
 
-1. 阿里云 E2B / OSS、hostpath 存储、多会话租约、Provider 网络防火墙和模板全局覆盖。当前只支持 Cube / demo、持久卷 / memory；不支持的 provider、网络模式和多会话设置会在启动时拒绝。
+1. 阿里云 E2B / OSS、工作区 hostPath 存储、多会话租约、Provider 网络防火墙和模板全局覆盖。当前只支持 Cube / demo、持久卷 / memory；不支持的 provider、网络模式和多会话设置会在启动时拒绝。
 2. 完整规范化的数据模型及横跨所有用户的原子平台预算。当前 Run/Session/Event/Skill/配置/定时任务已有独立表；工作区绑定、审计、记忆计数及部分调度元数据仍使用用户状态文档。已有预算按用户分区执行，不能当作跨用户全局预算。
-3. 管理端 ZIP Skill 上传、旧共享工作区配置的专门迁移工具、Skill 交付回滚与生产对账。Agent 草稿、发布历史与 Git 自动同步不属于当前设计。
+3. 旧共享工作区配置的专门迁移工具、Skill 交付回滚与生产对账。Agent 草稿、发布历史与 Git 自动同步不属于当前设计。
 4. 调度的 jitter、misfire 策略、结束条件、全局交互容量预留；记忆的定期去重/归档/索引修复和完整删除/批量管理 API。
 5. 图片输入契约、200 ms transcript 合并 checkpoint，以及独立的用户/会话 fencing 租约表。当前保留已有 operation ownership、未知结果隔离和 Run lease 故障语义。
 
@@ -83,4 +85,4 @@ TEST_DATABASE_URL=postgres://... REQUIRE_POSTGRES_TESTS=true npm test
 
 依赖审计仍有此前记录的仓库依赖问题（涉及 Zod、body-parser、vendored SDK 的 undici 等），本次配置简化不包含依赖升级。
 
-本轮配置简化验证：139 项测试全部通过、0 跳过，包含真实 PostgreSQL 和 v5→v6 迁移；类型检查、构建、无配置目录 Demo 冒烟、可选目录导入校验、vendored SDK 校验均通过。
+与 main 整合后的验证：285 项测试全部通过，0 失败、0 跳过，包含真实 PostgreSQL、v5→v6 迁移和回滚、个人与旧版控制台浏览器测试、Skill ZIP 上传。类型检查、构建、无配置目录 Demo 冒烟、可选目录导入校验与 vendored SDK 校验通过。最终 UI 文案调整后另跑 20 项控制台测试和 Demo 冒烟，均通过。依赖审计报告 10 项既有问题（3 high、6 moderate、1 low），与 main 的锁文件审计结果相同。
