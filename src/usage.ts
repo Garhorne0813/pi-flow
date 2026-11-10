@@ -95,7 +95,11 @@ export class UsageLedger {
   ) {
     if (!Number.isSafeInteger(inputEstimate) || inputEstimate < 0)
       throw new Fault(500, "INVALID_USAGE_ESTIMATE");
-    return this.store.tx(tenant, (s) => {
+    const transact = <T>(fn: (s: State) => T | Promise<T>) =>
+      this.store.executionTx
+        ? this.store.executionTx(tenant, runId, fn, { usage: true })
+        : this.store.tx(tenant, fn);
+    return transact((s) => {
       const r = s.runs[runId];
       if (!r || r.lease?.owner !== workerId || r.lease.expires < Date.now())
         throw new Fault(409, "LEASE_LOST");
@@ -220,7 +224,11 @@ export class UsageLedger {
     usage: ModelUsage | undefined,
     durationMs: number,
   ) {
-    await this.store.tx(tenant, (s) => {
+    const transact = <T>(fn: (s: State) => T | Promise<T>) =>
+      this.store.executionTx
+        ? this.store.executionTx(tenant, "", fn, { usage: true, requestId })
+        : this.store.tx(tenant, fn);
+    await transact((s) => {
       const r = usageState(s).requests[requestId];
       if (!r) throw new Fault(404, "USAGE_REQUEST_NOT_FOUND");
       if (r.status === "confirmed") return;

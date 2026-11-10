@@ -165,7 +165,13 @@ export function buildAPI(
   });
   app.addHook("onResponse", async (req, reply) => {
     const a = actors.get(req);
-    if (a)
+    if (
+      a &&
+      !(
+        service instanceof PersonalService &&
+        ["GET", "HEAD", "OPTIONS"].includes(req.method)
+      )
+    )
       await service.store.appendAudit(a.tenantId, {
         id: id(),
         timestamp: new Date().toISOString(),
@@ -322,20 +328,32 @@ export function buildAPI(
   app.get("/api/v1/admin/usage", async (req) => {
     const a = actor(req);
     admin(a);
-    return service.store.read(a.tenantId, (s) =>
-      usageReport(s, policyFromEnv()),
-    );
+    return service.store.readUsage
+      ? service.store.readUsage(a.tenantId, undefined, (s) =>
+          usageReport(s, policyFromEnv()),
+        )
+      : service.store.readMetadata(a.tenantId, ["usage", "workspaces"], (s) =>
+          usageReport(s, policyFromEnv()),
+        );
   });
   app.get("/api/v1/usage", async (req) => {
     const a = actor(req);
-    return service.store.read(a.tenantId, (s) =>
-      usageReport(s, policyFromEnv(), a.userId),
-    );
+    return service.store.readUsage
+      ? service.store.readUsage(a.tenantId, undefined, (s) =>
+          usageReport(s, policyFromEnv(), a.userId),
+        )
+      : service.store.readMetadata(a.tenantId, ["usage", "workspaces"], (s) =>
+          usageReport(s, policyFromEnv(), a.userId),
+        );
   });
   app.get("/api/v1/runs/:id/usage", async (req) => {
     const a = actor(req),
       rid = uuid.parse(params(req.params).id);
-    return service.store.read(a.tenantId, (s) => {
+    const read = <T>(fn: (s: State) => T) =>
+      service.store.readUsage
+        ? service.store.readUsage(a.tenantId, rid, fn)
+        : service.store.read(a.tenantId, fn);
+    return read((s) => {
       run(s, a, rid);
       return usageReport(s, policyFromEnv(), undefined, rid);
     });
@@ -893,7 +911,11 @@ export function buildAPI(
   app.get("/api/v1/sessions/:id", async (req) => {
     const a = actor(req),
       sid = uuid.parse(params(req.params).id);
-    return service.store.read(a.tenantId, (s) => ({
+    const read = service.store.readSession
+      ? <T>(fn: (s: State) => T) =>
+          service.store.readSession!(a.tenantId, sid, fn)
+      : <T>(fn: (s: State) => T) => service.store.read(a.tenantId, fn);
+    return read((s) => ({
       ...session(s, a, sid),
       todos: s.todos[sid] ?? [],
     }));
@@ -978,8 +1000,11 @@ export function buildAPI(
       0,
       (s) => run(s, a, rid).state,
     );
-    if (a.expiresAt !== undefined && Date.now() >= a.expiresAt)
+    const subscription = await service.store.watchEvents?.(a.tenantId, rid);
+    if (a.expiresAt !== undefined && Date.now() >= a.expiresAt) {
+      subscription?.close();
       throw new Fault(401, "AUTHENTICATION_EXPIRED");
+    }
     reply.hijack();
     telemetry.count("sse_active", 1);
     reply.raw.writeHead(200, {
@@ -1045,6 +1070,7 @@ export function buildAPI(
       clearTimeout(expiryTimer);
       clearInterval(actorTimer);
       disconnected.abort();
+      subscription?.close();
       telemetry.count("sse_active", -1);
     });
     armExpiry();
@@ -1103,12 +1129,14 @@ export function buildAPI(
           await new Promise<void>((resolve) => setImmediate(resolve));
           continue;
         }
-        await service.store.waitForEvents(
-          a.tenantId,
-          rid,
-          250,
-          disconnected.signal,
-        );
+        if (subscription) await subscription.wait(5000, disconnected.signal);
+        else
+          await service.store.waitForEvents(
+            a.tenantId,
+            rid,
+            250,
+            disconnected.signal,
+          );
       }
     } catch {
       if (!closed)
@@ -1117,6 +1145,7 @@ export function buildAPI(
         );
     } finally {
       closed = true;
+      subscription?.close();
       clearInterval(actorTimer);
       clearTimeout(expiryTimer);
       reply.raw.end();

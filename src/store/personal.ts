@@ -31,6 +31,13 @@ export function personalStore(backing: Store, registry: Registry): Store {
   };
   return new Proxy(backing, {
     get(target, key) {
+      if (key === "executionTx" && target.executionTx)
+        return async (
+          user: string,
+          rid: string,
+          fn: (s: State) => unknown,
+          scope?: import("../personal-execution-store.js").ExecutionScope,
+        ) => target.executionTx!(user, rid, await overlay(fn), scope);
       if (key === "workspaceTx" && target.workspaceTx)
         return async (user: string, fn: (s: State) => unknown) =>
           target.workspaceTx!(user, await overlay(fn));
@@ -62,7 +69,14 @@ export function personalStore(backing: Store, registry: Registry): Store {
           user: string,
           requested: (keyof State)[],
           fn: (s: State) => unknown,
-        ) => target.readMetadata(user, requested, await overlay(fn));
+        ) =>
+          target.readMetadata(
+            user,
+            requested,
+            requested.some((k) => keys.includes(k as (typeof keys)[number]))
+              ? await overlay(fn)
+              : fn,
+          );
       const value = Reflect.get(target, key);
       return typeof value === "function" ? value.bind(target) : value;
     },

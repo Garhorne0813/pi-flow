@@ -683,7 +683,11 @@ export class HarnessService {
     task: string,
     owner: string,
   ) {
-    return this.store.tx(tenant, (s) => {
+    const transact = <T>(fn: (s: State) => T | Promise<T>) =>
+      this.store.executionTx
+        ? this.store.executionTx(tenant, parentId, fn)
+        : this.store.tx(tenant, fn);
+    return transact((s) => {
       const p = s.runs[parentId]!;
       const { ses, config } = authorizedRun(s, p);
       const requestedKey = avId;

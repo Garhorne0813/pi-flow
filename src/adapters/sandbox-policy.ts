@@ -71,9 +71,13 @@ export class SandboxCapacity {
   }
   adoptLegacy() {
     return (this.adoption ??= (async () => {
+      if (this.store.adoptLegacyCapacity)
+        return this.store.adoptLegacyCapacity();
       for (const tenant of await this.store.tenants()) {
-        const workspaces = await this.store.read(tenant, (s) =>
-          Object.values(s.workspaces).filter((w) => w.sandboxId),
+        const workspaces = await this.store.readMetadata(
+          tenant,
+          ["workspaces"],
+          (s) => Object.values(s.workspaces).filter((w) => w.sandboxId),
         );
         await this.store.capacityTx((s) => {
           for (const w of workspaces) {

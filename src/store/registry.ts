@@ -56,21 +56,36 @@ export class MemoryRegistry implements Registry {
   }
 }
 export class PostgresRegistry implements Registry {
+  private cache?: { revision: string; state: State };
   constructor(private pool: pg.Pool) {}
   async read<T>(fn: (s: State) => T | Promise<T>) {
     const context = personalConnection.getStore();
     const source = context?.pool === this.pool ? context.client : this.pool;
-    const r = await source.query(`SELECT document,
-      COALESCE((SELECT jsonb_object_agg(id,data) FROM personal_agents),'{}'::jsonb) AS agents
-      FROM platform_config WHERE scope='runtime'`);
-    return structuredClone(
-      await fn({
-        ...emptyState(),
-        ...r.rows[0]?.document,
-        managedAgents: r.rows[0]?.agents ?? {},
-      }),
+    const cached = this.cache;
+    const r = await source.query(
+      `SELECT revision::text AS revision,
+      CASE WHEN revision::text=$1 THEN NULL ELSE document END AS document,
+      CASE WHEN revision::text=$1 THEN NULL ELSE COALESCE((SELECT jsonb_object_agg(id,data) FROM personal_agents),'{}'::jsonb) END AS agents
+      FROM platform_config WHERE scope='runtime'`,
+      [cached?.revision ?? null],
     );
+    const row = r.rows[0];
+    const state =
+      row && cached && cached.revision === row.revision
+        ? cached.state
+        : {
+            ...emptyState(),
+            ...row?.document,
+            managedAgents: row?.agents ?? {},
+          };
+    if (
+      row &&
+      (!this.cache || BigInt(row.revision) >= BigInt(this.cache.revision))
+    )
+      this.cache = { revision: row.revision, state };
+    return structuredClone(await fn(structuredClone(state)));
   }
+
   async tx<T>(fn: (s: State) => T | Promise<T>): Promise<T> {
     const c = await this.pool.connect();
     try {
@@ -143,12 +158,22 @@ export class PostgresRegistry implements Registry {
     if (!u?.enabled || u.id !== userId) throw new Fault(403, "USER_DISABLED");
   }
   async identify(issuer: string, subject: string) {
-    const r = await this.pool.query(
-      "INSERT INTO personal_users(id,issuer,subject) VALUES($1,$2,$3) ON CONFLICT(issuer,subject) DO UPDATE SET subject=excluded.subject RETURNING id,enabled",
-      [id(), issuer, subject],
-    );
-    if (!r.rows[0].enabled) throw new Fault(403, "USER_DISABLED");
-    return r.rows[0].id as string;
+    const lookup = () =>
+      this.pool.query(
+        "SELECT id,enabled FROM personal_users WHERE issuer=$1 AND subject=$2",
+        [issuer, subject],
+      );
+    let row = (await lookup()).rows[0];
+    if (!row)
+      row =
+        (
+          await this.pool.query(
+            "INSERT INTO personal_users(id,issuer,subject) VALUES($1,$2,$3) ON CONFLICT(issuer,subject) DO NOTHING RETURNING id,enabled",
+            [id(), issuer, subject],
+          )
+        ).rows[0] ?? (await lookup()).rows[0];
+    if (!row?.enabled) throw new Fault(403, "USER_DISABLED");
+    return row.id as string;
   }
 }
 export async function principal(registry: Registry, a: Actor): Promise<Actor> {

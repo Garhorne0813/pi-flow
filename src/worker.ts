@@ -108,9 +108,15 @@ export class Worker {
       });
     }
     if (this.scheduler) await this.scheduler.tick();
-    const tenants = (await this.service.store.tenants()).sort();
+    if (this.active.size >= this.concurrency) return;
+    const work = this.service.store.listRunWork
+      ? await this.service.store.listRunWork(Date.now(), 64, this.lastTenant)
+      : undefined;
+    const tenants = work
+      ? [...new Set(work.map((w) => w.user))]
+      : (await this.service.store.tenants()).sort();
     let start =
-      this.lastTenant === undefined
+      work || this.lastTenant === undefined
         ? 0
         : tenants.findIndex((t) => t > this.lastTenant!);
     if (start < 0) start = 0;
@@ -119,11 +125,9 @@ export class Worker {
       if (this.stopping || this.active.size >= this.concurrency) break;
       this.lastTenant = tenant;
       // One bounded indexed scan; claims/recovery recheck under the Run lock.
-      const candidates = await this.service.store.listClaimableRuns(
-        tenant,
-        Date.now(),
-        64,
-      );
+      const candidates = work
+        ? work.filter((w) => w.user === tenant).map((w) => w.runId)
+        : await this.service.store.listClaimableRuns(tenant, Date.now(), 64);
       let r: Run | undefined;
       for (const rid of candidates) {
         const claim = <T>(fn: (s: State) => T) =>
@@ -236,6 +240,14 @@ export class Worker {
     return r;
   }
   async execute(tenant: string, initial: Run): Promise<void> {
+    const transact = <T>(
+      _user: string,
+      fn: (s: State) => T | Promise<T>,
+      scope?: import("./personal-execution-store.js").ExecutionScope,
+    ) =>
+      this.service.store.executionTx
+        ? this.service.store.executionTx(tenant, initial.id, fn, scope)
+        : this.service.store.tx(tenant, fn);
     const started = Date.now();
     const controller = new AbortController();
     this.controllers.add(controller);
@@ -250,19 +262,39 @@ export class Worker {
     );
     let heartbeatCount = 0;
     const heartbeat = setInterval(() => {
+      const beat = ++heartbeatCount;
       void (
-        ++heartbeatCount % 5 === 0
+        beat % 5 === 0
           ? this.service.verifyActor(initial.actor)
           : Promise.resolve()
       )
         .then(() =>
-          this.service.store.runTx(tenant, initial.id, (s) => {
-            const r = this.owned(s, initial.id);
-            authorizedRun(s, r);
-            if ((r.deadline ?? 0) < Date.now())
-              throw new Fault(408, "RUN_TIMEOUT");
-            r.lease!.expires = Date.now() + 30000;
-          }),
+          this.service.store.renewRunLease
+            ? (async () => {
+                await this.service.store.readRun(tenant, initial.id, (s) => {
+                  const r = this.owned(s, initial.id);
+                  authorizedRun(s, r);
+                  if ((r.deadline ?? 0) < Date.now())
+                    throw new Fault(408, "RUN_TIMEOUT");
+                });
+                if (
+                  beat % 5 === 0 &&
+                  !(await this.service.store.renewRunLease!(
+                    tenant,
+                    initial.id,
+                    this.owner,
+                    Date.now(),
+                  ))
+                )
+                  throw new Fault(409, "LEASE_LOST");
+              })()
+            : this.service.store.runTx(tenant, initial.id, (s) => {
+                const r = this.owned(s, initial.id);
+                authorizedRun(s, r);
+                if ((r.deadline ?? 0) < Date.now())
+                  throw new Fault(408, "RUN_TIMEOUT");
+                r.lease!.expires = Date.now() + 30000;
+              }),
         )
         .catch((e) => {
           telemetry.error("heartbeat", e, {
@@ -284,9 +316,21 @@ export class Worker {
         fault = "STREAM_PERSISTENCE_FAILED";
         controller.abort(e);
       },
+      16384,
+      131072,
+      200,
+      this.service.store.appendRunEvents
+        ? (events) =>
+            this.service.store.appendRunEvents!(
+              tenant,
+              initial.id,
+              this.owner,
+              events,
+            )
+        : undefined,
     );
     const emit = (type: string, data: unknown) => batcher.emit(type, data);
-    const get = async () => {
+    const get = async (includeEntries = true) => {
       await this.service.verifyActor(initial.actor);
       return this.service.store.readRun(
         tenant,
@@ -303,7 +347,7 @@ export class Worker {
             skills: config.skills.map((k) => s.skills[k]!),
           };
         },
-        true,
+        includeEntries,
       );
     };
     const defer = async (kind: "question" | "approval", payload: unknown) => {
@@ -312,7 +356,7 @@ export class Worker {
       if (initial.parentRunId)
         throw new Fault(409, "SUBAGENT_INTERACTION_UNSUPPORTED");
       await batcher.flush();
-      await this.service.store.tx(tenant, (s) => {
+      await transact(tenant, (s) => {
         const r = this.owned(s, initial.id);
         authorizedRun(s, r);
         const pending = Object.values(s.interactions).find(
@@ -429,7 +473,7 @@ export class Worker {
       )
         return defer("approval", { name, args });
       if (!approved && (mcpTool || ["write", "edit", "bash"].includes(bare)))
-        await this.service.store.tx(tenant, (s) => {
+        await transact(tenant, (s) => {
           const r = this.owned(s, initial.id);
           audit(s, r.actor, "tool.auto_approved", name);
           event(s, r, "tool.auto_approved", {
@@ -438,7 +482,7 @@ export class Worker {
           });
         });
       const callId = id();
-      await this.service.store.tx(tenant, (s) => {
+      await transact(tenant, (s) => {
         const r = this.owned(s, initial.id);
         const { config } = authorizedRun(s, r);
         const root = taskRoot(s, r);
@@ -513,7 +557,7 @@ export class Worker {
         } else if (bare === "ask_user_question")
           return await defer("question", { question: args.question });
         else if (bare === "todo") {
-          await this.service.store.tx(tenant, (s) => {
+          await transact(tenant, (s) => {
             const r = this.owned(s, initial.id);
             s.todos[r.sessionId] = args.items;
             event(s, r, "todo.updated", { items: args.items });
@@ -528,19 +572,23 @@ export class Worker {
             this.owner,
           );
           await this.execute(tenant, child);
-          result = await this.service.store.tx(tenant, (s) => {
-            const cr = s.runs[child.id]!;
-            const messages = s.events
-              .filter(
-                (e) => e.runId === cr.id && e.type === "message.completed",
-              )
-              .map((e) => e.data);
-            event(s, s.runs[initial.id]!, "subagent.completed", {
-              childRunId: cr.id,
-              state: cr.state,
-            });
-            return { runId: cr.id, state: cr.state, messages };
-          });
+          result = await transact(
+            tenant,
+            (s) => {
+              const cr = s.runs[child.id]!;
+              const messages = s.events
+                .filter(
+                  (e) => e.runId === cr.id && e.type === "message.completed",
+                )
+                .map((e) => e.data);
+              event(s, s.runs[initial.id]!, "subagent.completed", {
+                childRunId: cr.id,
+                state: cr.state,
+              });
+              return { runId: cr.id, state: cr.state, messages };
+            },
+            { completionEvents: true },
+          );
         } else {
           result = await this.sandbox.execute(
             initial.actor,
@@ -567,7 +615,7 @@ export class Worker {
             authorize,
           );
           if (bare === "read") {
-            const fresh = await get();
+            const fresh = await get(false);
             const path = (result as { path?: string }).path;
             if (fresh.skills.length && typeof path !== "string")
               throw new Fault(409, "SKILL_IDENTITY_UNCONFIRMED");
@@ -674,7 +722,7 @@ export class Worker {
           specs: [...specs(ctx.config.tools), ...mcp.specs],
           signal: controller.signal,
           call: async (name, args) => {
-            const fresh = await get();
+            const fresh = await get(false);
             return executeTool(
               name,
               args,
@@ -686,7 +734,7 @@ export class Worker {
           },
           emit,
           consume: async (tokens, turn) => {
-            const code = await this.service.store.tx(tenant, (s) => {
+            const code = await transact(tenant, (s) => {
               const r = this.owned(s, initial.id);
               const { config } = authorizedRun(s, r);
               const root = taskRoot(s, r);
@@ -708,7 +756,7 @@ export class Worker {
             if (code) throw new Fault(429, code);
           },
           checkpoint: (entries) =>
-            this.service.store.tx(tenant, (s) => {
+            transact(tenant, (s) => {
               const r = this.owned(s, initial.id);
               s.sessions[r.sessionId]!.entries = entries;
             }),
@@ -734,7 +782,7 @@ export class Worker {
         requestId: initial.requestId,
       });
       if (!waiting)
-        await this.service.store.tx(tenant, (s) => {
+        await transact(tenant, (s) => {
           const r = s.runs[initial.id];
           if (!r || r.lease?.owner !== this.owner || terminal(r.state)) return;
           const code =

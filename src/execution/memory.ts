@@ -96,7 +96,9 @@ export class MemoryManager {
     signal.throwIfAborted();
     const reservation = id();
     const transact = <T>(fn: (s: State) => T | Promise<T>) =>
-      this.store.tx(a.tenantId, fn);
+      !manual && this.store.executionTx
+        ? this.store.executionTx(a.tenantId, runId, fn)
+        : this.store.tx(a.tenantId, fn);
     await transact((s) => {
       authorize?.(s);
       if (!manual) {

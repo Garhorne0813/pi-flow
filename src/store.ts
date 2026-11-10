@@ -22,6 +22,54 @@ import type {
 } from "./adapters/sandbox-policy.js";
 import { SCHEMA_VERSION, type WorkerHealth } from "./health.js";
 export interface Store {
+  readUsage?<T>(
+    user: string,
+    runId: string | undefined,
+    fn: (s: State) => T | Promise<T>,
+  ): Promise<T>;
+  appendRunEvents?(
+    user: string,
+    runId: string,
+    owner: string,
+    events: { type: string; data: unknown }[],
+  ): Promise<void>;
+  executionTx?<T>(
+    tenant: string,
+    runId: string,
+    fn: (s: State) => T | Promise<T>,
+    scope?: import("./personal-execution-store.js").ExecutionScope,
+  ): Promise<T>;
+  listRunWork?(
+    now: number,
+    limit: number,
+    afterUser?: string,
+  ): Promise<{ user: string; runId: string }[]>;
+  renewRunLease?(
+    user: string,
+    runId: string,
+    owner: string,
+    now: number,
+  ): Promise<boolean>;
+  readSession?<T>(
+    user: string,
+    sessionId: string,
+    fn: (s: State) => T | Promise<T>,
+  ): Promise<T>;
+  watchEvents?(
+    user: string,
+    runId: string,
+  ): Promise<{
+    wait: (ms: number, signal?: AbortSignal) => Promise<void>;
+    close: () => void;
+  }>;
+  listSandboxMaintenance?(
+    now: number,
+    pauseMs: number,
+    releaseMs: number,
+    intervalMs: number,
+  ): Promise<{ user: string; workspace: import("./domain.js").Workspace }[]>;
+  adoptLegacyCapacity?(): Promise<void>;
+
   listSessions?(
     tenant: string,
     userId: string,

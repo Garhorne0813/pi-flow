@@ -1,7 +1,17 @@
 import type pg from "pg";
+import { loadRecords, saveRecords } from "./personal-records.js";
 import { emptyState, type State, type Run } from "./domain.js";
 export function metadata(s: State) {
-  const { runs, sessions, events, schedules, scheduleFires, ...rest } = s;
+  const {
+    runs,
+    sessions,
+    events,
+    schedules,
+    scheduleFires,
+    audit,
+    usage,
+    ...rest
+  } = s;
   return rest;
 }
 export async function loadState(
@@ -10,14 +20,14 @@ export async function loadState(
   lock = false,
   runId?: string,
   targetLock = true,
-  options: { claim?: boolean; workspaceOnly?: boolean } = {},
+  options: { claim?: boolean; workspaceOnly?: boolean; entries?: boolean } = {},
 ): Promise<State> {
   const row = await c.query(
-    (options.claim || options.workspaceOnly
+    (options.claim || options.workspaceOnly || runId
       ? "SELECT jsonb_build_object('workspaces',state->'workspaces') AS state"
       : "SELECT state") +
       " FROM personal_user_state WHERE user_id=$1" +
-      (lock ? " FOR UPDATE" : runId && targetLock ? " FOR SHARE" : ""),
+      (lock ? " FOR NO KEY UPDATE" : runId && targetLock ? " FOR SHARE" : ""),
     [tenant],
   );
   const s = { ...emptyState(), ...row.rows[0]?.state } as State;
@@ -25,10 +35,20 @@ export async function loadState(
     // Same metadata row lock as Run admission, so file lease acquisition and
     // the active-Run check remain atomic across API/Worker clients.
     const active = await c.query(
-      "SELECT data FROM personal_runs WHERE user_id=$1 AND state='RUNNING' ORDER BY run_id FOR UPDATE",
+      `WITH RECURSIVE active AS (
+      SELECT data FROM personal_runs WHERE user_id=$1 AND state NOT IN ('COMPLETED','FAILED','CANCELLED')
+      UNION SELECT p.data FROM personal_runs p JOIN active a ON p.run_id=a.data->>'parentRunId' OR p.run_id=a.data->>'rootRunId' WHERE p.user_id=$1
+    ) SELECT data FROM active`,
       [tenant],
     );
     s.runs = Object.fromEntries(active.rows.map(({ data }) => [data.id, data]));
+    const sessions = await c.query(
+      "SELECT data-'entries' AS data FROM personal_sessions WHERE user_id=$1 AND session_id=ANY($2::text[])",
+      [tenant, [...new Set(active.rows.map((r) => r.data.sessionId))]],
+    );
+    s.sessions = Object.fromEntries(
+      sessions.rows.map(({ data }) => [data.id, data]),
+    );
     return s;
   }
   const runs = await c.query(
@@ -58,7 +78,7 @@ export async function loadState(
   ];
   const sessions = await c.query(
     "SELECT " +
-      (options.claim || (runId && !targetLock)
+      (options.claim || (runId && !options.entries)
         ? "data - 'entries' AS data"
         : "data") +
       " FROM personal_sessions WHERE user_id=$1" +
@@ -83,6 +103,7 @@ export async function loadState(
         )
       ).rows.map((row) => row.data);
   if (!runId) {
+    await loadRecords(c, tenant, s, ["audit", "usage"]);
     const tasks = await c.query(
       "SELECT data FROM personal_scheduled_tasks WHERE user_id=$1",
       [tenant],
@@ -136,13 +157,20 @@ export async function saveEvents(
     [tenant, before.sequence, newEvents.length],
   );
   let cursor = Number(allocated.rows[0].cursor) - newEvents.length;
-  for (const e of newEvents) {
-    e.eventId = ++cursor;
-    await c.query(
-      "INSERT INTO personal_run_events(user_id,run_id,event_id,data) VALUES($1,$2,$3,$4)",
-      [tenant, e.runId, e.eventId, JSON.stringify(e)],
+  for (const runId of new Set(newEvents.map((e) => e.runId))) {
+    const group = newEvents.filter((e) => e.runId === runId);
+    const allocated = await c.query(
+      "INSERT INTO personal_run_event_counters(user_id,run_id,cursor) VALUES($1,$2,$3) ON CONFLICT(user_id,run_id) DO UPDATE SET cursor=personal_run_event_counters.cursor+$3 RETURNING cursor",
+      [tenant, runId, group.length],
     );
+    let seq = Number(allocated.rows[0].cursor) - group.length;
+    for (const e of group) e.seq = ++seq;
   }
+  for (const e of newEvents) e.eventId = ++cursor;
+  await c.query(
+    "INSERT INTO personal_run_events(user_id,run_id,event_id,data) SELECT $1,v->>'runId',(v->>'eventId')::bigint,v FROM jsonb_array_elements($2::jsonb) v",
+    [tenant, JSON.stringify(newEvents)],
+  );
   after.sequence = Math.max(after.sequence, cursor);
   for (const runId of new Set(newEvents.map((e) => e.runId)))
     await c.query("SELECT pg_notify('harness_run_event',$1)", [
@@ -162,6 +190,10 @@ export async function saveState(
         "INSERT INTO personal_sessions(user_id,session_id,workspace_id,data) VALUES($1,$2,$3,$4) ON CONFLICT(user_id,session_id) DO UPDATE SET data=excluded.data",
         [tenant, sid, s.workspaceId, JSON.stringify(s)],
       );
+  for (const [rid, r] of Object.entries(after.runs)) {
+    if (before.runs[rid]?.eventSeq === undefined) delete r.eventSeq;
+    else r.eventSeq = before.runs[rid]!.eventSeq;
+  }
   for (const [rid, r] of Object.entries(after.runs))
     if (JSON.stringify(before.runs[rid]) !== JSON.stringify(r))
       await saveRun(c, tenant, r);
@@ -194,6 +226,7 @@ export async function saveState(
         ],
       );
   await saveEvents(c, tenant, before, after);
+  await saveRecords(c, tenant, before, after);
   if (
     !skipMetadata &&
     JSON.stringify(metadata(before)) !== JSON.stringify(metadata(after))
@@ -253,6 +286,11 @@ SELECT jsonb_build_object(
    AND event_id>$3 ORDER BY event_id LIMIT $4
  ) page), '[]'::jsonb) AS events
 FROM personal_user_state t WHERE t.user_id=$1`;
+// Authorization reads never open the Event relation, even for LIMIT 0.
+export const authorizationSnapshotQuery = runSnapshotQuery.replace(
+  "FROM personal_run_events",
+  "FROM (SELECT $1::text AS user_id,$2::text AS run_id,0::bigint AS event_id,'{}'::jsonb AS data WHERE false) no_events",
+);
 export function snapshotState(row?: {
   state: Partial<State>;
   runs: Run[];

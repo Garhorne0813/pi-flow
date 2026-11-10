@@ -16,7 +16,7 @@ function configure(
   s.policy = input.policy;
   return replaceAgents(s, input.agents, a);
 }
-import { AgentConfig, id, event } from "../src/domain.js";
+import { AgentConfig, id, event, emptyState } from "../src/domain.js";
 import { Worker } from "../src/worker.js";
 import { DemoSandbox, SandboxManager } from "../src/adapters/sandbox.js";
 import { DemoRuntime } from "../src/runtime.js";
@@ -259,7 +259,28 @@ test(
           }),
         ],
       );
-      await backing.tx(actor.tenantId, (s) => {
+      const seedLegacy = async (user: string, fn: (s: State) => void) => {
+        const state = emptyState();
+        fn(state);
+        const { sessions, runs, events, ...meta } = state;
+        await backing.pool.query(
+          "INSERT INTO personal_user_state(user_id,state) VALUES($1,$2)",
+          [user, JSON.stringify(meta)],
+        );
+        for (const v of Object.values(sessions))
+          await backing.pool.query(
+            "INSERT INTO personal_sessions(user_id,session_id,workspace_id,data) VALUES($1,$2,$3,$4)",
+            [user, v.id, v.workspaceId, JSON.stringify(v)],
+          );
+        const { saveRun } = await import("../src/personal-run-store.js");
+        const c = await backing.pool.connect();
+        try {
+          for (const r of Object.values(runs)) await saveRun(c, user, r);
+        } finally {
+          c.release();
+        }
+      };
+      await seedLegacy(actor.tenantId, (s) => {
         s.workspaces[actor.userId] = {
           id: actor.userId,
           name: "Personal",
@@ -314,6 +335,10 @@ test(
           "migrations/010_personal_session_pagination.sql",
           "utf8",
         ),
+      );
+      await assert.rejects(backing.ready(), /SCHEMA_MISMATCH/);
+      await backing.pool.query(
+        await readFile("migrations/011_personal_runtime_hot_paths.sql", "utf8"),
       );
       await backing.ready();
       const store = personalStore(backing, registry),
@@ -845,7 +870,7 @@ test(
 );
 
 test(
-  "personal readiness requires committed migrations 009/010, normalized schedules and all valid hot-path indexes",
+  "personal readiness requires committed migrations 009/010/011, normalized schedules and all valid hot-path indexes",
   { skip: !url },
   async () => {
     const { ScheduleService } = await import("../src/schedules/service.js"),
@@ -858,11 +883,24 @@ test(
       new SandboxManager(f.sa, new DemoSandbox()),
     );
     try {
-      const task = await scheduler.create(f.actor, {
-        agentId: "a",
-        cron: "* * * * *",
-        prompt: "legacy",
-      });
+      const { ScheduleInput } = await import("../src/schedules/service.js");
+      const task = {
+        ...ScheduleInput.parse({
+          agentId: "a",
+          cron: "* * * * *",
+          prompt: "legacy",
+        }),
+        id: id(),
+        userId: f.actor.userId,
+        actor: f.actor,
+        nextFireAt: Date.now(),
+        failures: 0,
+        createdAt: new Date().toISOString(),
+      };
+      await f.a.pool.query(
+        "INSERT INTO personal_user_state(user_id,state) VALUES($1,$2)",
+        [f.actor.userId, JSON.stringify(emptyState())],
+      );
       const fire = {
         id: id(),
         scheduleId: task.id,
@@ -895,6 +933,11 @@ test(
         "\n" +
         (await readFile(
           "migrations/010_personal_session_pagination.sql",
+          "utf8",
+        )) +
+        "\n" +
+        (await readFile(
+          "migrations/011_personal_runtime_hot_paths.sql",
           "utf8",
         ));
       const c = await f.a.pool.connect();
@@ -934,13 +977,19 @@ test(
             )
           ).rows[0].version,
         ),
-        8,
+        9,
       );
       for (const index of [
         "personal_runs_running",
         "personal_scheduled_tasks_due",
         "personal_schedule_fires_pending",
         "personal_sessions_list",
+        "personal_runs_task",
+        "personal_runs_global_queued",
+        "personal_usage_period",
+        "personal_usage_run",
+        "personal_resources_user",
+        "personal_workspace_idle",
       ]) {
         await f.a.pool.query(`DROP INDEX ${index}`);
         await assert.rejects(f.a.ready(), /SCHEMA_INDEXES_INCOMPLETE/);
@@ -1075,11 +1124,25 @@ test(
           f.actor.userId,
           JSON.stringify({
             custom: { preserved: true },
-            audit: [{ id: "old-audit" }],
-            usage: { requests: {}, resources: [{ state: "old-resource" }] },
           }),
         ],
       );
+      await f.sa.tx(f.actor.userId, (s) => {
+        s.audit.push({
+          id: "old-audit",
+          timestamp: new Date().toISOString(),
+          actorId: f.actor.userId,
+          action: "seed",
+          resource: "seed",
+          result: "ok",
+        });
+        (s.usage ??= { requests: {}, resources: [] }).resources.push({
+          state: "released",
+          sandboxId: "old-resource",
+          at: 0,
+          workspaceId: f.actor.userId,
+        });
+      });
       const session = await f.service.createPersonalSession(f.actor, {
         agentId: "a",
       });
@@ -1109,19 +1172,26 @@ test(
         )
       ).rows[0].state;
       assert.deepEqual(row.custom, { preserved: true });
-      assert.ok(row.audit.some((a: { id: string }) => a.id === "old-audit"));
+      const records = await f.sa.readMetadata(
+        f.actor.userId,
+        ["audit", "usage"],
+        (s) => ({ audit: s.audit, usage: s.usage }),
+      );
       assert.ok(
-        row.audit.some(
+        records.audit.some((a: { id: string }) => a.id === "old-audit"),
+      );
+      assert.ok(
+        records.audit.some(
           (a: { action: string }) => a.action === "sandbox.creation.dispatched",
         ),
       );
       assert.ok(
-        row.usage.resources.some(
-          (r: { state: string }) => r.state === "old-resource",
+        records.usage!.resources.some(
+          (r: { sandboxId?: string }) => r.sandboxId === "old-resource",
         ),
       );
       assert.ok(
-        row.usage.resources.some(
+        records.usage!.resources.some(
           (r: { state: string }) => r.state === "active",
         ),
       );
@@ -1400,6 +1470,359 @@ test(
     } finally {
       release();
       await first;
+      await f.close();
+    }
+  },
+);
+
+test(
+  "existing identity lookup never rewrites users and concurrent first registration creates one identity",
+  { skip: !url },
+  async () => {
+    const f = await reviewDatabase();
+    try {
+      const initial = (
+        await f.a.pool.query(
+          "SELECT xmin::text FROM personal_users WHERE id=$1",
+          [f.actor.userId],
+        )
+      ).rows[0].xmin;
+      await Promise.all(
+        Array.from({ length: 20 }, () =>
+          f.ar.identify(f.actor.issuer!, f.actor.subject!),
+        ),
+      );
+      assert.equal(
+        (
+          await f.a.pool.query(
+            "SELECT xmin::text FROM personal_users WHERE id=$1",
+            [f.actor.userId],
+          )
+        ).rows[0].xmin,
+        initial,
+      );
+      const ids = await Promise.all(
+        Array.from({ length: 20 }, (_, i) =>
+          (i % 2 ? f.ar : f.br).identify("urn:race", "new-user"),
+        ),
+      );
+      assert.equal(new Set(ids).size, 1);
+      assert.equal(
+        (
+          await f.a.pool.query(
+            "SELECT count(*)::int n FROM personal_users WHERE issuer='urn:race'",
+          )
+        ).rows[0].n,
+        1,
+      );
+      await f.a.pool.query(
+        "UPDATE personal_users SET enabled=false WHERE id=$1",
+        [ids[0]],
+      );
+      await assert.rejects(f.ar.identify("urn:race", "new-user"), {
+        code: "USER_DISABLED",
+      });
+    } finally {
+      await f.close();
+    }
+  },
+);
+test(
+  "normalized model budgets include other tasks, reserve atomically and settle idempotently across clients",
+  { skip: !url },
+  async () => {
+    const { UsageLedger, UsagePolicy } = await import("../src/usage.js");
+    const f = await reviewDatabase();
+    try {
+      const ses = await f.service.createPersonalSession(f.actor, {
+          agentId: "a",
+        }),
+        r = await f.service.submit(f.actor, ses.id, "budget");
+      await f.sa.runTx(f.actor.userId, r.id, (s) => {
+        s.runs[r.id]!.state = "RUNNING";
+        s.runs[r.id]!.lease = { owner: "owner", expires: Date.now() + 30000 };
+      });
+      const prior = {
+        id: "previous",
+        runId: "previous-task",
+        userId: f.actor.userId,
+        workspaceId: f.actor.userId,
+        agentId: "a",
+        model: "demo/demo",
+        at: new Date().toISOString(),
+        status: "confirmed",
+        tokens: 400,
+        estimatedTokens: 400,
+        maxOutputTokens: 400,
+        costMicros: null,
+        estimatedCostMicros: null,
+        pricingVersion: null,
+      };
+      await f.a.pool.query(
+        "INSERT INTO personal_usage_requests(user_id,id,run_id,at,data) VALUES($1,$2,$3,$4,$5)",
+        [
+          f.actor.userId,
+          prior.id,
+          prior.runId,
+          prior.at,
+          JSON.stringify(prior),
+        ],
+      );
+      const ledger = new UsageLedger(
+          f.sa,
+          UsagePolicy.parse({ userDailyTokens: 500 }),
+        ),
+        other = new UsageLedger(
+          f.sb,
+          UsagePolicy.parse({ userDailyTokens: 500 }),
+        );
+      const reserved = await ledger.reserve(f.actor.userId, r.id, 10, "owner");
+      assert.equal(reserved.maxOutputTokens, 90);
+      await assert.rejects(other.reserve(f.actor.userId, r.id, 1, "owner"), {
+        code: "MODEL_BUDGET_EXCEEDED",
+      });
+      await other.settle(
+        f.actor.userId,
+        reserved.id,
+        { input: 10, output: 20, cacheRead: 0, cacheWrite: 0, totalTokens: 30 },
+        10,
+      );
+      await ledger.settle(
+        f.actor.userId,
+        reserved.id,
+        {
+          input: 100,
+          output: 100,
+          cacheRead: 0,
+          cacheWrite: 0,
+          totalTokens: 200,
+        },
+        100,
+      );
+      const next = await ledger.reserve(f.actor.userId, r.id, 10, "owner");
+      assert.equal(next.maxOutputTokens, 60);
+      const record = await f.sa.readMetadata(
+        f.actor.userId,
+        ["usage"],
+        (s) => s.usage!.requests[reserved.id]!,
+      );
+      assert.equal(record.tokens, 30);
+    } finally {
+      await f.close();
+    }
+  },
+);
+test(
+  "batched stream events preserve per-Run order without rewriting Runs and notifications cover the query/wait race",
+  { skip: !url },
+  async () => {
+    const f = await reviewDatabase();
+    let watch: Awaited<ReturnType<typeof f.a.watchEvents>> | undefined;
+    try {
+      const ses = await f.service.createPersonalSession(f.actor, {
+          agentId: "a",
+        }),
+        r = await f.service.submit(f.actor, ses.id, "stream");
+      await f.sa.runTx(f.actor.userId, r.id, (s) => {
+        s.runs[r.id]!.state = "RUNNING";
+        s.runs[r.id]!.lease = { owner: "owner", expires: Date.now() + 30000 };
+      });
+      const before = (
+        await f.a.pool.query(
+          "SELECT xmin::text,data FROM personal_runs WHERE user_id=$1 AND run_id=$2",
+          [f.actor.userId, r.id],
+        )
+      ).rows[0];
+      watch = await f.a.watchEvents(f.actor.userId, r.id);
+      const initial = await f.sa.eventPage(
+        f.actor.userId,
+        r.id,
+        0,
+        100,
+        (s) => s.runs[r.id]!.state,
+      );
+      const cursor = initial.events.at(-1)!.eventId;
+      await Promise.all(
+        [f.a, f.b].map((store) =>
+          store.appendRunEvents(
+            f.actor.userId,
+            r.id,
+            "owner",
+            Array.from({ length: 50 }, (_, n) => ({
+              type: "message.delta",
+              data: { delta: String(n) },
+            })),
+          ),
+        ),
+      );
+      const start = Date.now();
+      await watch.wait(5000);
+      assert.ok(
+        Date.now() - start < 4000,
+        "a notification before wait must remain pending",
+      );
+      const listener = (f.a as unknown as { listener: { processID: number } })
+        .listener;
+      await f.b.pool.query("SELECT pg_terminate_backend($1)", [
+        listener.processID,
+      ]);
+      await watch.wait(5000); // disconnect wake plus reconnect before the next page
+      await f.b.appendRunEvents(f.actor.userId, r.id, "owner", [
+        { type: "test.after-reconnect", data: {} },
+      ]);
+      const reconnected = Date.now();
+      await watch.wait(5000);
+      assert.ok(Date.now() - reconnected < 4000);
+      const after = (
+        await f.a.pool.query(
+          "SELECT xmin::text,data FROM personal_runs WHERE user_id=$1 AND run_id=$2",
+          [f.actor.userId, r.id],
+        )
+      ).rows[0];
+      assert.deepEqual(after, before);
+      const events = (
+        await f.sa.eventPage(
+          f.actor.userId,
+          r.id,
+          cursor,
+          100,
+          (s) => s.runs[r.id]!.state,
+        )
+      ).events;
+      assert.equal(events.length, 100);
+      assert.deepEqual(
+        events.map((e) => e.seq),
+        Array.from({ length: 100 }, (_, i) => i + 2),
+      );
+      await assert.rejects(
+        f.b.appendRunEvents(f.actor.userId, r.id, "wrong-owner", [
+          { type: "message.delta", data: { delta: "bad" } },
+        ]),
+        { code: "LEASE_LOST" },
+      );
+      assert.equal(
+        await f.b.renewRunLease(
+          f.actor.userId,
+          r.id,
+          "wrong-owner",
+          Date.now(),
+        ),
+        false,
+      );
+      assert.equal(
+        await f.b.renewRunLease(f.actor.userId, r.id, "owner", Date.now()),
+        true,
+      );
+      await f.sb.runTx(f.actor.userId, r.id, (s) => {
+        s.runs[r.id]!.cancelRequested = true;
+      });
+      assert.equal(
+        await f.a.renewRunLease(f.actor.userId, r.id, "owner", Date.now()),
+        false,
+      );
+    } finally {
+      watch?.close();
+      await f.close();
+    }
+  },
+);
+test(
+  "011 atomically migrates JSONB audit, model/resource records and active sandbox bindings, and replays without duplicates",
+  { skip: !url },
+  async () => {
+    const f = await reviewDatabase(false);
+    try {
+      await f.a.pool.query(
+        await readFile("migrations/009_personal_execution_indexes.sql", "utf8"),
+      );
+      await f.a.pool.query(
+        await readFile(
+          "migrations/010_personal_session_pagination.sql",
+          "utf8",
+        ),
+      );
+      const w = {
+        id: f.actor.userId,
+        name: "legacy",
+        ownerId: f.actor.userId,
+        members: { [f.actor.userId]: "owner" },
+        sandboxId: "legacy-box",
+        sandboxState: "active",
+        sandboxLastUsedAt: 1,
+      };
+      const request = {
+        id: "request",
+        runId: "run",
+        at: new Date().toISOString(),
+        tokens: 10,
+      };
+      await f.a.pool.query(
+        "INSERT INTO personal_user_state(user_id,state) VALUES($1,$2)",
+        [
+          f.actor.userId,
+          JSON.stringify({
+            ...emptyState(),
+            workspaces: { [w.id]: w },
+            audit: [{ id: "audit", action: "test" }],
+            usage: {
+              requests: { request },
+              resources: [
+                {
+                  workspaceId: w.id,
+                  sandboxId: "legacy-box",
+                  state: "active",
+                  at: 1,
+                },
+              ],
+            },
+          }),
+        ],
+      );
+      await assert.rejects(f.a.ready(), /SCHEMA_MISMATCH/);
+      const migration = await readFile(
+          "migrations/011_personal_runtime_hot_paths.sql",
+          "utf8",
+        ),
+        c = await f.a.pool.connect();
+      try {
+        await c.query("BEGIN");
+        await c.query(migration);
+        await assert.rejects(f.a.ready(), /SCHEMA_MISMATCH/);
+        await c.query("ROLLBACK");
+      } finally {
+        c.release();
+      }
+      await f.a.pool.query(migration);
+      await f.a.ready();
+      await f.a.pool.query(migration);
+      const records = await f.sb.readMetadata(
+        f.actor.userId,
+        ["audit", "usage"],
+        (s) => ({ audit: s.audit, usage: s.usage }),
+      );
+      assert.equal(records.audit.length, 1);
+      assert.equal(records.usage!.requests.request!.tokens, 10);
+      assert.equal(records.usage!.resources.length, 1);
+      const metadata = (
+        await f.a.pool.query(
+          "SELECT state FROM personal_user_state WHERE user_id=$1",
+          [f.actor.userId],
+        )
+      ).rows[0].state;
+      assert.equal("audit" in metadata, false);
+      assert.equal("usage" in metadata, false);
+      assert.equal(
+        (
+          await f.a.pool.query(
+            "SELECT sandbox_id FROM personal_sandbox_leases WHERE tenant_id=$1 AND workspace_id=$1",
+            [f.actor.userId],
+          )
+        ).rows[0].sandbox_id,
+        "legacy-box",
+      );
+      await f.a.pool.query("DROP INDEX personal_workspace_idle");
+      await assert.rejects(f.b.ready(), /SCHEMA_INDEXES_INCOMPLETE/);
+    } finally {
       await f.close();
     }
   },

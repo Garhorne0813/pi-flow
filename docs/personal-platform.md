@@ -24,7 +24,7 @@ npm start
 npm run worker
 ```
 
-个人 schema 版本为 **8**；迁移文件顺序为 `005_agent_task_versions.sql`、`006_logical_agent_acl.sql`、`007_personal_platform.sql`、`008_editable_agents.sql`、`009_personal_execution_indexes.sql`、`010_personal_session_pagination.sql`，两个 schema 独立管理。v6 将已有个人平台的 active Agent 转为当前可编辑配置，并保留旧 Run 快照和等待交互任务；009 在完成调度记录归一化和热路径索引后推进到 v7，010 增加 Session 列表索引并推进到 v8；readiness 同时要求相关表和有效索引；旧版本表仅作历史档案。`harness_*` 表不自动迁移、不重命名，也不推断旧工作区的数据归属。应备份数据库后在部署窗口执行迁移。
+个人 schema 版本为 **9**；迁移文件顺序为 `005_agent_task_versions.sql`、`006_logical_agent_acl.sql`、`007_personal_platform.sql`、`008_editable_agents.sql`、`009_personal_execution_indexes.sql`、`010_personal_session_pagination.sql`、`011_personal_runtime_hot_paths.sql`，两个 schema 独立管理。v6 将已有个人平台的 active Agent 转为当前可编辑配置，并保留旧 Run 快照和等待交互任务；009 在完成调度记录归一化和热路径索引后推进到 v7，010 增加 Session 列表索引并推进到 v8；011 规范化审计/Usage/运行状态、增加全局候选和流事件计数器并推进到 v9；readiness 同时要求相关表和有效索引；旧版本表仅作历史档案。`harness_*` 表不自动迁移、不重命名，也不推断旧工作区的数据归属。应备份数据库后在部署窗口执行迁移。
 
 ## 当前契约
 
@@ -67,7 +67,7 @@ npm run worker
 以下为明确未覆盖的目标，不应作为当前部署承诺：
 
 1. 阿里云 E2B / OSS、工作区 hostPath 存储、多会话租约、Provider 网络防火墙和模板全局覆盖。当前只支持 Cube / demo、持久卷 / memory；不支持的 provider、网络模式和多会话设置会在启动时拒绝。
-2. 完整规范化的数据模型及横跨所有用户的原子平台预算。当前 Run/Session/Event/Skill/配置/定时任务已有独立表；工作区绑定、审计、记忆计数及部分调度元数据仍使用用户状态文档。已有预算按用户分区执行，不能当作跨用户全局预算。
+2. 完整规范化的数据模型及横跨所有用户的原子平台预算。当前 Run/Session/Event/Skill/配置/定时任务已有独立表；工作区绑定、Todo/Interaction 和记忆计数仍使用用户状态文档，审计、Usage/资源记录和工作区运行投影已拆表。已有预算按用户分区执行，不能当作跨用户全局预算。
 3. 旧共享工作区配置的专门迁移工具、Skill 交付回滚与生产对账。Agent 草稿、发布历史与 Git 自动同步不属于当前设计。
 4. 调度的 jitter、misfire 策略、结束条件、全局交互容量预留；记忆的定期去重/归档/索引修复和完整删除/批量管理 API。
 5. 图片输入契约、200 ms transcript 合并 checkpoint，以及独立的用户/会话 fencing 租约表。当前保留已有 operation ownership、未知结果隔离和 Run lease 故障语义。
@@ -88,3 +88,5 @@ TEST_DATABASE_URL=postgres://... REQUIRE_POSTGRES_TESTS=true npm test
 CI 依赖审计使用 `npm audit --audit-level=high`。已升级 Fastify、Zod、body-parser 和两条 Undici 依赖链；Pi SDK 仅重打包安全依赖元数据，源码和 dist 保持不变。仍有 2 项与 Pi/minimatch 相关的中危报告，不阻塞当前审计门槛。
 
 与 main 整合后的验证：285 项测试全部通过，0 失败、0 跳过，包含真实 PostgreSQL、v5→v6 迁移和回滚、个人与旧版控制台浏览器测试、Skill ZIP 上传。类型检查、构建、无配置目录 Demo 冒烟、可选目录导入校验与 vendored SDK 校验通过。最终 UI 文案调整后另跑 20 项控制台测试和 Demo 冒烟，均通过。后续 CI 安全依赖修复将审计结果降为 2 moderate、0 high、0 critical，`npm audit --audit-level=high` 通过。
+
+数据库高频路径、迁移 011 和专项实测见 [运行热路径说明](runtime-hotpaths.md)。

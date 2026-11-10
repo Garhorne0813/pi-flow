@@ -1,9 +1,16 @@
 import pg from "pg";
+import {
+  executionState,
+  saveExecutionMetadata,
+  type ExecutionScope,
+} from "./personal-execution-store.js";
+import { appendRecordAudit, loadRecords } from "./personal-records.js";
 import { personalConnection } from "./personal-context.js";
 import { EventEmitter } from "node:events";
 import { telemetry } from "./telemetry.js";
 import {
   emptyState,
+  Fault,
   type State,
   type Session,
   type Event,
@@ -18,6 +25,7 @@ import {
   saveEvents,
   metadata,
   runSnapshotQuery,
+  authorizationSnapshotQuery,
   snapshotState,
   claimableRunsQuery,
   scheduleWorkQuery,
@@ -30,7 +38,7 @@ import type {
   CapacityState,
 } from "./adapters/sandbox-policy.js";
 import { type WorkerHealth } from "./health.js";
-const SCHEMA_VERSION = 8;
+const SCHEMA_VERSION = 9;
 function candidateLimit(limit: number) {
   if (!Number.isInteger(limit) || limit < 1 || limit > 100)
     throw new Error("Invalid candidate limit");
@@ -97,6 +105,87 @@ export class PersonalPostgresStore implements Store {
       else void this.listen();
     });
   }
+  async watchEvents(user: string, runId: string) {
+    await this.listen();
+    const key = JSON.stringify([user, runId]);
+    let pending = false,
+      closed = false;
+    let wake: (() => void) | undefined;
+    const changed = () => {
+      pending = true;
+      wake?.();
+    };
+    this.notifications.on(key, changed);
+    this.notifications.on("disconnected", changed);
+    return {
+      wait: async (ms: number, signal?: AbortSignal) => {
+        if (!closed && !signal?.aborted && !this.listener) await this.listen();
+        if (pending || closed || signal?.aborted) {
+          pending = false;
+          return;
+        }
+        await new Promise<void>((resolve) => {
+          const done = () => {
+            clearTimeout(timer);
+            signal?.removeEventListener("abort", done);
+            wake = undefined;
+            pending = false;
+            resolve();
+          };
+          const timer = setTimeout(done, ms);
+          wake = done;
+          signal?.addEventListener("abort", done, { once: true });
+          if (pending || closed || signal?.aborted) done();
+        });
+        // Re-establish LISTEN before the caller's next catch-up query; the
+        // persistent pending flag covers notifications between query and wait.
+        if (!closed && !signal?.aborted && !this.listener) await this.listen();
+      },
+      close: () => {
+        closed = true;
+        wake?.();
+        this.notifications.off(key, changed);
+        this.notifications.off("disconnected", changed);
+      },
+    };
+  }
+  async appendRunEvents(
+    user: string,
+    rid: string,
+    owner: string,
+    events: { type: string; data: unknown }[],
+  ) {
+    if (!events.length) return;
+    const c = await this.pool.connect();
+    try {
+      await c.query("BEGIN");
+      const row = (
+        await c.query(
+          "SELECT session_id FROM personal_runs WHERE user_id=$1 AND run_id=$2 AND lease_owner=$3 AND lease_expires>=$4 AND state='RUNNING' AND NOT COALESCE((data->>'cancelRequested')::boolean,false) FOR SHARE",
+          [user, rid, owner, Date.now()],
+        )
+      ).rows[0];
+      if (!row) throw new Fault(409, "LEASE_LOST");
+      const before = emptyState(),
+        after = emptyState();
+      after.events = events.map((e) => ({
+        seq: 0,
+        eventId: 0,
+        runId: rid,
+        sessionId: row.session_id,
+        type: e.type,
+        data: e.data,
+        timestamp: new Date().toISOString(),
+      }));
+      await saveEvents(c, user, before, after);
+      await c.query("COMMIT");
+    } catch (error) {
+      await c.query("ROLLBACK");
+      throw error;
+    } finally {
+      c.release();
+    }
+  }
   async eventPage(
     tenant: string,
     runId: string,
@@ -118,19 +207,7 @@ export class PersonalPostgresStore implements Store {
     };
   }
   async appendAudit(tenant: string, entry: Audit) {
-    // Atomic row update serializes with metadata transactions without loading
-    // Runs, Sessions, Events or the existing audit array into the application.
-    await this.pool.query(
-      `INSERT INTO personal_user_state(user_id,state,revision) VALUES($1,$2,1)
-       ON CONFLICT(user_id) DO UPDATE SET
-       state=jsonb_set(personal_user_state.state,'{audit}',COALESCE(personal_user_state.state->'audit','[]'::jsonb)||$3::jsonb),
-       revision=personal_user_state.revision+1`,
-      [
-        tenant,
-        JSON.stringify({ ...metadata(emptyState()), audit: [entry] }),
-        JSON.stringify([entry]),
-      ],
-    );
+    await appendRecordAudit(this.pool, tenant, entry);
   }
   async listClaimableRuns(tenant: string, now: number, limit: number) {
     candidateLimit(limit);
@@ -147,7 +224,7 @@ export class PersonalPostgresStore implements Store {
     fn: (state: State) => T | Promise<T>,
     includeEntries = false,
   ) {
-    const result = await this.pool.query(runSnapshotQuery, [
+    const result = await this.pool.query(authorizationSnapshotQuery, [
       tenant,
       runId,
       0,
@@ -194,9 +271,9 @@ export class PersonalPostgresStore implements Store {
             FROM personal_schedule_fires WHERE user_id=$1),'{}'::jsonb)) ELSE '{}'::jsonb END AS state`,
       [tenant, keys],
     );
-    return structuredClone(
-      await fn({ ...emptyState(), ...result.rows[0]?.state }),
-    );
+    const state = { ...emptyState(), ...result.rows[0]?.state };
+    await loadRecords(this.pool, tenant, state, keys);
+    return structuredClone(await fn(state));
   }
 
   pool: pg.Pool;
@@ -227,7 +304,7 @@ export class PersonalPostgresStore implements Store {
     if (result.rows[0]?.version !== SCHEMA_VERSION)
       throw new Error("SCHEMA_MISMATCH");
     const tables = await this.healthPool.query(
-      "SELECT to_regclass('personal_agents') AS agents, to_regclass('personal_user_state') AS tenants, to_regclass('personal_sandbox_capacity') AS capacity, to_regclass('personal_sandbox_leases') AS leases, to_regclass('personal_worker_health') AS workers, to_regclass('personal_runs') AS runs, to_regclass('personal_sessions') AS sessions, to_regclass('personal_run_events') AS events, to_regclass('personal_event_sequences') AS sequences, to_regclass('personal_scheduled_tasks') AS schedules, to_regclass('personal_schedule_fires') AS fires",
+      "SELECT to_regclass('personal_agents') AS agents, to_regclass('personal_user_state') AS tenants, to_regclass('personal_sandbox_capacity') AS capacity, to_regclass('personal_sandbox_leases') AS leases, to_regclass('personal_worker_health') AS workers, to_regclass('personal_runs') AS runs, to_regclass('personal_sessions') AS sessions, to_regclass('personal_run_events') AS events, to_regclass('personal_event_sequences') AS sequences, to_regclass('personal_scheduled_tasks') AS schedules, to_regclass('personal_schedule_fires') AS fires, to_regclass('personal_audit') AS audit, to_regclass('personal_usage_requests') AS usage, to_regclass('personal_resource_transitions') AS resources, to_regclass('personal_workspace_runtime') AS runtime, to_regclass('personal_maintenance') AS maintenance, to_regclass('personal_run_event_counters') AS event_counters",
     );
     if (Object.values(tables.rows[0]).some((v) => v === null))
       throw new Error("SCHEMA_INCOMPLETE");
@@ -239,7 +316,13 @@ export class PersonalPostgresStore implements Store {
       EXISTS(SELECT 1 FROM pg_index WHERE indexrelid=to_regclass('personal_schedule_fires_pending')
         AND indrelid=to_regclass('personal_schedule_fires') AND indisvalid AND indisready) AS pending,
       EXISTS(SELECT 1 FROM pg_index WHERE indexrelid=to_regclass('personal_sessions_list')
-        AND indrelid=to_regclass('personal_sessions') AND indisvalid AND indisready) AS session_list`);
+        AND indrelid=to_regclass('personal_sessions') AND indisvalid AND indisready) AS session_list,
+      EXISTS(SELECT 1 FROM pg_index WHERE indexrelid=to_regclass('personal_runs_task') AND indrelid=to_regclass('personal_runs') AND indisvalid AND indisready) AS task,
+      EXISTS(SELECT 1 FROM pg_index WHERE indexrelid=to_regclass('personal_runs_global_queued') AND indrelid=to_regclass('personal_runs') AND indisvalid AND indisready) AS queue,
+      EXISTS(SELECT 1 FROM pg_index WHERE indexrelid=to_regclass('personal_usage_period') AND indrelid=to_regclass('personal_usage_requests') AND indisvalid AND indisready) AS usage_period,
+      EXISTS(SELECT 1 FROM pg_index WHERE indexrelid=to_regclass('personal_usage_run') AND indrelid=to_regclass('personal_usage_requests') AND indisvalid AND indisready) AS usage_run,
+      EXISTS(SELECT 1 FROM pg_index WHERE indexrelid=to_regclass('personal_resources_user') AND indrelid=to_regclass('personal_resource_transitions') AND indisvalid AND indisready) AS resources_user,
+      EXISTS(SELECT 1 FROM pg_index WHERE indexrelid=to_regclass('personal_workspace_idle') AND indrelid=to_regclass('personal_workspace_runtime') AND indisvalid AND indisready) AS idle`);
     if (Object.values(indexes.rows[0]).some((v) => v !== true))
       throw new Error("SCHEMA_INDEXES_INCOMPLETE");
   }
@@ -292,6 +375,156 @@ export class PersonalPostgresStore implements Store {
       c.release();
     }
   }
+  async executionTx<T>(
+    user: string,
+    runId: string,
+    fn: (s: State) => T | Promise<T>,
+    scope: ExecutionScope = {},
+  ) {
+    const c = await this.pool.connect();
+    try {
+      await c.query("BEGIN");
+      const before = await executionState(c, user, runId, scope),
+        s = structuredClone(before);
+      const result = await personalConnection.run(
+        { pool: this.pool, client: c },
+        () => fn(s),
+      );
+      if (
+        JSON.stringify(metadata(before)) !==
+        JSON.stringify(
+          metadata({
+            ...s,
+            workspaces: before.workspaces,
+            todos: before.todos,
+            interactions: before.interactions,
+            sequence: before.sequence,
+          }),
+        )
+      )
+        throw new Error("executionTx metadata scope violation");
+      for (const [sid, session] of Object.entries(s.sessions))
+        if (
+          before.sessions[sid] &&
+          JSON.stringify(session) !== JSON.stringify(before.sessions[sid]) &&
+          session.entries === undefined
+        )
+          throw new Error(
+            "executionTx Session writes require an explicit checkpoint",
+          );
+      await saveState(c, user, before, s, true);
+      await saveExecutionMetadata(c, user, before, s);
+      await c.query("COMMIT");
+      return structuredClone(result);
+    } catch (error) {
+      await c.query("ROLLBACK");
+      throw error;
+    } finally {
+      c.release();
+    }
+  }
+  async listRunWork(now: number, limit: number, afterUser = "") {
+    candidateLimit(limit);
+    const result = await this.pool.query(
+      `WITH candidates AS (
+      (SELECT DISTINCT ON(user_id) user_id,run_id,0 AS priority FROM personal_runs WHERE lease_owner IS NOT NULL AND lease_expires<$1 AND state<>'QUEUED' ORDER BY user_id,lease_expires,run_id)
+      UNION ALL
+      (SELECT DISTINCT ON(user_id) user_id,run_id,1 AS priority FROM personal_runs WHERE state='QUEUED' ORDER BY user_id,created_at,run_id)
+    ) SELECT user_id AS "user",run_id AS "runId" FROM candidates ORDER BY (user_id>$2) DESC,user_id,priority LIMIT $3`,
+      [now, afterUser, limit],
+    );
+    return result.rows as { user: string; runId: string }[];
+  }
+  async renewRunLease(user: string, runId: string, owner: string, now: number) {
+    const result = await this.pool.query(
+      `UPDATE personal_runs SET lease_expires=$4::bigint+30000,data=jsonb_set(data,'{lease,expires}',to_jsonb($4::bigint+30000))
+      WHERE user_id=$1 AND run_id=$2 AND lease_owner=$3 AND lease_expires>=$4 AND state IN ('RUNNING','WAITING_INPUT') AND NOT COALESCE((data->>'cancelRequested')::boolean,false)`,
+      [user, runId, owner, now],
+    );
+    return result.rowCount === 1;
+  }
+  async readUsage<T>(
+    user: string,
+    runId: string | undefined,
+    fn: (s: State) => T | Promise<T>,
+  ) {
+    const c = await this.pool.connect();
+    try {
+      await c.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+      const state = runId
+        ? snapshotState(
+            (
+              await c.query(authorizationSnapshotQuery, [
+                user,
+                runId,
+                0,
+                0,
+                false,
+                true,
+              ])
+            ).rows[0],
+          )
+        : {
+            ...emptyState(),
+            ...(
+              await c.query(
+                "SELECT jsonb_build_object('workspaces',state->'workspaces') AS state FROM personal_user_state WHERE user_id=$1",
+                [user],
+              )
+            ).rows[0]?.state,
+          };
+      await loadRecords(c, user, state, ["usage"], runId);
+      const result = await fn(state);
+      await c.query("COMMIT");
+      return structuredClone(result);
+    } catch (error) {
+      await c.query("ROLLBACK");
+      throw error;
+    } finally {
+      c.release();
+    }
+  }
+  async readSession<T>(
+    user: string,
+    sid: string,
+    fn: (s: State) => T | Promise<T>,
+  ) {
+    const result = await this.pool.query(
+      `SELECT p.data,jsonb_build_object('workspaces',jsonb_build_object(p.workspace_id,t.state->'workspaces'->p.workspace_id),'todos',jsonb_build_object(p.session_id,t.state->'todos'->p.session_id)) AS state
+      FROM personal_sessions p JOIN personal_user_state t USING(user_id) WHERE p.user_id=$1 AND p.session_id=$2`,
+      [user, sid],
+    );
+    const row = result.rows[0],
+      state = { ...emptyState(), ...row?.state };
+    if (row) state.sessions = { [sid]: row.data };
+    return structuredClone(await fn(state));
+  }
+  async adoptLegacyCapacity() {
+    /* migration 011 adopts legacy active bindings */
+  }
+  async listSandboxMaintenance(
+    now: number,
+    pauseMs: number,
+    releaseMs: number,
+    intervalMs: number,
+  ) {
+    const lease = await this.pool.query(
+      "INSERT INTO personal_maintenance(name,expires) VALUES('sandbox',$1::bigint+$2::bigint) ON CONFLICT(name) DO UPDATE SET expires=excluded.expires WHERE personal_maintenance.expires<=$1 RETURNING name",
+      [now, intervalMs],
+    );
+    if (!lease.rowCount) return [];
+    const result = await this.pool.query(
+      `WITH due AS (SELECT user_id,workspace_id FROM personal_workspace_runtime WHERE sandbox_id IS NOT NULL AND NOT COALESCE((data->>'deleting')::boolean,false)
+      AND (last_used_at IS NULL OR last_used_at<=$1::bigint-$3::bigint OR (last_used_at<=$1::bigint-$2::bigint AND COALESCE(data->>'sandboxState','active') NOT IN ('paused','unknown')))
+      ORDER BY checked_at,last_used_at NULLS FIRST,user_id,workspace_id LIMIT 128 FOR UPDATE SKIP LOCKED)
+      UPDATE personal_workspace_runtime w SET checked_at=$1 FROM due d WHERE w.user_id=d.user_id AND w.workspace_id=d.workspace_id RETURNING w.user_id AS "user",w.data AS workspace`,
+      [now, pauseMs, releaseMs],
+    );
+    return result.rows as {
+      user: string;
+      workspace: State["workspaces"][string];
+    }[];
+  }
   async workspaceTx<T>(
     tenant: string,
     fn: (s: State) => T | Promise<T>,
@@ -325,22 +558,11 @@ export class PersonalPostgresStore implements Store {
       await saveState(c, tenant, before, s, workspaceOnly);
       if (
         workspaceOnly &&
-        (JSON.stringify(before.workspaces) !== JSON.stringify(s.workspaces) ||
-          s.audit.length ||
-          s.usage?.resources.length)
+        JSON.stringify(before.workspaces) !== JSON.stringify(s.workspaces)
       )
         await c.query(
-          `UPDATE personal_user_state SET state=
-            jsonb_set(state,'{workspaces}',$2::jsonb)
-            || CASE WHEN jsonb_array_length($3::jsonb)>0 THEN jsonb_build_object('audit',COALESCE(state->'audit','[]'::jsonb)||$3::jsonb) ELSE '{}'::jsonb END
-            || CASE WHEN jsonb_array_length($4::jsonb)>0 THEN jsonb_build_object('usage',COALESCE(state->'usage','{}'::jsonb)||jsonb_build_object('resources',COALESCE(state->'usage'->'resources','[]'::jsonb)||$4::jsonb)) ELSE '{}'::jsonb END,
-            revision=revision+1 WHERE user_id=$1`,
-          [
-            tenant,
-            JSON.stringify(s.workspaces),
-            JSON.stringify(s.audit),
-            JSON.stringify(s.usage?.resources ?? []),
-          ],
+          "UPDATE personal_user_state SET state=jsonb_set(state,'{workspaces}',$2::jsonb),revision=revision+1 WHERE user_id=$1",
+          [tenant, JSON.stringify(s.workspaces)],
         );
       await c.query("COMMIT");
       return structuredClone(result);
@@ -366,7 +588,7 @@ export class PersonalPostgresStore implements Store {
     try {
       await c.query("BEGIN");
       const row = await c.query(
-        "SELECT state FROM personal_user_state WHERE user_id=$1 FOR UPDATE",
+        "SELECT state FROM personal_user_state WHERE user_id=$1 FOR NO KEY UPDATE",
         [user],
       );
       const state: State = {
@@ -448,7 +670,9 @@ export class PersonalPostgresStore implements Store {
       if (
         JSON.stringify(metadata(before)) !==
           JSON.stringify(metadata({ ...s, sequence: before.sequence })) ||
-        JSON.stringify(before.sessions) !== JSON.stringify(s.sessions)
+        JSON.stringify(before.sessions) !== JSON.stringify(s.sessions) ||
+        JSON.stringify(before.audit) !== JSON.stringify(s.audit) ||
+        JSON.stringify(before.usage) !== JSON.stringify(s.usage)
       )
         throw new Error(
           "runTx may only change the target Run and append events",
@@ -462,6 +686,10 @@ export class PersonalPostgresStore implements Store {
       )
         throw new Error("runTx scope violation");
       const r = s.runs[runId];
+      if (r) {
+        if (before.runs[runId]?.eventSeq === undefined) delete r.eventSeq;
+        else r.eventSeq = before.runs[runId]!.eventSeq;
+      }
       if (r && JSON.stringify(r) !== JSON.stringify(before.runs[runId]))
         await saveRun(c, tenant, r);
       await saveEvents(c, tenant, before, s);

@@ -109,14 +109,14 @@ export function personalRoutes(
   app.get("/api/v1/schedules", async (req) => {
     enabled();
     const a = actor(req);
-    return service.store.read(a.tenantId, (s) => ({
+    return service.store.readMetadata(a.tenantId, ["schedules"], (s) => ({
       items: Object.values(s.schedules ?? {}),
     }));
   });
   app.get("/api/v1/schedules/:id", async (req) => {
     enabled();
     const a = actor(req);
-    return service.store.read(a.tenantId, (s) =>
+    return service.store.readMetadata(a.tenantId, ["schedules"], (s) =>
       schedules.get(s, a, sid(req.params)),
     );
   });
@@ -142,14 +142,18 @@ export function personalRoutes(
   app.get("/api/v1/schedules/:id/runs", async (req) => {
     enabled();
     const a = actor(req);
-    return service.store.read(a.tenantId, (s) => {
-      schedules.get(s, a, sid(req.params));
-      return {
-        items: Object.values(s.scheduleFires ?? {}).filter(
-          (f) => f.scheduleId === sid(req.params),
-        ),
-      };
-    });
+    return service.store.readMetadata(
+      a.tenantId,
+      ["schedules", "scheduleFires"],
+      (s) => {
+        schedules.get(s, a, sid(req.params));
+        return {
+          items: Object.values(s.scheduleFires ?? {}).filter(
+            (f) => f.scheduleId === sid(req.params),
+          ),
+        };
+      },
+    );
   });
   app.get("/api/v1/agents/:key", async (req) => {
     const key = z.object({ key: z.string() }).parse(req.params).key;

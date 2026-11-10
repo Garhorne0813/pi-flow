@@ -110,7 +110,7 @@ Agent 当前配置 A ── 创建 Run 1 ── 快照 A ── 排队/执行/�
 
 ## 6. 数据迁移与兼容
 
-个人 Schema 当前版本为 **8**。`008_editable_agents.sql` 完成 v6 可编辑 Agent 转换；`009_personal_execution_indexes.sql` 在完成调度归一化和执行索引后发布 v7。`010_personal_session_pagination.sql` 为 Session 列表补齐分页索引并发布 v8。readiness 要求 v8、调度表及四个有效的热路径索引；共享引擎的 schema 仍为 v6。
+个人 Schema 当前版本为 **9**。`008_editable_agents.sql` 完成 v6 可编辑 Agent 转换；`009_personal_execution_indexes.sql` 在完成调度归一化和执行索引后发布 v7。`010_personal_session_pagination.sql` 为 Session 列表补齐分页索引并发布 v8。011 拆分审计、Usage/资源及工作区运行投影，增加事件计数器和全局候选索引并发布 v9。readiness 要求 v9、相关表及有效热路径索引；共享引擎的 schema 仍为 v6。
 
 - 将 v5 的 active Agent 配置迁入 `personal_agents`，保留稳定 key 和实时访问限制。
 - 为旧 Run 补足必要快照和 agentId；保留已有解析模型与任务链。
@@ -131,3 +131,5 @@ Agent 当前配置 A ── 创建 Run 1 ── 快照 A ── 排队/执行/�
 6. 全局配置编辑不影响 Agent 的编辑 revision。
 7. 迁移后的旧等待交互任务可续跑，且不依赖旧版本表的 enabled 状态。
 8. 类型检查、原有与新增测试、真实 PostgreSQL 测试、构建、Demo 冒烟通过。
+
+高频事务的范围和测量限制见 [数据库运行热路径](runtime-hotpaths.md)。

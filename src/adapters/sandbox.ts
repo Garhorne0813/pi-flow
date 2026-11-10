@@ -58,6 +58,16 @@ export class SandboxManager {
       leaseWaitTimeoutMs?: number;
     } = { remoteTimeoutMs: 30000, cleanupTimeoutMs: 1000 },
   ) {
+    if (store.workspaceTx) {
+      this.store = new Proxy(store, {
+        get: (target, key) => {
+          if (key === "read" || key === "tx")
+            return target.workspaceTx!.bind(target);
+          const value = Reflect.get(target, key);
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      });
+    }
     if (Object.values(limits).some((v) => !Number.isFinite(v) || v <= 0))
       throw new Error("Invalid Sandbox time limits");
     // Every control-plane operation has a local bound, even for SDKs that
@@ -88,7 +98,7 @@ export class SandboxManager {
       },
     });
     this.policy = SandboxPolicySchema.parse(policy);
-    this.capacity = new SandboxCapacity(store, this.policy);
+    this.capacity = new SandboxCapacity(this.store, this.policy);
   }
   private remote<T>(
     start: () => Promise<T>,
@@ -1084,7 +1094,7 @@ export class SandboxManager {
     return this.status(a, wid);
   }
   async status(a: Actor, wid: string) {
-    return this.store.read(a.tenantId, (s) => {
+    return this.store.readMetadata(a.tenantId, ["workspaces"], (s) => {
       const w = workspace(s, a, wid);
       return {
         state: w.sandboxId
@@ -1104,10 +1114,24 @@ export class SandboxManager {
   async reapIdle(now = Date.now()) {
     const result = { paused: 0, released: 0, failed: 0 };
     await this.capacity.adoptLegacy();
-    for (const tenantId of await this.store.tenants()) {
-      const candidates = await this.store.read(tenantId, (s) =>
-        Object.values(s.workspaces).filter((w) => w.sandboxId && !w.deleting),
-      );
+    const due = this.store.listSandboxMaintenance
+      ? await this.store.listSandboxMaintenance(
+          now,
+          this.policy.idlePauseSeconds * 1000,
+          this.policy.idleReleaseSeconds * 1000,
+          this.policy.sweepIntervalSeconds * 1000,
+        )
+      : undefined;
+    for (const tenantId of due
+      ? [...new Set(due.map((w) => w.user))]
+      : await this.store.tenants()) {
+      const candidates = due
+        ? due.filter((w) => w.user === tenantId).map((w) => w.workspace)
+        : await this.store.readMetadata(tenantId, ["workspaces"], (s) =>
+            Object.values(s.workspaces).filter(
+              (w) => w.sandboxId && !w.deleting,
+            ),
+          );
       for (const w of candidates) {
         if (w.sandboxLastUsedAt === undefined) {
           await this.store.tx(tenantId, (s) => {
