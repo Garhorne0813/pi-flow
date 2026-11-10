@@ -22,6 +22,13 @@ import type {
 } from "./adapters/sandbox-policy.js";
 import { SCHEMA_VERSION, type WorkerHealth } from "./health.js";
 export interface Store {
+  listScheduleFires?(
+    user: string,
+    scheduleId: string,
+    owner: string,
+    limit: number,
+    before?: { scheduledFor: number; id: string },
+  ): Promise<import("./schedules/service.js").Fire[]>;
   readUsage?<T>(
     user: string,
     runId: string | undefined,

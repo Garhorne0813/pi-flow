@@ -1,3 +1,8 @@
+import {
+  HistoryQuery,
+  historyCursor,
+  nextHistoryCursor,
+} from "../schedules/history.js";
 import { ModelEntry, versionModelCatalog } from "../config/models.js";
 import { sealToken } from "../security/token-vault.js";
 import { MemoryManager } from "../execution/memory.js";
@@ -141,19 +146,48 @@ export function personalRoutes(
   });
   app.get("/api/v1/schedules/:id/runs", async (req) => {
     enabled();
-    const a = actor(req);
-    return service.store.readMetadata(
-      a.tenantId,
-      ["schedules", "scheduleFires"],
-      (s) => {
-        schedules.get(s, a, sid(req.params));
-        return {
-          items: Object.values(s.scheduleFires ?? {}).filter(
-            (f) => f.scheduleId === sid(req.params),
-          ),
-        };
-      },
-    );
+    const a = actor(req),
+      scheduleId = sid(req.params),
+      q = HistoryQuery.parse(req.query),
+      before = historyCursor(q.cursor, scheduleId);
+    const fires = service.store.listScheduleFires
+      ? await service.store.listScheduleFires(
+          a.tenantId,
+          scheduleId,
+          a.userId,
+          q.limit + 1,
+          before,
+        )
+      : await service.store.readMetadata(
+          a.tenantId,
+          ["schedules", "scheduleFires"],
+          (s) => {
+            schedules.get(s, a, scheduleId);
+            return Object.values(s.scheduleFires ?? {})
+              .filter(
+                (f) =>
+                  f.scheduleId === scheduleId &&
+                  (!before ||
+                    f.scheduledFor < before.scheduledFor ||
+                    (f.scheduledFor === before.scheduledFor &&
+                      f.id < before.id)),
+              )
+              .sort(
+                (a, b) =>
+                  b.scheduledFor - a.scheduledFor ||
+                  (a.id < b.id ? 1 : a.id > b.id ? -1 : 0),
+              )
+              .slice(0, q.limit + 1);
+          },
+        );
+    const items = fires.slice(0, q.limit);
+    return {
+      items,
+      nextCursor:
+        fires.length > q.limit
+          ? nextHistoryCursor(scheduleId, items.at(-1)!)
+          : undefined,
+    };
   });
   app.get("/api/v1/agents/:key", async (req) => {
     const key = z.object({ key: z.string() }).parse(req.params).key;

@@ -340,6 +340,10 @@ test(
       await backing.pool.query(
         await readFile("migrations/011_personal_runtime_hot_paths.sql", "utf8"),
       );
+      await assert.rejects(backing.ready(), /SCHEMA_MISMATCH/);
+      await backing.pool.query(
+        await readFile("migrations/012_personal_queue_frontiers.sql", "utf8"),
+      );
       await backing.ready();
       const store = personalStore(backing, registry),
         service = new PersonalService(store, registry);
@@ -870,7 +874,7 @@ test(
 );
 
 test(
-  "personal readiness requires committed migrations 009/010/011, normalized schedules and all valid hot-path indexes",
+  "personal readiness requires committed migrations 009/010/011/012, normalized schedules and all valid hot-path indexes",
   { skip: !url },
   async () => {
     const { ScheduleService } = await import("../src/schedules/service.js"),
@@ -939,7 +943,9 @@ test(
         (await readFile(
           "migrations/011_personal_runtime_hot_paths.sql",
           "utf8",
-        ));
+        )) +
+        "\n" +
+        (await readFile("migrations/012_personal_queue_frontiers.sql", "utf8"));
       const c = await f.a.pool.connect();
       try {
         await c.query("BEGIN");
@@ -977,7 +983,7 @@ test(
             )
           ).rows[0].version,
         ),
-        9,
+        10,
       );
       for (const index of [
         "personal_runs_running",
@@ -990,6 +996,10 @@ test(
         "personal_usage_run",
         "personal_resources_user",
         "personal_workspace_idle",
+        "personal_run_work_queued",
+        "personal_run_work_expired",
+        "personal_workspace_rotation",
+        "personal_schedule_fires_history",
       ]) {
         await f.a.pool.query(`DROP INDEX ${index}`);
         await assert.rejects(f.a.ready(), /SCHEMA_INDEXES_INCOMPLETE/);
@@ -1793,8 +1803,15 @@ test(
         c.release();
       }
       await f.a.pool.query(migration);
+      await assert.rejects(f.a.ready(), /SCHEMA_MISMATCH/);
+      await f.a.pool.query(
+        await readFile("migrations/012_personal_queue_frontiers.sql", "utf8"),
+      );
       await f.a.ready();
       await f.a.pool.query(migration);
+      await f.a.pool.query(
+        await readFile("migrations/012_personal_queue_frontiers.sql", "utf8"),
+      );
       const records = await f.sb.readMetadata(
         f.actor.userId,
         ["audit", "usage"],
@@ -1824,6 +1841,384 @@ test(
       await assert.rejects(f.b.ready(), /SCHEMA_INDEXES_INCOMPLETE/);
     } finally {
       await f.close();
+    }
+  },
+);
+
+test(
+  "Schedule firing and settlement persist audit only in personal_audit without metadata rewrites",
+  { skip: !url },
+  async () => {
+    const { ScheduleService } = await import("../src/schedules/service.js");
+    const f = await reviewDatabase(),
+      scheduler = new ScheduleService(f.service);
+    try {
+      const task = await scheduler.create(f.actor, {
+        agentId: "a",
+        cron: "0 0 1 1 *",
+        prompt: "tick",
+      });
+      await f.a.pool.query(
+        "UPDATE personal_scheduled_tasks SET data=jsonb_set(data,'{nextFireAt}','1'::jsonb) WHERE user_id=$1 AND schedule_id=$2",
+        [f.actor.userId, task.id],
+      );
+      const state = async () =>
+        (
+          await f.a.pool.query(
+            "SELECT xmin::text,state FROM personal_user_state WHERE user_id=$1",
+            [f.actor.userId],
+          )
+        ).rows[0];
+      const before = await state();
+      assert.equal("audit" in before.state, false);
+      await scheduler.tick();
+      const fire = (
+        await f.sa.readMetadata(f.actor.userId, ["scheduleFires"], (s) =>
+          Object.values(s.scheduleFires!),
+        )
+      )[0]!;
+      assert.equal(fire.state, "submitted");
+      assert.deepEqual(await state(), before);
+      await f.sa.runTx(f.actor.userId, fire.runId!, (s) => {
+        s.runs[fire.runId!]!.state = "COMPLETED";
+      });
+      await scheduler.tick();
+      assert.deepEqual(await state(), before);
+      assert.equal(
+        (
+          await f.a.pool.query(
+            "SELECT count(*)::int AS n FROM personal_audit WHERE user_id=$1 AND data->>'action'='schedule.fire'",
+            [f.actor.userId],
+          )
+        ).rows[0].n,
+        1,
+      );
+      assert.equal(
+        (
+          await f.sa.readMetadata(f.actor.userId, ["scheduleFires"], (s) =>
+            Object.values(s.scheduleFires!),
+          )
+        )[0]!.state,
+        "completed",
+      );
+    } finally {
+      await f.close();
+    }
+  },
+);
+test(
+  "Run frontiers track concurrent enqueue, CAS/expiry, cancellation, rollback and deletion across clients",
+  { skip: !url },
+  async () => {
+    const f = await reviewDatabase();
+    try {
+      const runs = [];
+      for (let i = 0; i < 3; i++) {
+        const ses = await f.service.createPersonalSession(f.actor, {
+          agentId: "a",
+        });
+        runs.push(await f.service.submit(f.actor, ses.id, "queue"));
+      }
+      const [first, second, third] = runs;
+      const work = () => f.a.listRunWork(Date.now(), 64);
+      assert.deepEqual(
+        (await work()).map((w) => w.runId),
+        [first!.id],
+      );
+      await Promise.all([
+        f.sa.runTx(f.actor.userId, first!.id, (s) => {
+          s.runs[first!.id]!.state = "RUNNING";
+          s.runs[first!.id]!.lease = {
+            owner: "owner",
+            expires: Date.now() + 30000,
+          };
+        }),
+        f.sb.runTx(f.actor.userId, second!.id, (s) => {
+          s.runs[second!.id]!.state = "CANCELLED";
+        }),
+      ]);
+      assert.deepEqual(
+        (await work()).map((w) => w.runId),
+        [third!.id],
+      );
+      assert.equal(
+        await f.b.renewRunLease(f.actor.userId, first!.id, "owner", Date.now()),
+        true,
+      );
+      await f.sa.runTx(f.actor.userId, first!.id, (s) => {
+        s.runs[first!.id]!.lease!.expires = Date.now() - 1;
+      });
+      assert.deepEqual(
+        (await work()).map((w) => w.runId),
+        [first!.id, third!.id],
+      );
+      await f.sb.runTx(f.actor.userId, first!.id, (s) => {
+        s.runs[first!.id]!.state = "FAILED";
+        delete s.runs[first!.id]!.lease;
+      });
+      const c = await f.a.pool.connect();
+      try {
+        await c.query("BEGIN");
+        await c.query(
+          "UPDATE personal_runs SET state='CANCELLED' WHERE user_id=$1 AND run_id=$2",
+          [f.actor.userId, third!.id],
+        );
+        await c.query("ROLLBACK");
+      } finally {
+        c.release();
+      }
+      assert.deepEqual(
+        (await work()).map((w) => w.runId),
+        [third!.id],
+      );
+      await f.a.pool.query(
+        "DELETE FROM personal_runs WHERE user_id=$1 AND run_id=$2",
+        [f.actor.userId, third!.id],
+      );
+      assert.deepEqual(await work(), []);
+    } finally {
+      await f.close();
+    }
+  },
+);
+test(
+  "012 repairs legacy Schedule audits once, backfills Run heads and detects disabled frontier triggers",
+  { skip: !url },
+  async () => {
+    const f = await reviewDatabase();
+    try {
+      const ses = await f.service.createPersonalSession(f.actor, {
+          agentId: "a",
+        }),
+        run = await f.service.submit(f.actor, ses.id, "head");
+      const canonical = { id: "canonical", action: "canonical" },
+        fresh = { id: "legacy-only", action: "legacy-only" };
+      await f.a.pool.query(
+        "INSERT INTO personal_audit(user_id,id,data) VALUES($1,$2,$3)",
+        [f.actor.userId, canonical.id, JSON.stringify(canonical)],
+      );
+      await f.a.pool.query(
+        "UPDATE personal_user_state SET state=jsonb_set(state,'{audit}',$2::jsonb) WHERE user_id=$1",
+        [
+          f.actor.userId,
+          JSON.stringify([{ ...canonical, action: "duplicate" }, fresh]),
+        ],
+      );
+      for (const name of ["insert", "update", "delete"])
+        await f.a.pool.query(
+          `ALTER TABLE personal_runs DISABLE TRIGGER personal_runs_work_${name}`,
+        );
+      await f.a.pool.query("TRUNCATE personal_run_work");
+      await f.a.pool.query("UPDATE personal_schema SET version=9 WHERE id=1");
+      const migration = await readFile(
+          "migrations/012_personal_queue_frontiers.sql",
+          "utf8",
+        ),
+        c = await f.a.pool.connect();
+      try {
+        await c.query("BEGIN");
+        await c.query(migration);
+        await assert.rejects(f.b.ready(), /SCHEMA_MISMATCH/);
+        await c.query("ROLLBACK");
+      } finally {
+        c.release();
+      }
+      assert.equal(
+        (
+          await f.a.pool.query(
+            "SELECT state ? 'audit' AS old FROM personal_user_state WHERE user_id=$1",
+            [f.actor.userId],
+          )
+        ).rows[0].old,
+        true,
+      );
+      await f.a.pool.query(migration);
+      await f.a.ready();
+      await f.a.pool.query(migration);
+      const audits = (
+        await f.sa.readMetadata(f.actor.userId, ["audit"], (s) => s.audit)
+      ).filter((a) => [canonical.id, fresh.id].includes(a.id));
+      assert.equal(audits.length, 2);
+      assert.equal(
+        audits.find((a) => a.id === canonical.id)!.action,
+        "canonical",
+      );
+      assert.equal(
+        (
+          await f.a.pool.query(
+            "SELECT state ? 'audit' AS old FROM personal_user_state WHERE user_id=$1",
+            [f.actor.userId],
+          )
+        ).rows[0].old,
+        false,
+      );
+      assert.deepEqual(
+        (await f.a.listRunWork(Date.now(), 64)).map((w) => w.runId),
+        [run.id],
+      );
+      await f.a.pool.query(
+        "ALTER TABLE personal_runs DISABLE TRIGGER personal_runs_work_insert",
+      );
+      await assert.rejects(f.b.ready(), /SCHEMA_TRIGGERS_INCOMPLETE/);
+      await f.a.pool.query(migration);
+      await f.a.ready();
+    } finally {
+      await f.close();
+    }
+  },
+);
+test(
+  "Schedule history is isolated, indexed and keyset-paged across ties without reading 100k other Fires",
+  { skip: !url },
+  async () => {
+    const { ScheduleService } = await import("../src/schedules/service.js"),
+      { buildAPI } = await import("../src/api.js");
+    const f = await reviewDatabase(),
+      scheduler = new ScheduleService(f.service),
+      other = await principal(f.ar, {
+        tenantId: "other",
+        userId: "other",
+        admin: false,
+      });
+    const make = (actor: Actor) =>
+      scheduler.create(actor, {
+        agentId: "a",
+        cron: "0 0 1 1 *",
+        prompt: "history",
+      });
+    const target = await make(f.actor),
+      noise = await make(f.actor),
+      foreign = await make(other);
+    const times = [100, 100, 90, 80, 80, 70, 60],
+      fires = times.map((scheduledFor, index) => ({
+        id: id(),
+        scheduleId: target.id,
+        trigger: index % 2 ? "manual" : "cron",
+        scheduledFor,
+        state: "completed",
+      }));
+    for (const fire of fires)
+      await f.a.pool.query(
+        "INSERT INTO personal_schedule_fires(user_id,id,schedule_id,trigger,scheduled_for,data) VALUES($1,$2,$3,$4,$5,$6)",
+        [
+          f.actor.userId,
+          fire.id,
+          target.id,
+          fire.trigger,
+          fire.scheduledFor,
+          JSON.stringify(fire),
+        ],
+      );
+    await f.a.pool.query(
+      "INSERT INTO personal_schedule_fires(user_id,id,schedule_id,trigger,scheduled_for,data) SELECT $1,'noise-'||n,$2,'cron',n,jsonb_build_object('id','noise-'||n,'scheduleId',$2::text,'trigger','cron','scheduledFor',n,'state','completed','payload',repeat('x',1024)) FROM generate_series(1,100000)n",
+      [f.actor.userId, noise.id],
+    );
+    const expected = [...fires]
+      .sort((a, b) => b.scheduledFor - a.scheduledFor || (a.id < b.id ? 1 : -1))
+      .map((f) => f.id);
+    const previous = process.env.SCHEDULES_ENABLED;
+    process.env.SCHEDULES_ENABLED = "true";
+    const app = buildAPI(
+      f.service,
+      async (h) => ({
+        ...(h === "Bearer other" ? other : f.actor),
+        personal: false,
+      }),
+      new SandboxManager(f.sa, new DemoSandbox()),
+    );
+    const client = await f.a.pool.connect(),
+      query = client.query.bind(client);
+    let bytes = 0;
+    client.query = ((...args: any[]) => {
+      const sql = typeof args[0] === "string" ? args[0] : args[0]?.text;
+      const capture = (r: any) => {
+        if (/FROM personal_schedule_fires/.test(sql)) {
+          bytes += Buffer.byteLength(JSON.stringify(r.rows));
+          assert.ok(r.rows.length <= 3);
+          assert.match(sql, /schedule_id=\$2/);
+        }
+        return r;
+      };
+      const cb = args.at(-1);
+      if (typeof cb === "function") {
+        args[args.length - 1] = (e: unknown, r: unknown) => {
+          if (!e) capture(r);
+          cb(e, r);
+        };
+        return (query as any)(...args);
+      }
+      return (query as any)(...args).then(capture);
+    }) as typeof client.query;
+    client.release();
+    try {
+      const seen: string[] = [];
+      let cursor: string | undefined;
+      do {
+        const response = await app.inject({
+          url: `/api/v1/schedules/${target.id}/runs?limit=2${cursor ? "&cursor=" + cursor : ""}`,
+        });
+        assert.equal(response.statusCode, 200, response.body);
+        const page = response.json();
+        seen.push(...page.items.map((f: { id: string }) => f.id));
+        cursor = page.nextCursor;
+        if (seen.length === 2) {
+          const fire = {
+            id: id(),
+            scheduleId: target.id,
+            trigger: "cron",
+            scheduledFor: 110,
+            state: "completed",
+          };
+          await f.b.pool.query(
+            "INSERT INTO personal_schedule_fires(user_id,id,schedule_id,trigger,scheduled_for,data) VALUES($1,$2,$3,$4,$5,$6)",
+            [
+              f.actor.userId,
+              fire.id,
+              target.id,
+              fire.trigger,
+              fire.scheduledFor,
+              JSON.stringify(fire),
+            ],
+          );
+        }
+      } while (cursor);
+      assert.deepEqual(seen, expected);
+      assert.ok(bytes < 20000, `history returned ${bytes} bytes`);
+      assert.equal(
+        (
+          await app.inject({
+            url: `/api/v1/schedules/${target.id}/runs?cursor=bad`,
+          })
+        ).statusCode,
+        400,
+      );
+      assert.equal(
+        (
+          await app.inject({
+            url: `/api/v1/schedules/${target.id}/runs?limit=101`,
+          })
+        ).statusCode,
+        400,
+      );
+      assert.equal(
+        (await app.inject({ url: `/api/v1/schedules/${foreign.id}/runs` }))
+          .statusCode,
+        404,
+      );
+      assert.equal(
+        (
+          await app.inject({
+            url: `/api/v1/schedules/${target.id}/runs`,
+            headers: { authorization: "Bearer other" },
+          })
+        ).statusCode,
+        404,
+      );
+    } finally {
+      await app.close();
+      await f.close();
+      if (previous === undefined) delete process.env.SCHEDULES_ENABLED;
+      else process.env.SCHEDULES_ENABLED = previous;
     }
   },
 );

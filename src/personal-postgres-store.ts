@@ -1,5 +1,10 @@
 import pg from "pg";
 import {
+  runWorkQuery,
+  sandboxMaintenanceQuery,
+  scheduleFireHistoryQuery,
+} from "./personal-work-queries.js";
+import {
   executionState,
   saveExecutionMetadata,
   type ExecutionScope,
@@ -38,7 +43,7 @@ import type {
   CapacityState,
 } from "./adapters/sandbox-policy.js";
 import { type WorkerHealth } from "./health.js";
-const SCHEMA_VERSION = 9;
+const SCHEMA_VERSION = 10;
 function candidateLimit(limit: number) {
   if (!Number.isInteger(limit) || limit < 1 || limit > 100)
     throw new Error("Invalid candidate limit");
@@ -234,6 +239,45 @@ export class PersonalPostgresStore implements Store {
     ]);
     return structuredClone(await fn(snapshotState(result.rows[0])));
   }
+  async listScheduleFires(
+    user: string,
+    scheduleId: string,
+    owner: string,
+    limit: number,
+    before?: { scheduledFor: number; id: string },
+  ) {
+    if (!Number.isInteger(limit) || limit < 1 || limit > 101)
+      throw new Error("Invalid page limit");
+    const c = await this.pool.connect();
+    try {
+      await c.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+      const task = (
+        await c.query(
+          "SELECT data FROM personal_scheduled_tasks WHERE user_id=$1 AND schedule_id=$2",
+          [user, scheduleId],
+        )
+      ).rows[0]?.data;
+      if (!task || task.userId !== owner)
+        throw new Fault(404, "SCHEDULE_NOT_FOUND");
+      const result = await c.query(scheduleFireHistoryQuery, [
+        user,
+        scheduleId,
+        before?.scheduledFor ?? Number.MAX_SAFE_INTEGER,
+        before?.id ?? "\uffff",
+        limit,
+      ]);
+      await c.query("COMMIT");
+      return result.rows.map(
+        (r) => r.data,
+      ) as import("./schedules/service.js").Fire[];
+    } catch (error) {
+      await c.query("ROLLBACK");
+      throw error;
+    } finally {
+      c.release();
+    }
+  }
+
   async listSessions(
     tenant: string,
     userId: string,
@@ -304,7 +348,7 @@ export class PersonalPostgresStore implements Store {
     if (result.rows[0]?.version !== SCHEMA_VERSION)
       throw new Error("SCHEMA_MISMATCH");
     const tables = await this.healthPool.query(
-      "SELECT to_regclass('personal_agents') AS agents, to_regclass('personal_user_state') AS tenants, to_regclass('personal_sandbox_capacity') AS capacity, to_regclass('personal_sandbox_leases') AS leases, to_regclass('personal_worker_health') AS workers, to_regclass('personal_runs') AS runs, to_regclass('personal_sessions') AS sessions, to_regclass('personal_run_events') AS events, to_regclass('personal_event_sequences') AS sequences, to_regclass('personal_scheduled_tasks') AS schedules, to_regclass('personal_schedule_fires') AS fires, to_regclass('personal_audit') AS audit, to_regclass('personal_usage_requests') AS usage, to_regclass('personal_resource_transitions') AS resources, to_regclass('personal_workspace_runtime') AS runtime, to_regclass('personal_maintenance') AS maintenance, to_regclass('personal_run_event_counters') AS event_counters",
+      "SELECT to_regclass('personal_agents') AS agents, to_regclass('personal_user_state') AS tenants, to_regclass('personal_sandbox_capacity') AS capacity, to_regclass('personal_sandbox_leases') AS leases, to_regclass('personal_worker_health') AS workers, to_regclass('personal_runs') AS runs, to_regclass('personal_sessions') AS sessions, to_regclass('personal_run_events') AS events, to_regclass('personal_event_sequences') AS sequences, to_regclass('personal_scheduled_tasks') AS schedules, to_regclass('personal_schedule_fires') AS fires, to_regclass('personal_audit') AS audit, to_regclass('personal_usage_requests') AS usage, to_regclass('personal_resource_transitions') AS resources, to_regclass('personal_workspace_runtime') AS runtime, to_regclass('personal_maintenance') AS maintenance, to_regclass('personal_run_event_counters') AS event_counters, to_regclass('personal_run_work') AS work",
     );
     if (Object.values(tables.rows[0]).some((v) => v === null))
       throw new Error("SCHEMA_INCOMPLETE");
@@ -322,9 +366,17 @@ export class PersonalPostgresStore implements Store {
       EXISTS(SELECT 1 FROM pg_index WHERE indexrelid=to_regclass('personal_usage_period') AND indrelid=to_regclass('personal_usage_requests') AND indisvalid AND indisready) AS usage_period,
       EXISTS(SELECT 1 FROM pg_index WHERE indexrelid=to_regclass('personal_usage_run') AND indrelid=to_regclass('personal_usage_requests') AND indisvalid AND indisready) AS usage_run,
       EXISTS(SELECT 1 FROM pg_index WHERE indexrelid=to_regclass('personal_resources_user') AND indrelid=to_regclass('personal_resource_transitions') AND indisvalid AND indisready) AS resources_user,
-      EXISTS(SELECT 1 FROM pg_index WHERE indexrelid=to_regclass('personal_workspace_idle') AND indrelid=to_regclass('personal_workspace_runtime') AND indisvalid AND indisready) AS idle`);
+      EXISTS(SELECT 1 FROM pg_index WHERE indexrelid=to_regclass('personal_workspace_idle') AND indrelid=to_regclass('personal_workspace_runtime') AND indisvalid AND indisready) AS idle,
+      EXISTS(SELECT 1 FROM pg_index WHERE indexrelid=to_regclass('personal_run_work_queued') AND indrelid=to_regclass('personal_run_work') AND indisvalid AND indisready) AS work_queued,
+      EXISTS(SELECT 1 FROM pg_index WHERE indexrelid=to_regclass('personal_run_work_expired') AND indrelid=to_regclass('personal_run_work') AND indisvalid AND indisready) AS work_expired,
+      EXISTS(SELECT 1 FROM pg_index WHERE indexrelid=to_regclass('personal_workspace_rotation') AND indrelid=to_regclass('personal_workspace_runtime') AND indisvalid AND indisready) AS rotation,
+      EXISTS(SELECT 1 FROM pg_index WHERE indexrelid=to_regclass('personal_schedule_fires_history') AND indrelid=to_regclass('personal_schedule_fires') AND indisvalid AND indisready) AS fire_history`);
     if (Object.values(indexes.rows[0]).some((v) => v !== true))
       throw new Error("SCHEMA_INDEXES_INCOMPLETE");
+    const triggers = await this.healthPool
+      .query(`SELECT count(*)::int AS n FROM pg_trigger WHERE tgrelid=to_regclass('personal_runs') AND NOT tgisinternal AND tgenabled IN ('O','A') AND (tgname,tgfoid) IN (
+      ('personal_runs_work_insert',to_regprocedure('personal_run_work_insert()')),('personal_runs_work_update',to_regprocedure('personal_run_work_update()')),('personal_runs_work_delete',to_regprocedure('personal_run_work_delete()')))`);
+    if (triggers.rows[0].n !== 3) throw new Error("SCHEMA_TRIGGERS_INCOMPLETE");
   }
   async workerHeartbeat(health: WorkerHealth) {
     await this.healthPool.query(
@@ -425,14 +477,7 @@ export class PersonalPostgresStore implements Store {
   }
   async listRunWork(now: number, limit: number, afterUser = "") {
     candidateLimit(limit);
-    const result = await this.pool.query(
-      `WITH candidates AS (
-      (SELECT DISTINCT ON(user_id) user_id,run_id,0 AS priority FROM personal_runs WHERE lease_owner IS NOT NULL AND lease_expires<$1 AND state<>'QUEUED' ORDER BY user_id,lease_expires,run_id)
-      UNION ALL
-      (SELECT DISTINCT ON(user_id) user_id,run_id,1 AS priority FROM personal_runs WHERE state='QUEUED' ORDER BY user_id,created_at,run_id)
-    ) SELECT user_id AS "user",run_id AS "runId" FROM candidates ORDER BY (user_id>$2) DESC,user_id,priority LIMIT $3`,
-      [now, afterUser, limit],
-    );
+    const result = await this.pool.query(runWorkQuery, [now, afterUser, limit]);
     return result.rows as { user: string; runId: string }[];
   }
   async renewRunLease(user: string, runId: string, owner: string, now: number) {
@@ -513,13 +558,11 @@ export class PersonalPostgresStore implements Store {
       [now, intervalMs],
     );
     if (!lease.rowCount) return [];
-    const result = await this.pool.query(
-      `WITH due AS (SELECT user_id,workspace_id FROM personal_workspace_runtime WHERE sandbox_id IS NOT NULL AND NOT COALESCE((data->>'deleting')::boolean,false)
-      AND (last_used_at IS NULL OR last_used_at<=$1::bigint-$3::bigint OR (last_used_at<=$1::bigint-$2::bigint AND COALESCE(data->>'sandboxState','active') NOT IN ('paused','unknown')))
-      ORDER BY checked_at,last_used_at NULLS FIRST,user_id,workspace_id LIMIT 128 FOR UPDATE SKIP LOCKED)
-      UPDATE personal_workspace_runtime w SET checked_at=$1 FROM due d WHERE w.user_id=d.user_id AND w.workspace_id=d.workspace_id RETURNING w.user_id AS "user",w.data AS workspace`,
-      [now, pauseMs, releaseMs],
-    );
+    const result = await this.pool.query(sandboxMaintenanceQuery, [
+      now,
+      pauseMs,
+      releaseMs,
+    ]);
     return result.rows as {
       user: string;
       workspace: State["workspaces"][string];
@@ -544,7 +587,7 @@ export class PersonalPostgresStore implements Store {
       await c.query("BEGIN");
       await c.query(
         "INSERT INTO personal_user_state (user_id,state) VALUES ($1,$2) ON CONFLICT DO NOTHING",
-        [tenant, JSON.stringify(emptyState())],
+        [tenant, JSON.stringify(metadata(emptyState()))],
       );
       const before = await loadState(c, tenant, true, undefined, true, {
           workspaceOnly,
@@ -791,11 +834,6 @@ export class PersonalPostgresStore implements Store {
       )
         throw new Error("scheduleTx scope violation");
       await saveState(c, tenant, before, s, true);
-      if (s.audit.length)
-        await c.query(
-          "UPDATE personal_user_state SET state=jsonb_set(state,'{audit}',COALESCE(state->'audit','[]'::jsonb)||$2::jsonb),revision=revision+1 WHERE user_id=$1",
-          [tenant, JSON.stringify(s.audit)],
-        );
       await c.query("COMMIT");
       return structuredClone(result);
     } catch (e) {

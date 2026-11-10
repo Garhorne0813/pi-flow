@@ -24,7 +24,7 @@ npm start
 npm run worker
 ```
 
-个人 schema 版本为 **9**；迁移文件顺序为 `005_agent_task_versions.sql`、`006_logical_agent_acl.sql`、`007_personal_platform.sql`、`008_editable_agents.sql`、`009_personal_execution_indexes.sql`、`010_personal_session_pagination.sql`、`011_personal_runtime_hot_paths.sql`，两个 schema 独立管理。v6 将已有个人平台的 active Agent 转为当前可编辑配置，并保留旧 Run 快照和等待交互任务；009 在完成调度记录归一化和热路径索引后推进到 v7，010 增加 Session 列表索引并推进到 v8；011 规范化审计/Usage/运行状态、增加全局候选和流事件计数器并推进到 v9；readiness 同时要求相关表和有效索引；旧版本表仅作历史档案。`harness_*` 表不自动迁移、不重命名，也不推断旧工作区的数据归属。应备份数据库后在部署窗口执行迁移。
+个人 schema 版本为 **10**；迁移文件顺序为 `005_agent_task_versions.sql`、`006_logical_agent_acl.sql`、`007_personal_platform.sql`、`008_editable_agents.sql`、`009_personal_execution_indexes.sql`、`010_personal_session_pagination.sql`、`011_personal_runtime_hot_paths.sql`、`012_personal_queue_frontiers.sql`，两个 schema 独立管理。v6 将已有个人平台的 active Agent 转为当前可编辑配置，并保留旧 Run 快照和等待交互任务；009 在完成调度记录归一化和热路径索引后推进到 v7，010 增加 Session 列表索引并推进到 v8；011 规范化审计/Usage/运行状态、增加全局候选和流事件计数器并推进到 v9；012 清理旧审计副本、增加事务维护的 Run 队首投影和查询索引，推进到 v10；readiness 同时要求相关表和有效索引；旧版本表仅作历史档案。`harness_*` 表不自动迁移、不重命名，也不推断旧工作区的数据归属。应备份数据库后在部署窗口执行迁移。
 
 ## 当前契约
 
@@ -90,3 +90,5 @@ CI 依赖审计使用 `npm audit --audit-level=high`。已升级 Fastify、Zod�
 与 main 整合后的验证：285 项测试全部通过，0 失败、0 跳过，包含真实 PostgreSQL、v5→v6 迁移和回滚、个人与旧版控制台浏览器测试、Skill ZIP 上传。类型检查、构建、无配置目录 Demo 冒烟、可选目录导入校验与 vendored SDK 校验通过。最终 UI 文案调整后另跑 20 项控制台测试和 Demo 冒烟，均通过。后续 CI 安全依赖修复将审计结果降为 2 moderate、0 high、0 critical，`npm audit --audit-level=high` 通过。
 
 数据库高频路径、迁移 011 和专项实测见 [运行热路径说明](runtime-hotpaths.md)。
+
+第五轮的一致性修复、Schedule 历史分页及 10 万规模执行计划见 [第五轮说明](pr60-round5.md)。
