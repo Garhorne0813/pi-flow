@@ -83,6 +83,6 @@ TEST_DATABASE_URL=postgres://... REQUIRE_POSTGRES_TESTS=true npm test
 
 新增测试覆盖当前配置更新、并发编辑冲突、排队 Run 快照、审批续跑、实时禁用和访问控制；目录导入防止无意覆盖；v5→v6 数据库迁移验证旧等待交互任务、Session 转换和重复迁移不覆盖新配置。原有私有工作区、MCP、记忆、调度、Token、Skill 交付与 SSE 测试继续运行。
 
-依赖审计仍有此前记录的仓库依赖问题（涉及 Zod、body-parser、vendored SDK 的 undici 等），本次配置简化不包含依赖升级。
+CI 依赖审计使用 `npm audit --audit-level=high`。已升级 Fastify、Zod、body-parser 和两条 Undici 依赖链；Pi SDK 仅重打包安全依赖元数据，源码和 dist 保持不变。仍有 2 项与 Pi/minimatch 相关的中危报告，不阻塞当前审计门槛。
 
-与 main 整合后的验证：285 项测试全部通过，0 失败、0 跳过，包含真实 PostgreSQL、v5→v6 迁移和回滚、个人与旧版控制台浏览器测试、Skill ZIP 上传。类型检查、构建、无配置目录 Demo 冒烟、可选目录导入校验与 vendored SDK 校验通过。最终 UI 文案调整后另跑 20 项控制台测试和 Demo 冒烟，均通过。依赖审计报告 10 项既有问题（3 high、6 moderate、1 low），与 main 的锁文件审计结果相同。
+与 main 整合后的验证：285 项测试全部通过，0 失败、0 跳过，包含真实 PostgreSQL、v5→v6 迁移和回滚、个人与旧版控制台浏览器测试、Skill ZIP 上传。类型检查、构建、无配置目录 Demo 冒烟、可选目录导入校验与 vendored SDK 校验通过。最终 UI 文案调整后另跑 20 项控制台测试和 Demo 冒烟，均通过。后续 CI 安全依赖修复将审计结果降为 2 moderate、0 high、0 critical，`npm audit --audit-level=high` 通过。
