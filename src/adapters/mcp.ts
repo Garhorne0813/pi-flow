@@ -8,6 +8,7 @@ import {
 } from "../domain.js";
 import type { Store } from "../store.js";
 export type McpCallContext = {
+  authorize?: () => Promise<void>;
   callId: string;
   runId: string;
   requestId?: string;
@@ -298,6 +299,7 @@ export class MCPManager {
             // Persist the dispatch intent before the network write. Cancellation
             // during persistence is still safe: fetch has not started.
             await context?.event("dispatching");
+            await context?.authorize?.();
             signal.throwIfAborted();
             return () => {
               dispatched = true;

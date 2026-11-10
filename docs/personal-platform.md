@@ -24,7 +24,7 @@ npm start
 npm run worker
 ```
 
-个人 schema 版本为 **6**；迁移文件顺序为 `005_agent_task_versions.sql`、`006_logical_agent_acl.sql`、`007_personal_platform.sql`、`008_editable_agents.sql`，两个 schema 独立管理。v6 将已有个人平台的 active Agent 转为当前可编辑配置，并保留旧 Run 快照和等待交互任务；旧版本表仅作历史档案。`harness_*` 表不自动迁移、不重命名，也不推断旧工作区的数据归属。应备份数据库后在部署窗口执行迁移。
+个人 schema 版本为 **6**；迁移文件顺序为 `005_agent_task_versions.sql`、`006_logical_agent_acl.sql`、`007_personal_platform.sql`、`008_editable_agents.sql`、`009_personal_execution_indexes.sql`，两个 schema 独立管理。v6 将已有个人平台的 active Agent 转为当前可编辑配置，并保留旧 Run 快照和等待交互任务；旧版本表仅作历史档案。`harness_*` 表不自动迁移、不重命名，也不推断旧工作区的数据归属。应备份数据库后在部署窗口执行迁移。
 
 ## 当前契约
 
@@ -56,7 +56,7 @@ npm run worker
 
 - `GET/POST /admin/config/agents`：POST 接受 `{revision,agents:[{key,config}]}`，整份校验后原子更新；允许空数组，省略的 Agent 被禁用。可传入 enabled/allowedUsers；不创建 AgentVersion 或 publication。
 - `GET/POST /admin/config/global`：POST 接受 `{revision,policy:{disabledTools},modelCatalog?,secrets?}`。两个作用域有独立 revision，不匹配返回 409。revision 仅用于防止并发编辑覆盖；全局编辑不会修改 Agent 的 revision，不维护发布或草稿状态。
-- `modelCatalog` 条目为 `{provider,modelId,baseUrl,secretRef,default}`，非空目录要求唯一默认模型。`secrets` 为引用名到密钥的映射，使用 `CONFIG_SECRET_KEY` 加密，GET 不返回密钥。目录非空时只允许目录中的模型；目录为空才回退 `LLM_*`。每个模型会话有独立凭证上下文。
+- `modelCatalog` 条目为 `{provider,modelId,baseUrl,secretRef,default}`，非空目录要求唯一默认模型。`secrets` 为引用名到密钥的映射，使用 `CONFIG_SECRET_KEY` 加密，GET 不返回密钥。目录非空时只允许目录中的模型；目录为空才回退 `LLM_*`。每个模型会话有独立凭证上下文。Run 通过私有 `modelGatewayRef` 固定网关与加密密钥版本；目录替换和同名密钥轮换不改变已排队任务或审批续跑。
 - `approval.mode=user|guarded|auto`；默认 user。guarded 当前仅对精确 `pwd` shell 命令自动放行。平台 disabledTools 对旧 Run 也生效。
 - `userTokenAccess=true` 时提交 Bearer 以 `RUN_TOKEN_KEY` 密封，只有 bash 获得 `USER_TOKEN`，终态移除密文。两个加密密钥都应为 base64 编码的 32 随机字节，并在 API/Worker 之间保持一致。
 
@@ -71,6 +71,8 @@ COP 适配器当前接受成功响应 `{code:200|0,data:{userId|id,roleKeys?}}` 
 3. 旧共享工作区配置的专门迁移工具、Skill 交付回滚与生产对账。Agent 草稿、发布历史与 Git 自动同步不属于当前设计。
 4. 调度的 jitter、misfire 策略、结束条件、全局交互容量预留；记忆的定期去重/归档/索引修复和完整删除/批量管理 API。
 5. 图片输入契约、200 ms transcript 合并 checkpoint，以及独立的用户/会话 fencing 租约表。当前保留已有 operation ownership、未知结果隔离和 Run lease 故障语义。
+
+评审修复、迁移和性能验证详见 [PR #60 评审修复](pr60-review-fixes.md)。
 
 ## 验证
 

@@ -194,6 +194,8 @@ export type Run = {
   configDigest?: string;
   cwd?: string;
   model?: AgentConfig["model"];
+  /** Private execution reference; null pins the deployment gateway fallback. */
+  modelGatewayRef?: string | null;
   taskId?: string;
   rootRunId?: string;
   eventSeq?: number;
@@ -254,7 +256,12 @@ export type Audit = {
   result: string;
 };
 export type State = {
-  modelCatalog?: import("./config/models.js").ModelEntry[];
+  modelCatalog?: import("./config/models.js").CatalogModel[];
+  modelGatewayVersions?: Record<
+    string,
+    import("./config/models.js").ModelGateway
+  >;
+  modelSecretVersions?: Record<string, { ref: string; sealed: string }>;
   secrets?: Record<string, string>;
   configRevisions?: { global: number; agents: number };
   schedules?: Record<string, import("./schedules/service.js").ScheduledTask>;

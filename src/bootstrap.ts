@@ -4,6 +4,7 @@ import { MemoryRegistry, PostgresRegistry } from "./store/registry.js";
 import { personalStore } from "./store/personal.js";
 import { PersonalService } from "./personal-service.js";
 import { seedDemo } from "./config/agents.js";
+import { versionModelCatalog } from "./config/models.js";
 import { z } from "zod";
 import { HostSkillPackages, skillUploadRoot } from "./skill-packages.js";
 import {
@@ -57,6 +58,7 @@ export async function bootstrap() {
     backing instanceof PersonalPostgresStore
       ? new PostgresRegistry(backing.pool)
       : new MemoryRegistry();
+  await registry.tx(versionModelCatalog);
   if (
     !demo &&
     !(await registry.read((s) => s.modelCatalog?.length)) &&

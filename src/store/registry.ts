@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type pg from "pg";
+import { personalConnection } from "../personal-context.js";
 import { emptyState, Fault, id, type Actor, type State } from "../domain.js";
 export interface Registry {
   read<T>(fn: (s: State) => T | Promise<T>): Promise<T>;
@@ -43,7 +44,9 @@ export class MemoryRegistry implements Registry {
 export class PostgresRegistry implements Registry {
   constructor(private pool: pg.Pool) {}
   async read<T>(fn: (s: State) => T | Promise<T>) {
-    const r = await this.pool.query(`SELECT document,
+    const context = personalConnection.getStore();
+    const source = context?.pool === this.pool ? context.client : this.pool;
+    const r = await source.query(`SELECT document,
       COALESCE((SELECT jsonb_object_agg(id,data) FROM personal_agents),'{}'::jsonb) AS agents
       FROM platform_config WHERE scope='runtime'`);
     return structuredClone(

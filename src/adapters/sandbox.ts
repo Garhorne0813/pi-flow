@@ -657,27 +657,34 @@ export class SandboxManager {
       bundle,
       async (sid) => {
         signal?.throwIfAborted();
-        const { skills, hostUploads, trafficToken } = await this.store.read(
-          a.tenantId,
-          (s) => ({
-            skills: skillIds.map((id) => {
-              const skill = s.skills[id];
-              if (!skill?.enabled || skill.bundle !== bundle)
-                throw new Fault(403, "SKILL_DENIED");
-              return { path: skill.path, digest: skill.digest };
-            }),
-            hostUploads: skillIds
-              .map((id) => s.skills[id]!)
-              .filter((skill) => skill.hostUpload)
-              .map(({ id, bundle, path, hostUpload }) => ({
-                id,
-                bundle,
-                path,
-                hostUpload,
-              })),
-            trafficToken: s.workspaces[wid]?.sandboxTrafficToken,
-          }),
-        );
+        const { skills, hostUploads, trafficToken } =
+          await this.store.readMetadata(
+            a.tenantId,
+            ["skills", "workspaces"],
+            (s) => {
+              return {
+                skills: skillIds.map((id) => {
+                  const skill = s.skills[id];
+                  if (!skill?.enabled || skill.bundle !== bundle)
+                    throw new Fault(403, "SKILL_DENIED");
+                  return { path: skill.path, digest: skill.digest };
+                }),
+                hostUploads: skillIds
+                  .map((id) => s.skills[id]!)
+                  .filter((skill) => skill.hostUpload)
+                  .map(({ id, bundle, path, hostUpload }) => ({
+                    id,
+                    bundle,
+                    path,
+                    hostUpload,
+                  })),
+                trafficToken: s.workspaces[wid]?.sandboxTrafficToken,
+              };
+            },
+          );
+        // Fresh Run and registry snapshot after preparation/metadata reads,
+        // immediately before dispatch. No historical event scan on this path.
+        if (authorize) await this.store.readRun(a.tenantId, owner, authorize);
         signal?.throwIfAborted();
         return this.provider.execute(
           sid,

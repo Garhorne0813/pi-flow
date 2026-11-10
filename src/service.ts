@@ -225,13 +225,14 @@ function createPersonalRun(
       };
     else throw new Fault(503, "DEFAULT_MODEL_UNAVAILABLE");
   }
-  if (
-    catalog.length &&
-    !catalog.some(
-      (m) => m.provider === model.provider && m.modelId === model.modelId,
-    )
-  )
+  const selected = catalog.find(
+    (m) => m.provider === model.provider && m.modelId === model.modelId,
+  );
+  const inheritedGateway = extra.modelGatewayRef !== undefined;
+  if (!inheritedGateway && catalog.length && !selected)
     throw new Fault(403, "MODEL_NOT_APPROVED");
+  if (!inheritedGateway && selected && !selected.gatewayRef)
+    throw new Fault(503, "MODEL_GATEWAY_UNVERSIONED");
   const r: Run = {
     id: id(),
     sessionId: sid,
@@ -248,6 +249,7 @@ function createPersonalRun(
     ...(agentId ? {} : { agentVersionId: av.id }),
     configDigest: digest({ ...config, model }),
     model: structuredClone(model),
+    modelGatewayRef: selected?.gatewayRef ?? null,
     capabilities: structuredClone({ ...config, model }),
     cwd: ses.cwd ?? "/workspace",
     ...extra,
@@ -607,6 +609,7 @@ export class HarnessService {
           agentVersionId: r.agentVersionId,
           configDigest: r.configDigest,
           model: r.model,
+          modelGatewayRef: r.modelGatewayRef,
           cwd: r.cwd,
           taskId: r.taskId ?? r.id,
           rootRunId: r.rootRunId ?? r.id,
@@ -732,6 +735,10 @@ export class HarnessService {
         parentRunId: p.id,
         schedule: p.schedule,
         userTokenRef: p.userTokenRef,
+        ...(effective.model.provider === config.model.provider &&
+        effective.model.modelId === config.model.modelId
+          ? { model: p.model, modelGatewayRef: p.modelGatewayRef }
+          : {}),
         taskId: p.taskId ?? p.id,
         rootRunId: p.rootRunId ?? p.id,
         agentId: ses.userId

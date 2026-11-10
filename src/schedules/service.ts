@@ -90,8 +90,19 @@ export class ScheduleService {
         ...taskFields(task),
         ...z.record(z.string(), z.unknown()).parse(input),
       });
+      const av = s.managedAgents?.[b.agentId];
+      if (!av || !agentAllowed(av, a)) throw new Fault(404, "AGENT_NOT_FOUND");
+      if (av.config.userTokenAccess)
+        throw new Fault(400, "SCHEDULE_USER_TOKEN_UNSUPPORTED");
+      const cwd = workspacePath(b.cwd);
+      if (
+        b.agentId !== task.agentId ||
+        cwd !== task.cwd ||
+        b.sessionMode !== task.sessionMode
+      )
+        delete task.sessionId;
       Object.assign(task, b, {
-        cwd: workspacePath(b.cwd),
+        cwd,
         nextFireAt: nextFire(b.cron, b.timezone),
       });
       audit(s, a, "schedule.update", sid);
@@ -112,7 +123,11 @@ export class ScheduleService {
   ): Fire {
     const scheduledFor = trigger === "cron" ? task.nextFireAt : now,
       key = `${task.id}:${trigger}:${scheduledFor}`;
-    if (s.scheduleFires?.[key]) return s.scheduleFires[key]!;
+    if (s.scheduleFires?.[key]) {
+      if (trigger === "cron")
+        task.nextFireAt = nextFire(task.cron, task.timezone, now);
+      return s.scheduleFires[key]!;
+    }
     const fire: Fire = {
       id: id(),
       scheduleId: task.id,
@@ -133,7 +148,10 @@ export class ScheduleService {
     if (
       !task.sessionId ||
       task.sessionMode === "new" ||
-      s.sessions[task.sessionId]?.deletedAt
+      !s.sessions[task.sessionId] ||
+      s.sessions[task.sessionId]?.deletedAt ||
+      s.sessions[task.sessionId]?.agentId !== task.agentId ||
+      s.sessions[task.sessionId]?.cwd !== task.cwd
     ) {
       const sid = id();
       s.sessions[sid] = {
@@ -178,25 +196,37 @@ export class ScheduleService {
     );
   }
   async tick() {
+    if (this.service.store.listScheduleWork && this.service.store.scheduleTx) {
+      for (const {
+        user,
+        scheduleId,
+      } of await this.service.store.listScheduleWork(Date.now(), 64))
+        await this.service.store.scheduleTx(user, scheduleId, (s) =>
+          this.settleAndFire(s, Date.now()),
+        );
+      return;
+    }
     for (const user of await this.service.store.tenants())
-      await this.service.store.tx(user, (s) => {
-        for (const fire of Object.values(s.scheduleFires ?? {})) {
-          if (fire.state !== "submitted" || !fire.runId) continue;
-          const run = s.runs[fire.runId],
-            task = s.schedules?.[fire.scheduleId];
-          if (!run || !terminal(run.state)) continue;
-          fire.state = run.state === "COMPLETED" ? "completed" : "failed";
-          fire.error = run.error;
-          if (task) {
-            task.failures = fire.state === "failed" ? task.failures + 1 : 0;
-            if (task.failures >= task.maxConsecutiveFailures)
-              task.enabled = false;
-          }
-        }
-        for (const task of Object.values(s.schedules ?? {}))
-          if (task.enabled && task.nextFireAt <= Date.now())
-            this.fire(s, task, Date.now(), "cron");
-      });
+      await this.service.store.tx(user, (s) =>
+        this.settleAndFire(s, Date.now()),
+      );
+  }
+  private settleAndFire(s: State, now: number) {
+    for (const fire of Object.values(s.scheduleFires ?? {})) {
+      if (fire.state !== "submitted" || !fire.runId) continue;
+      const run = s.runs[fire.runId],
+        task = s.schedules?.[fire.scheduleId];
+      if (!run || !terminal(run.state)) continue;
+      fire.state = run.state === "COMPLETED" ? "completed" : "failed";
+      fire.error = run.error;
+      if (task) {
+        task.failures = fire.state === "failed" ? task.failures + 1 : 0;
+        if (task.failures >= task.maxConsecutiveFailures) task.enabled = false;
+      }
+    }
+    for (const task of Object.values(s.schedules ?? {}))
+      if (task.enabled && task.nextFireAt <= now)
+        this.fire(s, task, now, "cron");
   }
 }
 function taskFields(t: ScheduledTask) {

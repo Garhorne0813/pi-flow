@@ -126,11 +126,10 @@ export class Worker {
       );
       let r: Run | undefined;
       for (const rid of candidates) {
-        const claim =
-          this.service instanceof PersonalService
-            ? <T>(fn: (s: State) => T) => this.service.store.tx(tenant, fn)
-            : <T>(fn: (s: State) => T) =>
-                this.service.store.runTx(tenant, rid, fn);
+        const claim = <T>(fn: (s: State) => T) =>
+          this.service.store.claimRun
+            ? this.service.store.claimRun(tenant, rid, fn)
+            : this.service.store.runTx(tenant, rid, fn);
         r = await claim((s) => {
           const current = s.runs[rid];
           if (!current) return;
@@ -347,6 +346,15 @@ export class Worker {
       controller.signal.throwIfAborted();
       const bare = name;
       const mcpTool = name.startsWith("mcp_");
+      const authorize = (s: State) => {
+        const r = this.owned(s, initial.id);
+        const { config } = authorizedRun(s, r);
+        if ((r.deadline ?? Infinity) <= Date.now())
+          throw new Fault(408, "RUN_TIMEOUT");
+        authorizeTool(s, config, bare);
+      };
+      const recheck = () =>
+        this.service.store.readRun(tenant, initial.id, authorize);
       if (
         initial.schedule &&
         (bare === "ask_user_question" ||
@@ -381,6 +389,7 @@ export class Worker {
           { path: args.path },
           controller.signal,
           config.skills,
+          authorize,
         )) as { text: string };
         if (
           createHash("sha256").update(current.text).digest("hex") !==
@@ -448,6 +457,7 @@ export class Worker {
             callId,
             runId: initial.id,
             requestId: initial.requestId,
+            authorize: recheck,
             event: (phase) =>
               emit(`tool.${phase}`, {
                 name,
@@ -456,11 +466,13 @@ export class Worker {
                 requestId: initial.requestId,
               }),
           });
-        else if (bare === "web_fetch")
+        else if (bare === "web_fetch") {
+          await recheck();
           result = await webFetch(String(args.url), controller.signal);
-        else if (bare === "web_search")
+        } else if (bare === "web_search") {
+          await recheck();
           result = await webSearch(String(args.query), controller.signal);
-        else if (memoryWrite) {
+        } else if (memoryWrite) {
           let content = String(args.content);
           if (bare === "edit") {
             const current = (await this.sandbox.execute(
@@ -472,6 +484,7 @@ export class Worker {
               { path: args.path },
               controller.signal,
               config.skills,
+              authorize,
             )) as { text: string };
             if (
               createHash("sha256").update(current.text).digest("hex") !==
@@ -494,6 +507,8 @@ export class Worker {
             String(args.path),
             content,
             controller.signal,
+            false,
+            authorize,
           );
         } else if (bare === "ask_user_question")
           return await defer("question", { question: args.question });
@@ -549,14 +564,7 @@ export class Worker {
             },
             controller.signal,
             config.skills,
-            (s) => {
-              const r = this.owned(s, initial.id);
-              const { config } = authorizedRun(s, r);
-              if ((r.deadline ?? Infinity) <= Date.now())
-                throw new Fault(408, "RUN_TIMEOUT");
-              if (!config.tools.includes(bare as AgentConfig["tools"][number]))
-                throw new Fault(403, "TOOL_DENIED");
-            },
+            authorize,
           );
           if (bare === "read") {
             const fresh = await get();
@@ -641,7 +649,7 @@ export class Worker {
         await this.runtime.execute({
           gateway:
             this.service instanceof PersonalService
-              ? await this.service.gatewayFor(ctx.config.model)
+              ? await this.service.gatewayFor(initial)
               : undefined,
           beforeModelRequest: async (estimate) => {
             try {

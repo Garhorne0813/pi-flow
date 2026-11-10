@@ -404,3 +404,291 @@ test(
     }
   },
 );
+
+async function reviewDatabase() {
+  const control = new pg.Pool({ connectionString: url }),
+    schema = "review_" + id().replaceAll("-", "");
+  await control.query(`CREATE SCHEMA ${schema}`);
+  const scoped = new URL(url!);
+  scoped.searchParams.set("options", `-c search_path=${schema}`);
+  const a = new PersonalPostgresStore(scoped.toString()),
+    b = new PersonalPostgresStore(scoped.toString());
+  for (const name of (await readdir("migrations"))
+    .filter((n) => n.endsWith(".sql"))
+    .sort())
+    await a.pool.query(await readFile("migrations/" + name, "utf8"));
+  const ar = new PostgresRegistry(a.pool),
+    br = new PostgresRegistry(b.pool),
+    sa = personalStore(a, ar),
+    sb = personalStore(b, br);
+  const actor = await principal(ar, {
+    tenantId: "review",
+    userId: "review",
+    admin: true,
+  });
+  const config = AgentConfig.parse({
+    name: "review",
+    systemPrompt: "a",
+    model: { provider: "demo", modelId: "demo" },
+    tools: [],
+  });
+  await ar.tx((s) =>
+    replaceAgents(
+      s,
+      [
+        { key: "a", config },
+        { key: "b", config: { ...config, systemPrompt: "b" } },
+      ],
+      actor,
+    ),
+  );
+  return {
+    a,
+    b,
+    ar,
+    br,
+    sa,
+    sb,
+    actor,
+    config,
+    service: new PersonalService(sa, ar),
+    other: new PersonalService(sb, br),
+    close: async () => {
+      await a.close();
+      await b.close();
+      await control.query(`DROP SCHEMA ${schema} CASCADE`);
+      await control.end();
+    },
+  };
+}
+
+test(
+  "personal targeted claims preserve per-user serialization across clients and a saturated connection pool",
+  { skip: !url },
+  async () => {
+    const f = await reviewDatabase();
+    try {
+      const runs = [];
+      for (let i = 0; i < 12; i++) {
+        const ses = await f.service.createPersonalSession(f.actor, {
+          agentId: "a",
+        });
+        runs.push(await f.service.submit(f.actor, ses.id, "claim"));
+      }
+      const claimed = await Promise.all(
+        runs.map((run, i) =>
+          (i % 2 ? f.sa : f.sb).claimRun!(f.actor.userId, run.id, (s) => {
+            const r = s.runs[run.id]!;
+            if (
+              Object.values(s.runs).some(
+                (other) => other.id !== r.id && other.state === "RUNNING",
+              )
+            )
+              return;
+            r.state = "RUNNING";
+            r.lease = { owner: "claim", expires: Date.now() + 30000 };
+            event(s, r, "run.started");
+            return r.id;
+          }),
+        ),
+      );
+      assert.equal(claimed.filter(Boolean).length, 1);
+      assert.equal(
+        Number(
+          (
+            await f.a.pool.query(
+              "SELECT count(*) FROM personal_runs WHERE user_id=$1 AND state='RUNNING'",
+              [f.actor.userId],
+            )
+          ).rows[0].count,
+        ),
+        1,
+      );
+    } finally {
+      await f.close();
+    }
+  },
+);
+
+test(
+  "scheduler targets normalized rows, settles across clients and creates one new Session after Agent/cwd edits",
+  { skip: !url },
+  async () => {
+    const { ScheduleService } = await import("../src/schedules/service.js");
+    const f = await reviewDatabase();
+    try {
+      const one = new ScheduleService(f.service),
+        two = new ScheduleService(f.other);
+      const task = await one.create(f.actor, {
+        agentId: "a",
+        cron: "* * * * *",
+        prompt: "tick",
+      });
+      let dueTime = 0;
+      const due = () =>
+        f.a.pool.query(
+          "UPDATE personal_scheduled_tasks SET data=jsonb_set(data,'{nextFireAt}',$3::jsonb) WHERE user_id=$1 AND schedule_id=$2",
+          [f.actor.userId, task.id, String(++dueTime)],
+        );
+      await due();
+      await Promise.all([one.tick(), two.tick()]);
+      let state = await f.sb.read(f.actor.userId, (s) => s);
+      assert.equal(Object.values(state.scheduleFires!).length, 1);
+      const first = Object.values(state.runs)[0]!;
+      await f.sb.runTx(f.actor.userId, first.id, (s) => {
+        s.runs[first.id]!.state = "COMPLETED";
+      });
+      await two.tick();
+      assert.equal(
+        await f.sa.read(
+          f.actor.userId,
+          (s) => Object.values(s.scheduleFires!)[0]!.state,
+        ),
+        "completed",
+      );
+      await two.update(f.actor, task.id, { agentId: "b", cwd: "changed" });
+      await due();
+      await Promise.all([one.tick(), two.tick()]);
+      state = await f.sa.read(f.actor.userId, (s) => s);
+      assert.equal(Object.keys(state.scheduleFires!).length, 2);
+      const next = Object.values(state.runs).find((r) => r.id !== first.id)!;
+      assert.notEqual(next.sessionId, first.sessionId);
+      assert.equal(next.agentId, "b");
+      assert.equal(next.cwd, "/workspace/changed");
+      const metadata = (
+        await f.a.pool.query(
+          "SELECT state FROM personal_user_state WHERE user_id=$1",
+          [f.actor.userId],
+        )
+      ).rows[0].state;
+      assert.equal("schedules" in metadata, false);
+      assert.equal("scheduleFires" in metadata, false);
+      const scheduled = await f.sb.readMetadata(
+        f.actor.userId,
+        ["schedules", "scheduleFires"],
+        (s) => ({
+          task: s.schedules![task.id],
+          fires: Object.values(s.scheduleFires!),
+        }),
+      );
+      assert.equal(scheduled.task!.agentId, "b");
+      assert.equal(scheduled.fires.length, 2);
+      // Replay the normalization migration on a legacy metadata-only schedule.
+      const legacy = { ...task, id: id(), prompt: "legacy", enabled: false },
+        oldFire = {
+          id: id(),
+          scheduleId: legacy.id,
+          trigger: "cron",
+          scheduledFor: 1,
+          state: "completed",
+        };
+      await f.a.pool.query(
+        "UPDATE personal_user_state SET state=state||jsonb_build_object('schedules',$2::jsonb,'scheduleFires',$3::jsonb) WHERE user_id=$1",
+        [
+          f.actor.userId,
+          JSON.stringify({ [legacy.id]: legacy }),
+          JSON.stringify({ old: oldFire }),
+        ],
+      );
+      const sql = await readFile(
+        "migrations/009_personal_execution_indexes.sql",
+        "utf8",
+      );
+      await f.a.pool.query(sql);
+      await f.a.pool.query(sql);
+      state = await f.sa.read(f.actor.userId, (s) => s);
+      assert.equal(state.schedules![legacy.id]!.prompt, "legacy");
+      assert.ok(
+        Object.values(state.scheduleFires!).some((f) => f.id === oldFire.id),
+      );
+    } finally {
+      await f.close();
+    }
+  },
+);
+
+test(
+  "gateway and credential versions survive catalog replacement across PostgreSQL clients",
+  { skip: !url },
+  async () => {
+    const { versionModelCatalog } = await import("../src/config/models.js"),
+      { sealToken } = await import("../src/security/token-vault.js");
+    const previous = process.env.CONFIG_SECRET_KEY;
+    process.env.CONFIG_SECRET_KEY = Buffer.alloc(32, 9).toString("base64");
+    const f = await reviewDatabase();
+    let worker: Worker | undefined;
+    try {
+      const catalog = async (modelId: string, key: string) =>
+        f.ar.tx((s) => {
+          s.managedAgents!.a!.config.model = {
+            provider: "default",
+            modelId: "default",
+          };
+          s.modelCatalog = [
+            {
+              provider: "test",
+              modelId,
+              baseUrl: `https://${modelId}.example/v1`,
+              secretRef: "key",
+              default: true,
+            },
+          ];
+          s.secrets = {
+            key: sealToken(key, "platform:key", "CONFIG_SECRET_KEY"),
+          };
+          versionModelCatalog(s);
+        });
+      await catalog("first", "first-key");
+      const ses = await f.service.createPersonalSession(f.actor, {
+        agentId: "a",
+      });
+      const queued = await f.service.submit(f.actor, ses.id, "queued");
+      await catalog("second", "second-key");
+      let gateway: unknown;
+      worker = new Worker(
+        f.other,
+        {
+          execute: async (c) => {
+            gateway = c.gateway;
+          },
+        },
+        new SandboxManager(f.sb, new DemoSandbox()),
+        new MCPManager(f.sb, {}),
+      );
+      for (let i = 0; i < 100; i++) {
+        await worker.tick();
+        if (
+          await f.sb.readRun(
+            f.actor.userId,
+            queued.id,
+            (s) => s.runs[queued.id]!.state === "COMPLETED",
+          )
+        )
+          break;
+        await new Promise((r) => setTimeout(r, 5));
+      }
+      assert.deepEqual(gateway, {
+        baseUrl: "https://first.example/v1",
+        apiKey: "first-key",
+      });
+      assert.equal(
+        await f.sb.readRun(
+          f.actor.userId,
+          queued.id,
+          (s) => s.runs[queued.id]!.state,
+        ),
+        "COMPLETED",
+      );
+      const current = await f.other.submit(f.actor, ses.id, "new");
+      assert.deepEqual(await f.other.gatewayFor(current), {
+        baseUrl: "https://second.example/v1",
+        apiKey: "second-key",
+      });
+    } finally {
+      await worker?.stop();
+      await f.close();
+      if (previous === undefined) delete process.env.CONFIG_SECRET_KEY;
+      else process.env.CONFIG_SECRET_KEY = previous;
+    }
+  },
+);

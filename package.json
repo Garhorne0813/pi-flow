@@ -25,7 +25,8 @@
     "skills:deliver": "tsx src/config/deliver.ts",
     "skills:deliver:prod": "node dist/config/deliver.js",
     "config:import": "tsx src/config/cli.ts",
-    "config:import:prod": "node dist/config/cli.js"
+    "config:import:prod": "node dist/config/cli.js",
+    "smoke:compose": "node scripts/smoke-compose.mjs"
   },
   "dependencies": {
     "@cubesandbox/sdk": "file:vendor/cubesandbox-sdk-0.3.0.tgz",

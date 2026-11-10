@@ -1,7 +1,7 @@
 import type pg from "pg";
 import { emptyState, type State, type Run } from "./domain.js";
 export function metadata(s: State) {
-  const { runs, sessions, events, ...rest } = s;
+  const { runs, sessions, events, schedules, scheduleFires, ...rest } = s;
   return rest;
 }
 export async function loadState(
@@ -10,9 +10,13 @@ export async function loadState(
   lock = false,
   runId?: string,
   targetLock = true,
+  options: { claim?: boolean } = {},
 ): Promise<State> {
   const row = await c.query(
-    "SELECT state FROM personal_user_state WHERE user_id=$1" +
+    (options.claim
+      ? "SELECT jsonb_build_object('workspaces',state->'workspaces') AS state"
+      : "SELECT state") +
+      " FROM personal_user_state WHERE user_id=$1" +
       (lock ? " FOR UPDATE" : runId && targetLock ? " FOR SHARE" : ""),
     [tenant],
   );
@@ -44,7 +48,9 @@ export async function loadState(
   ];
   const sessions = await c.query(
     "SELECT " +
-      (runId && !targetLock ? "data - 'entries' AS data" : "data") +
+      (options.claim || (runId && !targetLock)
+        ? "data - 'entries' AS data"
+        : "data") +
       " FROM personal_sessions WHERE user_id=$1" +
       (runId
         ? " AND session_id=ANY($2::text[])"
@@ -66,6 +72,22 @@ export async function loadState(
           runId ? [tenant, runId] : [tenant],
         )
       ).rows.map((row) => row.data);
+  if (!runId) {
+    const tasks = await c.query(
+      "SELECT data FROM personal_scheduled_tasks WHERE user_id=$1",
+      [tenant],
+    );
+    const fires = await c.query(
+      "SELECT data FROM personal_schedule_fires WHERE user_id=$1",
+      [tenant],
+    );
+    s.schedules = Object.fromEntries(
+      tasks.rows.map(({ data }) => [data.id, data]),
+    );
+    s.scheduleFires = Object.fromEntries(
+      fires.rows.map(({ data }) => [fireKey(data), data]),
+    );
+  }
   const seq = await c.query(
     "SELECT cursor FROM personal_event_sequences WHERE user_id=$1",
     [tenant],
@@ -122,6 +144,7 @@ export async function saveState(
   tenant: string,
   before: State,
   after: State,
+  skipMetadata = false,
 ) {
   for (const [sid, s] of Object.entries(after.sessions))
     if (JSON.stringify(before.sessions[sid]) !== JSON.stringify(s))
@@ -144,13 +167,11 @@ export async function saveState(
         "DELETE FROM personal_scheduled_tasks WHERE user_id=$1 AND schedule_id=$2",
         [tenant, sid],
       );
+  const oldFires = new Map(
+    Object.values(before.scheduleFires ?? {}).map((f) => [f.id, f]),
+  );
   for (const fire of Object.values(after.scheduleFires ?? {}))
-    if (
-      JSON.stringify(fire) !==
-      JSON.stringify(
-        Object.values(before.scheduleFires ?? {}).find((f) => f.id === fire.id),
-      )
-    )
+    if (JSON.stringify(fire) !== JSON.stringify(oldFires.get(fire.id)))
       await c.query(
         "INSERT INTO personal_schedule_fires(user_id,id,schedule_id,trigger,scheduled_for,data) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(user_id,id) DO UPDATE SET data=excluded.data",
         [
@@ -163,12 +184,30 @@ export async function saveState(
         ],
       );
   await saveEvents(c, tenant, before, after);
-  if (JSON.stringify(metadata(before)) !== JSON.stringify(metadata(after)))
+  if (
+    !skipMetadata &&
+    JSON.stringify(metadata(before)) !== JSON.stringify(metadata(after))
+  )
     await c.query(
       "UPDATE personal_user_state SET state=$2,revision=revision+1 WHERE user_id=$1",
       [tenant, JSON.stringify(metadata(after))],
     );
 }
+export const fireKey = (f: import("./schedules/service.js").Fire) =>
+  `${f.scheduleId}:${f.trigger}:${f.scheduledFor}`;
+
+export const scheduleWorkQuery = `
+SELECT user_id,schedule_id FROM (
+ (SELECT user_id,schedule_id FROM personal_scheduled_tasks
+  WHERE (data->>'enabled')::boolean AND (data->>'nextFireAt')::bigint <= $1
+  ORDER BY (data->>'nextFireAt')::bigint,user_id,schedule_id LIMIT $2)
+ UNION
+ (SELECT f.user_id,f.schedule_id FROM personal_schedule_fires f
+  JOIN personal_runs r ON r.user_id=f.user_id AND r.run_id=f.data->>'runId'
+  JOIN personal_scheduled_tasks t ON t.user_id=f.user_id AND t.schedule_id=f.schedule_id
+  WHERE f.data->>'state'='submitted' AND r.state IN ('COMPLETED','FAILED','CANCELLED')
+  ORDER BY f.user_id,f.schedule_id LIMIT $2)
+) work ORDER BY user_id,schedule_id LIMIT $2`;
 
 // One MVCC snapshot of the target/ancestors and only their authorization inputs.
 // JSONB extraction still incurs server-side TOAST work until ACL metadata is split.

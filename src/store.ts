@@ -22,6 +22,20 @@ import type {
 } from "./adapters/sandbox-policy.js";
 import { SCHEMA_VERSION, type WorkerHealth } from "./health.js";
 export interface Store {
+  claimRun?<T>(
+    tenant: string,
+    runId: string,
+    fn: (state: State) => T | Promise<T>,
+  ): Promise<T>;
+  listScheduleWork?(
+    now: number,
+    limit: number,
+  ): Promise<{ user: string; scheduleId: string }[]>;
+  scheduleTx?<T>(
+    tenant: string,
+    scheduleId: string,
+    fn: (state: State) => T | Promise<T>,
+  ): Promise<T>;
   txLight?<T>(
     user: string,
     sessionId: string,

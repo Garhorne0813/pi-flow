@@ -1,4 +1,5 @@
 import pg from "pg";
+import { personalConnection } from "./personal-context.js";
 import { EventEmitter } from "node:events";
 import { telemetry } from "./telemetry.js";
 import {
@@ -18,6 +19,8 @@ import {
   runSnapshotQuery,
   snapshotState,
   claimableRunsQuery,
+  scheduleWorkQuery,
+  fireKey,
 } from "./personal-run-store.js";
 import { resourceTransitions } from "./usage.js";
 import { readCapacity, writeCapacity } from "./personal-capacity-store.js";
@@ -159,8 +162,13 @@ export class PersonalPostgresStore implements Store {
     fn: (state: State) => T | Promise<T>,
   ) {
     const result = await this.pool.query(
-      `SELECT COALESCE(jsonb_object_agg(k,state->k) FILTER (WHERE state ? k), '{}'::jsonb) AS state
-       FROM personal_user_state CROSS JOIN unnest($2::text[]) k WHERE user_id=$1`,
+      `SELECT COALESCE((SELECT jsonb_object_agg(k,state->k) FILTER (WHERE state ? k)
+        FROM personal_user_state CROSS JOIN unnest($2::text[]) k WHERE user_id=$1), '{}'::jsonb)
+       || CASE WHEN 'schedules'=ANY($2::text[]) THEN jsonb_build_object('schedules',
+          COALESCE((SELECT jsonb_object_agg(schedule_id,data) FROM personal_scheduled_tasks WHERE user_id=$1),'{}'::jsonb)) ELSE '{}'::jsonb END
+       || CASE WHEN 'scheduleFires'=ANY($2::text[]) THEN jsonb_build_object('scheduleFires',
+          COALESCE((SELECT jsonb_object_agg(schedule_id||':'||trigger||':'||scheduled_for,data)
+            FROM personal_schedule_fires WHERE user_id=$1),'{}'::jsonb)) ELSE '{}'::jsonb END AS state`,
       [tenant, keys],
     );
     return structuredClone(
@@ -231,7 +239,10 @@ export class PersonalPostgresStore implements Store {
       await c.query("SELECT pg_advisory_xact_lock(134697,13)");
       const before = await readCapacity(c, scope),
         state = structuredClone(before);
-      const result = await fn(state);
+      const result = await personalConnection.run(
+        { pool: this.pool, client: c },
+        () => fn(state),
+      );
       await writeCapacity(c, before, state, scope);
       await c.query("COMMIT");
       return structuredClone(result);
@@ -257,7 +268,10 @@ export class PersonalPostgresStore implements Store {
       );
       const before = await loadState(c, tenant, true),
         s = structuredClone(before);
-      const result = await fn(s);
+      const result = await personalConnection.run(
+        { pool: this.pool, client: c },
+        () => fn(s),
+      );
       resourceTransitions(before, s);
       await saveState(c, tenant, before, s);
       await c.query("COMMIT");
@@ -305,7 +319,10 @@ export class PersonalPostgresStore implements Store {
       );
       for (const row of runs.rows) state.runs[row.data.id] = row.data;
       const before = structuredClone(state),
-        result = await fn(state);
+        result = await personalConnection.run(
+          { pool: this.pool, client: c },
+          () => fn(state),
+        );
       if (
         Object.values(state.sessions).some((s) => s.id !== sessionId) ||
         Object.values(state.runs).some((r) => r.sessionId !== sessionId)
@@ -327,12 +344,39 @@ export class PersonalPostgresStore implements Store {
     runId: string,
     fn: (state: State) => T | Promise<T>,
   ): Promise<T> {
+    return this.targetedRunTx(tenant, runId, fn, false);
+  }
+  async claimRun<T>(
+    tenant: string,
+    runId: string,
+    fn: (state: State) => T | Promise<T>,
+  ): Promise<T> {
+    return this.targetedRunTx(tenant, runId, fn, true);
+  }
+  private async targetedRunTx<T>(
+    tenant: string,
+    runId: string,
+    fn: (state: State) => T | Promise<T>,
+    claim: boolean,
+  ): Promise<T> {
     const c = await this.pool.connect();
     try {
       await c.query("BEGIN");
-      const before = await loadState(c, tenant, false, runId),
-        s = structuredClone(before);
-      const result = await fn(s);
+      const before = await loadState(c, tenant, claim, runId, true, { claim });
+      if (claim) {
+        // The user metadata lock serializes admission with every personal Run
+        // writer. Only one indexed active row is needed to reject contention.
+        const active = await c.query(
+          "SELECT data FROM personal_runs WHERE user_id=$1 AND state='RUNNING' AND run_id<>$2 LIMIT 1",
+          [tenant, runId],
+        );
+        for (const { data } of active.rows) before.runs[data.id] = data;
+      }
+      const s = structuredClone(before);
+      const result = await personalConnection.run(
+        { pool: this.pool, client: c },
+        () => fn(s),
+      );
       if (
         JSON.stringify(metadata(before)) !==
           JSON.stringify(metadata({ ...s, sequence: before.sequence })) ||
@@ -367,11 +411,112 @@ export class PersonalPostgresStore implements Store {
       c.release();
     }
   }
+  async listScheduleWork(now: number, limit: number) {
+    candidateLimit(limit);
+    const r = await this.pool.query(scheduleWorkQuery, [now, limit]);
+    return r.rows.map((row) => ({
+      user: row.user_id as string,
+      scheduleId: row.schedule_id as string,
+    }));
+  }
+  async scheduleTx<T>(
+    tenant: string,
+    scheduleId: string,
+    fn: (state: State) => T | Promise<T>,
+  ): Promise<T> {
+    const c = await this.pool.connect();
+    try {
+      await c.query("BEGIN");
+      const meta = await c.query(
+        "SELECT state->'workspaces' AS workspaces FROM personal_user_state WHERE user_id=$1 FOR UPDATE",
+        [tenant],
+      );
+      const s = {
+        ...emptyState(),
+        workspaces: meta.rows[0]?.workspaces ?? {},
+        schedules: {},
+        scheduleFires: {},
+      } as State;
+      const tasks = await c.query(
+        "SELECT data FROM personal_scheduled_tasks WHERE user_id=$1 AND schedule_id=$2 FOR UPDATE",
+        [tenant, scheduleId],
+      );
+      const task = tasks.rows[0]?.data as
+        | import("./schedules/service.js").ScheduledTask
+        | undefined;
+      if (task) s.schedules![task.id] = task;
+      if (task) {
+        const existing = await c.query(
+          "SELECT data FROM personal_schedule_fires WHERE user_id=$1 AND schedule_id=$2 AND trigger='cron' AND scheduled_for=$3",
+          [tenant, scheduleId, task.nextFireAt],
+        );
+        for (const { data } of existing.rows)
+          s.scheduleFires![fireKey(data)] = data;
+      }
+      const fires = await c.query(
+        `SELECT f.data,r.data AS run FROM personal_schedule_fires f
+        JOIN personal_runs r ON r.user_id=f.user_id AND r.run_id=f.data->>'runId'
+        WHERE f.user_id=$1 AND f.schedule_id=$2 AND f.data->>'state'='submitted'
+        AND r.state IN ('COMPLETED','FAILED','CANCELLED') ORDER BY f.scheduled_for,f.id LIMIT 64 FOR UPDATE OF f`,
+        [tenant, scheduleId],
+      );
+      for (const row of fires.rows) {
+        s.scheduleFires![fireKey(row.data)] = row.data;
+        s.runs[row.run.id] = row.run;
+      }
+      if (task?.sessionId) {
+        const sessions = await c.query(
+          "SELECT data - 'entries' AS data FROM personal_sessions WHERE user_id=$1 AND session_id=$2",
+          [tenant, task.sessionId],
+        );
+        for (const { data } of sessions.rows) s.sessions[data.id] = data;
+        const active = await c.query(
+          "SELECT data FROM personal_runs WHERE user_id=$1 AND session_id=$2 AND state IN ('QUEUED','RUNNING','WAITING_INPUT')",
+          [tenant, task.sessionId],
+        );
+        for (const { data } of active.rows) s.runs[data.id] = data;
+      }
+      const sequence = await c.query(
+        "SELECT cursor FROM personal_event_sequences WHERE user_id=$1",
+        [tenant],
+      );
+      s.sequence = Number(sequence.rows[0]?.cursor ?? 0);
+      const before = structuredClone(s);
+      const result = await personalConnection.run(
+        { pool: this.pool, client: c },
+        () => fn(s),
+      );
+      if (
+        JSON.stringify(metadata(before)) !==
+          JSON.stringify(
+            metadata({ ...s, audit: before.audit, sequence: before.sequence }),
+          ) ||
+        Object.keys(s.schedules ?? {}).some((id) => id !== scheduleId)
+      )
+        throw new Error("scheduleTx scope violation");
+      await saveState(c, tenant, before, s, true);
+      if (s.audit.length)
+        await c.query(
+          "UPDATE personal_user_state SET state=jsonb_set(state,'{audit}',COALESCE(state->'audit','[]'::jsonb)||$2::jsonb),revision=revision+1 WHERE user_id=$1",
+          [tenant, JSON.stringify(s.audit)],
+        );
+      await c.query("COMMIT");
+      return structuredClone(result);
+    } catch (e) {
+      await c.query("ROLLBACK");
+      throw e;
+    } finally {
+      c.release();
+    }
+  }
   async read<T>(tenant: string, fn: (s: State) => T | Promise<T>): Promise<T> {
     const c = await this.pool.connect();
     try {
       await c.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
-      const result = await fn(await loadState(c, tenant));
+      const result = await personalConnection.run(
+        { pool: this.pool, client: c },
+        async () => fn(await loadState(c, tenant)),
+      );
       await c.query("COMMIT");
       return structuredClone(result);
     } catch (e) {

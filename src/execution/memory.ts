@@ -5,6 +5,7 @@ import {
   type AgentConfig,
   type Actor,
   type Run,
+  type State,
 } from "../domain.js";
 import type { SandboxManager } from "../adapters/sandbox.js";
 import type { Store } from "../store.js";
@@ -81,6 +82,7 @@ export class MemoryManager {
     content: string,
     signal: AbortSignal,
     manual = false,
+    authorize?: (s: State) => void,
   ) {
     const c = this.classify(path, cwd);
     if (!c || c.reserved || !this.roots(config, cwd).includes(c.root))
@@ -107,6 +109,7 @@ export class MemoryManager {
         args,
         signal,
         config.skills,
+        authorize,
       );
     await execute("mkdir", { path: c.root });
     const found = (await execute("find", { path: c.root })) as {

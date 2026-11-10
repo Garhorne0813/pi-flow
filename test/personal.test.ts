@@ -523,7 +523,14 @@ test("database model catalog resolves the default per root and keeps secrets out
   const previous = process.env.CONFIG_SECRET_KEY;
   process.env.CONFIG_SECRET_KEY = Buffer.alloc(32, 3).toString("base64");
   try {
-    const f = await fixture();
+    const gateways: { baseUrl: string; apiKey: string }[] = [];
+    const f = await fixture({
+      execute: async (c) => {
+        gateways.push(c.gateway!);
+        if (gateways.length === 1)
+          await c.call("write", { path: "catalog.txt", content: "saved" });
+      },
+    });
     await f.registry.tx((s) =>
       configure(
         s,
@@ -564,13 +571,49 @@ test("database model catalog resolves the default per root and keeps secrets out
         }),
         r = await f.service.submit(f.alice, ses.id, "one");
       assert.deepEqual(r.model, { provider: "test", modelId: "first" });
-      assert.equal(
-        (await f.service.gatewayFor(r.model!))?.apiKey,
-        "catalog-secret",
-      );
-      await f.registry.tx((s) => {
-        s.modelCatalog![0]!.modelId = "second";
+      assert.equal((await f.service.gatewayFor(r))?.apiKey, "catalog-secret");
+      const rotated = await app.inject({
+        method: "POST",
+        url: "/api/v1/admin/config/global",
+        payload: {
+          revision: await f.registry.read((s) => s.configRevisions!.global),
+          policy: { disabledTools: [] },
+          modelCatalog: [
+            {
+              provider: "test",
+              modelId: "second",
+              baseUrl: "https://new-models.example/v1",
+              secretRef: "llm",
+              default: true,
+            },
+          ],
+          secrets: { llm: "rotated-secret" },
+        },
       });
+      assert.equal(rotated.statusCode, 200, rotated.body);
+      assert.equal((await drain(f, r)).state, "WAITING_INPUT");
+      const interaction = await f.store.read(
+        f.alice.tenantId,
+        (s) => Object.values(s.interactions)[0]!,
+      );
+      const continued = (await f.service.respond(
+        f.alice,
+        interaction.id,
+        "approve",
+      ))!;
+      assert.equal((await drain(f, continued)).state, "COMPLETED");
+      assert.deepEqual(gateways, [
+        { baseUrl: "https://models.example/v1", apiKey: "catalog-secret" },
+        { baseUrl: "https://models.example/v1", apiKey: "catalog-secret" },
+      ]);
+      const next = await f.service.submit(f.alice, ses.id, "new root");
+      assert.equal((await drain(f, next)).state, "COMPLETED");
+      assert.deepEqual(gateways[2], {
+        baseUrl: "https://new-models.example/v1",
+        apiKey: "rotated-secret",
+      });
+      const visible = await app.inject({ url: `/api/v1/runs/${r.id}` });
+      assert.doesNotMatch(visible.body, /secret|modelGatewayRef|secretVersion/);
       assert.equal(
         (await f.store.read(f.alice.tenantId, (s) => s.runs[r.id]!)).model
           ?.modelId,
@@ -793,5 +836,155 @@ test("a personal Run with a missing snapshot fails instead of adopting current c
   );
   assert.equal((await drain(f, r)).error, "RUN_CONFIG_MISSING");
   assert.equal(invoked, false);
+  await f.worker.stop();
+});
+
+test("tool kill-switch is rechecked after sandbox preparation for writes, edits, bash and memory", async (t) => {
+  for (const op of ["write", "edit", "bash", "memory"] as const)
+    await t.test(op, async () => {
+      const ready = Promise.withResolvers<void>(),
+        release = Promise.withResolvers<void>();
+      const tool = op === "memory" ? "write" : op;
+      let toolStarting = false;
+      const f = await fixture({
+        execute: async (c) => {
+          toolStarting = true;
+          await c.call(
+            tool,
+            op === "bash"
+              ? { command: "pwd" }
+              : op === "edit"
+                ? {
+                    path: "note.txt",
+                    expectedHash: "a".repeat(64),
+                    oldText: "old",
+                    newText: "new",
+                  }
+                : {
+                    path: op === "memory" ? "memory/topic.md" : "note.txt",
+                    content: "saved",
+                  },
+          );
+        },
+      });
+      await f.registry.tx((s) => {
+        s.managedAgents!.assistant!.config = config({
+          tools: ["read", "write", "edit", "bash"],
+          approval: { mode: "auto" },
+          memory: op === "memory" ? { enabled: true } : undefined,
+        });
+      });
+      // Memory index preparation also uses the sandbox, so pause its first create.
+      const original = f.provider.create.bind(f.provider);
+      f.provider.create = async (...args) => {
+        if (op !== "memory") {
+          ready.resolve();
+          await release.promise;
+        }
+        return original(...args);
+      };
+      const connect = f.provider.connect.bind(f.provider);
+      f.provider.connect = async (sid) => {
+        if (op === "memory" && toolStarting) {
+          ready.resolve();
+          await release.promise;
+        }
+        return connect(sid);
+      };
+      let writes = 0;
+      const execute = f.provider.execute.bind(f.provider);
+      f.provider.execute = async (sid, operation, args) => {
+        if (["write", "edit", "bash"].includes(operation)) writes++;
+        return execute(sid, operation, args);
+      };
+      try {
+        const ses = await f.service.createPersonalSession(f.alice, {
+          agentId: "assistant",
+        });
+        const run = await f.service.submit(f.alice, ses.id, "mutate");
+        await f.worker.tick();
+        await ready.promise;
+        await f.registry.tx((s) => {
+          s.policy = { disabledTools: [tool] };
+        });
+        release.resolve();
+        const done = await drain(f, run);
+        assert.equal(done.state, "FAILED");
+        assert.equal(done.error, "TOOL_DISABLED");
+        assert.equal(writes, 0);
+      } finally {
+        release.resolve();
+        await f.worker.stop();
+      }
+    });
+});
+
+test("schedule reuse is invalidated by Agent/cwd edits and rejects inaccessible or token-dependent Agents", async () => {
+  const { ScheduleService } = await import("../src/schedules/service.js");
+  const f = await fixture(),
+    schedules = new ScheduleService(f.service);
+  await f.registry.tx((s) =>
+    replaceAgents(
+      s,
+      [
+        { key: "assistant", config: config() },
+        { key: "other", config: config({ systemPrompt: "other agent" }) },
+        { key: "token", config: config({ userTokenAccess: true }) },
+        { key: "private", config: config(), allowedUsers: [f.bob.userId] },
+      ],
+      f.alice,
+    ),
+  );
+  const task = await schedules.create(f.alice, {
+    agentId: "assistant",
+    cron: "* * * * *",
+    prompt: "scheduled",
+  });
+  let time = Date.now();
+  const fire = () =>
+    f.store.tx(f.alice.tenantId, (s) =>
+      schedules.fire(s, s.schedules![task.id]!, ++time, "manual"),
+    );
+  const first = await fire();
+  const old = await f.store.read(
+    f.alice.tenantId,
+    (s) => s.runs[first.runId!]!,
+  );
+  await f.store.tx(f.alice.tenantId, (s) => {
+    s.runs[old.id]!.state = "COMPLETED";
+  });
+  await assert.rejects(
+    schedules.update(f.alice, task.id, { agentId: "token" }),
+    { code: "SCHEDULE_USER_TOKEN_UNSUPPORTED" },
+  );
+  await assert.rejects(
+    schedules.update(f.alice, task.id, { agentId: "private" }),
+    { code: "AGENT_NOT_FOUND" },
+  );
+  const updated = await schedules.update(f.alice, task.id, {
+    agentId: "other",
+    cwd: "project",
+  });
+  assert.equal(updated.sessionId, undefined);
+  const second = await fire();
+  const changed = await f.store.read(
+    f.alice.tenantId,
+    (s) => s.runs[second.runId!]!,
+  );
+  assert.notEqual(changed.sessionId, old.sessionId);
+  assert.equal(changed.agentId, "other");
+  assert.equal(changed.cwd, "/workspace/project");
+  assert.equal(changed.capabilities!.systemPrompt, "other agent");
+  await f.store.tx(f.alice.tenantId, (s) => {
+    s.runs[changed.id]!.state = "COMPLETED";
+  });
+  await schedules.update(f.alice, task.id, { cwd: "next" });
+  const third = await fire();
+  const final = await f.store.read(
+    f.alice.tenantId,
+    (s) => s.runs[third.runId!]!,
+  );
+  assert.notEqual(final.sessionId, changed.sessionId);
+  assert.equal(final.cwd, "/workspace/next");
   await f.worker.stop();
 });

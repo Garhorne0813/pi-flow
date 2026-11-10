@@ -14,10 +14,12 @@ const keys = [
 // records at the boundary; user writes never copy platform configuration.
 export function personalStore(backing: Store, registry: Registry): Store {
   const overlay = async (fn: (s: State) => unknown) => {
-    const global = await registry.read((s) =>
-      Object.fromEntries(keys.map((k) => [k, s[k]])),
-    );
     return async (s: State) => {
+      // Read live policy after the backing store has acquired its locks. A
+      // policy snapshot taken before waiting could authorize a revoked tool.
+      const global = await registry.read((s) =>
+        Object.fromEntries(keys.map((k) => [k, s[k]])),
+      );
       const original = Object.fromEntries(keys.map((k) => [k, s[k]]));
       Object.assign(s, structuredClone(global));
       try {
@@ -39,9 +41,12 @@ export function personalStore(backing: Store, registry: Registry): Store {
           fn: (s: State) => unknown,
           idempotencyKey?: string,
         ) => target.txLight!(user, sid, await overlay(fn), idempotencyKey);
-      if (key === "runTx")
+      if ((key === "runTx" || key === "claimRun") && target[key])
         return async (user: string, rid: string, fn: (s: State) => unknown) =>
-          target.runTx(user, rid, await overlay(fn));
+          target[key]!(user, rid, await overlay(fn));
+      if (key === "scheduleTx" && target.scheduleTx)
+        return async (user: string, sid: string, fn: (s: State) => unknown) =>
+          target.scheduleTx!(user, sid, await overlay(fn));
       if (key === "readRun")
         return async (
           user: string,

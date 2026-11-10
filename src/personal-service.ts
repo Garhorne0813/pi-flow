@@ -10,6 +10,7 @@ import {
   session,
   terminal,
   type Actor,
+  type Run,
 } from "./domain.js";
 import type { Store } from "./store.js";
 import type { Registry } from "./store/registry.js";
@@ -24,8 +25,32 @@ export class PersonalService extends HarnessService {
   ) {
     super(store, endpoints, bundles, models);
   }
-  async gatewayFor(model: AgentConfig["model"]) {
+  async gatewayFor(run: Run) {
     return this.registry.read((s) => {
+      if (run.modelGatewayRef === null) return undefined;
+      if (run.modelGatewayRef !== undefined) {
+        const gateway = s.modelGatewayVersions?.[run.modelGatewayRef];
+        const secret =
+          gateway && s.modelSecretVersions?.[gateway.secretVersion];
+        if (
+          !gateway ||
+          !secret ||
+          gateway.model.provider !== run.model?.provider ||
+          gateway.model.modelId !== run.model?.modelId
+        )
+          throw new Fault(503, "MODEL_SNAPSHOT_UNAVAILABLE");
+        return {
+          baseUrl: gateway.baseUrl,
+          apiKey: openToken(
+            secret.sealed,
+            "platform:" + secret.ref,
+            "CONFIG_SECRET_KEY",
+          ),
+        };
+      }
+      // Compatibility for Runs created before gateway versioning. Their earlier
+      // endpoint/key cannot be reconstructed after a pre-upgrade catalog edit.
+      const model = run.model ?? run.capabilities!.model;
       if (!s.modelCatalog?.length) return undefined;
       const entry = s.modelCatalog.find(
         (m) => m.provider === model.provider && m.modelId === model.modelId,

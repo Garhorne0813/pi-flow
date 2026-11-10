@@ -1,4 +1,4 @@
-import { ModelEntry } from "../config/models.js";
+import { ModelEntry, versionModelCatalog } from "../config/models.js";
 import { sealToken } from "../security/token-vault.js";
 import { MemoryManager } from "../execution/memory.js";
 import { ScheduleService, nextFire } from "../schedules/service.js";
@@ -304,7 +304,9 @@ export function personalRoutes(
     return service.registry.read((s) => ({
       revision: s.configRevisions?.global ?? 0,
       policy: s.policy ?? { disabledTools: [] },
-      modelCatalog: s.modelCatalog ?? [],
+      modelCatalog: (s.modelCatalog ?? []).map(
+        ({ gatewayRef, ...entry }) => entry,
+      ),
     }));
   });
   app.post("/api/v1/admin/config/global", async (req) => {
@@ -348,6 +350,7 @@ export function personalRoutes(
       for (const m of s.modelCatalog ?? [])
         if (!s.secrets?.[m.secretRef])
           throw new Fault(400, "MODEL_SECRET_REQUIRED");
+      versionModelCatalog(s);
       s.policy = b.policy;
       s.configRevisions ??= { global: 0, agents: 0 };
       s.configRevisions.global++;
@@ -355,7 +358,9 @@ export function personalRoutes(
       return {
         revision: s.configRevisions.global,
         policy: s.policy,
-        modelCatalog: s.modelCatalog ?? [],
+        modelCatalog: (s.modelCatalog ?? []).map(
+          ({ gatewayRef, ...entry }) => entry,
+        ),
       };
     });
   });
