@@ -27,7 +27,11 @@ async function setup(packages?: HostSkillPackages) {
   await registry.tx(seedDemo);
   const store = personalStore(new MemoryStore(), registry);
   const service = new PersonalService(store, registry, ["gateway"]);
-  const authenticated = { tenantId: "cop", userId: "admin", admin: true };
+  const authenticated = {
+    tenantId: "identity-provider",
+    userId: "admin",
+    admin: true,
+  };
   const actor = await principal(registry, authenticated);
   const app = buildAPI(
     service,

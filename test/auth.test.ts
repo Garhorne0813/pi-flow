@@ -6,7 +6,7 @@ import { execFileSync } from "node:child_process";
 import { mkdir, readFile } from "node:fs/promises";
 import { generateKeyPair, exportJWK, SignJWT } from "jose";
 import { authFromEnv } from "../src/auth.js";
-test("UCS verifies JWT signature, issuer, audience, expiry and trusted tenant claims", async () => {
+test("OIDC verifies JWT signatures and claims in shared and personal modes", async () => {
   await mkdir("work/auth-tls", { recursive: true });
   execFileSync(
     "openssl",
@@ -86,6 +86,25 @@ test("UCS verifies JWT signature, issuer, audience, expiry and trusted tenant cl
       code: "UNAUTHENTICATED",
     });
     await assert.rejects(auth(`Bearer ${await sign("harness", "1h", {})}`), {
+      code: "UNAUTHENTICATED",
+    });
+    const personal = authFromEnv({ personal: true });
+    const personalToken = await sign("harness", "1h", {
+      roles: ["harness-admin"],
+    });
+    const actor = await personal(`Bearer ${personalToken}`);
+    assert.equal(actor.userId, "user-a");
+    assert.equal(actor.subject, "user-a");
+    assert.equal(actor.issuer, "https://ucs.example");
+    assert.equal(actor.tenantId, "personal");
+    assert.equal(actor.admin, true);
+    await assert.rejects(personal("Bearer opaque-token"), {
+      code: "UNAUTHENTICATED",
+    });
+    await assert.rejects(personal(`Bearer ${await sign("wrong")}`), {
+      code: "UNAUTHENTICATED",
+    });
+    await assert.rejects(personal(`Bearer ${await sign("harness", "-1h")}`), {
       code: "UNAUTHENTICATED",
     });
     const bad = token.slice(0, -10) + "AAAAAAAAAA";

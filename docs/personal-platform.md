@@ -28,7 +28,7 @@ npm run worker
 
 ## 当前契约
 
-- 身份按 `(issuer, subject)` 解析为持久 UUID；用户数据按 UUID 分区。OIDC 个人模式不要求 tenant claim。DEV_TOKEN 支持 `DEV_SUBJECT`，COP 使用 `UCS_VERIFY_URL`。
+- 身份按 `(issuer, subject)` 解析为持久 UUID；用户数据按 UUID 分区。OIDC 个人模式不要求 tenant claim。DEV_TOKEN 支持 `DEV_SUBJECT`。
 - 每人一个私有 `/workspace`、一个持久卷和一个沙箱绑定；不同会话可使用不同 cwd，但同一用户的 Run 串行执行。旧 workspace/members HTTP 接口不开放。
 - `POST /api/v1/sessions {agentId, cwd?, title?}`；`GET /sessions`；`GET/PATCH/DELETE /sessions/:id`；`POST /sessions/:id/fork`。删除为软删除且要求会话空闲。
 - 原有 Run、审批/提问续跑、取消、SSE 契约保留。根 Run 提交时保存有效配置、模型、cwd、taskId/rootRunId；下一根 Run 读取当前 Agent 配置，续跑继承原快照。Session 不再保存或升级 Agent 版本。
@@ -59,8 +59,6 @@ npm run worker
 - `modelCatalog` 条目为 `{provider,modelId,baseUrl,secretRef,default}`，非空目录要求唯一默认模型。`secrets` 为引用名到密钥的映射，使用 `CONFIG_SECRET_KEY` 加密，GET 不返回密钥。目录非空时只允许目录中的模型；目录为空才回退 `LLM_*`。每个模型会话有独立凭证上下文。Run 通过私有 `modelGatewayRef` 固定网关与加密密钥版本；目录替换和同名密钥轮换不改变已排队任务或审批续跑。
 - `approval.mode=user|guarded|auto`；默认 user。guarded 当前仅对精确 `pwd` shell 命令自动放行。平台 disabledTools 对旧 Run 也生效。
 - `userTokenAccess=true` 时提交 Bearer 以 `RUN_TOKEN_KEY` 密封，只有 bash 获得 `USER_TOKEN`，终态移除密文。两个加密密钥都应为 base64 编码的 32 随机字节，并在 API/Worker 之间保持一致。
-
-COP 适配器当前接受成功响应 `{code:200|0,data:{userId|id,roleKeys?}}` 或 `success:true`；使用 GET 和 `Token` 头，提供正/负缓存、并发合并、熔断。部署前须与真实 COP 响应契约核对；本地协议测试不代表已完成线上联调。
 
 ## 尚需完成的目标能力
 

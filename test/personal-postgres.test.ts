@@ -49,13 +49,13 @@ test(
         other = new PersonalService(sb, br);
       const [alice, again] = await Promise.all([
         principal(ar, {
-          tenantId: "cop",
+          tenantId: "identity-provider",
           issuer: "urn:ucs",
           userId: "a",
           admin: true,
         }),
         principal(br, {
-          tenantId: "cop",
+          tenantId: "identity-provider",
           issuer: "urn:ucs",
           userId: "a",
           admin: true,
@@ -63,7 +63,7 @@ test(
       ]);
       assert.equal(alice.userId, again.userId);
       const bob = await principal(br, {
-        tenantId: "cop",
+        tenantId: "identity-provider",
         issuer: "urn:ucs",
         userId: "b",
         admin: false,

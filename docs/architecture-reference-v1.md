@@ -78,7 +78,7 @@ pi-flow 是一个**面向多用户的个人 AI Agent 后端**，只交付 HTTP/S
 | `src/store/` | `Store` 接口与 `MemoryStore` / `PostgresStore`；`ScheduleStore`；Run/Session/平台配置读写 |
 | `src/config/` | Git 配置加载/校验/发布、管理端配置文档、Skill 交付 |
 | `src/skills/` | Skill 版本、归档、原子物化、管理上下文 |
-| `src/security/` | 认证（OIDC/COP/DEV_TOKEN）、Principal、策略网关、工具风险、Token 保险箱、路径策略 |
+| `src/security/` | 认证（OIDC/DEV_TOKEN）、Principal、策略网关、工具风险、Token 保险箱、路径策略 |
 | `src/tools/` | 内置工具 schema、MCP 管理、Web 工具、结构化提问 |
 | `src/schedules/` | cron 解析、用户侧服务、Worker 侧触发器 |
 | `src/observability/` | 健康探针、Worker 心跳、指标、告警 |
@@ -326,11 +326,10 @@ config/
 ### 11.1 身份与认证
 
 - 外部身份 = `(issuer, subject)`，映射到内部不可复用 UUID（`personal_users`）；v1 没有租户/成员/共享工作区。
-- 三种认证：
+- 两种认证：
   1. **OIDC/OAuth2 JWT**：`UCS_JWKS_URL` + `UCS_ISSUER` + `UCS_AUDIENCE`，校验 `exp/sub`；
-  2. **COP 不透明用户 token**：`UCS_VERIFY_URL` 指向 COP `/api/user/verifyToken`（`Token` 头），带正/负缓存、并发合并、熔断；issuer 固定为 `urn:ucs`（沿用历史，避免既有用户数据孤儿化）；
-  3. **固定 `DEV_TOKEN`**：仅隔离部署/Demo，绑定单一身份。
-- `UCS_ADMIN_USER_IDS` / `UCS_ADMIN_ROLE_KEYS` 授予 `cop_admin`；管理端路由强制 `admin()`。
+  2. **固定 `DEV_TOKEN`**：仅隔离部署/Demo，绑定单一身份。
+- `UCS_ADMIN_USER_IDS` / `UCS_ADMIN_ROLE_KEYS` 授予平台管理员权限；管理端路由强制 `admin()`。
 - 跨用户资源统一返回 `404`，不泄漏存在性。
 
 ### 11.2 纵深防御
@@ -447,7 +446,7 @@ npm run skills:deliver         # 同步只读 Skill 树
 | 组 | 变量 |
 | --- | --- |
 | 运行 | `HARNESS_MODE`、`DATABASE_URL`、`PORT/HOST`、`INLINE_WORKER`、`WORKER_CONCURRENCY`、`CONFIG_DIR` |
-| 认证 | `UCS_JWKS_URL/UCS_ISSUER/UCS_AUDIENCE`、`UCS_VERIFY_URL`、`DEV_TOKEN/DEV_SUBJECT`、`UCS_ADMIN_USER_IDS` |
+| 认证 | `UCS_JWKS_URL/UCS_ISSUER/UCS_AUDIENCE`、`DEV_TOKEN/DEV_SUBJECT`、`UCS_ADMIN_USER_IDS` |
 | 模型 | `LLM_BASE_URL/PROVIDER/MODEL_ID/API_KEY`（目录为空时的回退）、`LLM_*` 限额 |
 | 沙箱 | `SANDBOX_PROVIDER`、`E2B_TEMPLATE/CUBE_TEMPLATE_ID`、`SANDBOX_*`、`SANDBOX_NETWORK_*`、`SANDBOX_MULTI_SESSION` |
 | 存储 | `WORKSPACE_STORAGE_KIND`、`WORKSPACE_MOUNT_DIR`、`WORKSPACE_HOST_ROOT`、`OSS_*` |

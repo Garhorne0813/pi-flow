@@ -662,46 +662,6 @@ test("optional Skill directory delivery preserves immutable bytes and rejects sy
   }
 });
 
-test("COP verification coalesces requests, caches positive and negative results, and maps administrator grants", async () => {
-  const { createServer } = await import("node:http"),
-    { copAuth } = await import("../src/security/cop.js");
-  let calls = 0;
-  const server = createServer((req, res) => {
-    calls++;
-    res.setHeader("content-type", "application/json");
-    res.end(
-      JSON.stringify(
-        req.headers.token === "good"
-          ? { code: 200, data: { userId: "cop-user", roleKeys: ["ops"] } }
-          : { code: 401 },
-      ),
-    );
-  });
-  await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
-  const oldHttp = process.env.UCS_ALLOW_HTTP,
-    oldRoles = process.env.UCS_ADMIN_ROLE_KEYS;
-  process.env.UCS_ALLOW_HTTP = "true";
-  process.env.UCS_ADMIN_ROLE_KEYS = "ops";
-  try {
-    const auth = copAuth(
-        `http://127.0.0.1:${(server.address() as { port: number }).port}/api/user/verifyToken`,
-      ),
-      actors = await Promise.all([auth("Bearer good"), auth("Bearer good")]);
-    assert.equal(calls, 1);
-    assert.equal(actors[0]!.issuer, "urn:ucs");
-    assert.equal(actors[0]!.admin, true);
-    await assert.rejects(auth("Bearer bad"), { code: "UNAUTHENTICATED" });
-    await assert.rejects(auth("Bearer bad"), { code: "UNAUTHENTICATED" });
-    assert.equal(calls, 2);
-  } finally {
-    if (oldHttp === undefined) delete process.env.UCS_ALLOW_HTTP;
-    else process.env.UCS_ALLOW_HTTP = oldHttp;
-    if (oldRoles === undefined) delete process.env.UCS_ADMIN_ROLE_KEYS;
-    else process.env.UCS_ADMIN_ROLE_KEYS = oldRoles;
-    await new Promise<void>((r, j) => server.close((e) => (e ? j(e) : r())));
-  }
-});
-
 test("admin edits update a stable Agent; optimistic revisions and live revocation remain effective", async () => {
   const observed: string[] = [];
   const f = await fixture({

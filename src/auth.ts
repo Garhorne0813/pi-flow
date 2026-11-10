@@ -1,4 +1,3 @@
-import { copAuth } from "./security/cop.js";
 import { createRemoteJWKSet, jwtVerify } from "jose";
 import { Fault, type Actor } from "./domain.js";
 export type Auth = (authorization?: string) => Promise<Actor>;
@@ -51,8 +50,6 @@ export function authFromEnv(options: { personal?: boolean } = {}): Auth {
       };
     };
   }
-  if (options.personal && process.env.UCS_VERIFY_URL)
-    return copAuth(process.env.UCS_VERIFY_URL);
   const { UCS_JWKS_URL, UCS_ISSUER, UCS_AUDIENCE } = process.env;
   if (!UCS_JWKS_URL || !UCS_ISSUER || !UCS_AUDIENCE)
     throw new Error("UCS OIDC configuration required");
