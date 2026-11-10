@@ -714,10 +714,59 @@ export function buildAPI(
   app.get("/api/v1/admin/audit", async (req) => {
     const a = actor(req);
     admin(a);
-    const p = page.parse(req.query);
-    return service.store.read(a.tenantId, (s) => ({
-      items: s.audit.slice(p.offset, p.offset + p.limit),
-    }));
+    const p = page
+      .extend({ cursor: z.string().max(2000).optional() })
+      .parse(req.query);
+    let after: { timestamp: string; id: string } | undefined;
+    if (p.cursor !== undefined) {
+      try {
+        after = z
+          .object({
+            timestamp: z.string().datetime(),
+            id: z.string().min(1).max(200),
+          })
+          .strict()
+          .parse(JSON.parse(Buffer.from(p.cursor, "base64url").toString()));
+      } catch {
+        throw new Fault(400, "INVALID_CURSOR");
+      }
+      if (p.offset) throw new Fault(400, "INVALID_CURSOR");
+    }
+    const rows = service.store.listAudit
+      ? await service.store.listAudit(a.tenantId, p.offset, p.limit + 1, after)
+      : await service.store.readMetadata(a.tenantId, ["audit"], (s) =>
+          s.audit
+            .sort((a, b) =>
+              a.timestamp < b.timestamp
+                ? -1
+                : a.timestamp > b.timestamp
+                  ? 1
+                  : a.id < b.id
+                    ? -1
+                    : a.id > b.id
+                      ? 1
+                      : 0,
+            )
+            .filter(
+              (r) =>
+                !after ||
+                r.timestamp > after.timestamp ||
+                (r.timestamp === after.timestamp && r.id > after.id),
+            )
+            .slice(p.offset, p.offset + p.limit + 1),
+        );
+    const items = rows.slice(0, p.limit),
+      last = items.at(-1);
+    return {
+      items,
+      ...(rows.length > p.limit && last
+        ? {
+            nextCursor: Buffer.from(
+              JSON.stringify({ timestamp: last.timestamp, id: last.id }),
+            ).toString("base64url"),
+          }
+        : {}),
+    };
   });
   app.get("/api/v1/admin/stats", async (req) => {
     const a = actor(req);

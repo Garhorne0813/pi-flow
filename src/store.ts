@@ -22,6 +22,22 @@ import type {
 } from "./adapters/sandbox-policy.js";
 import { SCHEMA_VERSION, type WorkerHealth } from "./health.js";
 export interface Store {
+  cancelTaskTx?<T>(
+    user: string,
+    runId: string,
+    fn: (s: State) => T | Promise<T>,
+  ): Promise<T>;
+  interactionTx?<T>(
+    user: string,
+    interactionId: string,
+    fn: (s: State) => T | Promise<T>,
+  ): Promise<T>;
+  listAudit?(
+    user: string,
+    offset: number,
+    limit: number,
+    after?: { timestamp: string; id: string },
+  ): Promise<Audit[]>;
   sessionTx?<T>(
     user: string,
     sessionId: string | undefined,

@@ -350,6 +350,9 @@ test(
           "utf8",
         ),
       );
+      await backing.pool.query(
+        await readFile("migrations/014_personal_control_paths.sql", "utf8"),
+      );
       await backing.ready();
       const store = personalStore(backing, registry),
         service = new PersonalService(store, registry);
@@ -880,7 +883,7 @@ test(
 );
 
 test(
-  "personal readiness requires committed migrations 009/010/011/012/013, normalized schedules and all valid hot-path indexes",
+  "personal readiness requires committed migrations 009/010/011/012/013/014, normalized schedules and all valid hot-path indexes",
   { skip: !url },
   async () => {
     const { ScheduleService } = await import("../src/schedules/service.js"),
@@ -959,7 +962,9 @@ test(
         (await readFile(
           "migrations/013_personal_dispatchable_sessions.sql",
           "utf8",
-        ));
+        )) +
+        "\n" +
+        (await readFile("migrations/014_personal_control_paths.sql", "utf8"));
       const c = await f.a.pool.connect();
       try {
         await c.query("BEGIN");
@@ -997,7 +1002,7 @@ test(
             )
           ).rows[0].version,
         ),
-        11,
+        12,
       );
       for (const index of [
         "personal_runs_running",
@@ -1015,6 +1020,8 @@ test(
         "personal_workspace_rotation",
         "personal_schedule_fires_history",
         "personal_run_work_dispatchable",
+        "personal_audit_page",
+        "personal_runs_task_identity",
       ]) {
         await f.a.pool.query(`DROP INDEX ${index}`);
         await assert.rejects(f.a.ready(), /SCHEMA_INDEXES_INCOMPLETE/);
@@ -1828,6 +1835,9 @@ test(
           "utf8",
         ),
       );
+      await f.a.pool.query(
+        await readFile("migrations/014_personal_control_paths.sql", "utf8"),
+      );
       await f.a.ready();
       await f.a.pool.query(migration);
       await f.a.pool.query(
@@ -1838,6 +1848,9 @@ test(
           "migrations/013_personal_dispatchable_sessions.sql",
           "utf8",
         ),
+      );
+      await f.a.pool.query(
+        await readFile("migrations/014_personal_control_paths.sql", "utf8"),
       );
       const records = await f.sb.readMetadata(
         f.actor.userId,
@@ -2046,7 +2059,9 @@ test(
           (await readFile(
             "migrations/013_personal_dispatchable_sessions.sql",
             "utf8",
-          )),
+          )) +
+          "\n" +
+          (await readFile("migrations/014_personal_control_paths.sql", "utf8")),
         c = await f.a.pool.connect();
       try {
         await c.query("BEGIN");
@@ -2263,7 +2278,15 @@ async function largeSessionHistory(
   const history = await f.service.createPersonalSession(f.actor, {
       agentId: "a",
     }),
-    base = await f.service.submit(f.actor, history.id, "history");
+    base = await f.service.submit(
+      f.actor,
+      history.id,
+      "history",
+      undefined,
+      undefined,
+      undefined,
+      "history-token",
+    );
   await f.sa.runTx(f.actor.userId, base.id, (s) => {
     s.runs[base.id]!.state = "COMPLETED";
   });
@@ -2295,7 +2318,7 @@ async function largeSessionHistory(
     [f.actor.userId],
   );
   await f.a.pool.query(
-    "INSERT INTO personal_audit(user_id,id,data) SELECT $1,'audit-'||n,jsonb_build_object('id','audit-'||n,'action','old','payload',repeat('x',1024)) FROM generate_series(1,5000)n",
+    "INSERT INTO personal_audit(user_id,id,data) SELECT $1,'audit-'||n,jsonb_build_object('id','audit-'||n,'timestamp','2020-01-01T00:00:00.000Z','action','old','payload',repeat('x',1024)) FROM generate_series(1,5000)n",
     [f.actor.userId],
   );
   await f.a.pool.query(
@@ -2778,6 +2801,9 @@ test(
           "utf8",
         ),
       );
+      await f.a.pool.query(
+        await readFile("migrations/014_personal_control_paths.sql", "utf8"),
+      );
       await f.a.ready();
       assert.deepEqual(
         (await f.a.listRunWork(Date.now(), 10)).map((r) => r.runId),
@@ -2814,6 +2840,515 @@ test(
         [queued.id],
       );
     } finally {
+      await f.close();
+    }
+  },
+);
+
+function controlReads(records: { sql: string; bytes: number }[]) {
+  assert.ok(
+    !records.some((r) =>
+      /FROM personal_(run_events|audit|usage_requests|resource_transitions)\b/.test(
+        r.sql,
+      ),
+    ),
+    "control requests must not select unrelated history",
+  );
+  const bytes = records.reduce((n, r) => n + r.bytes, 0);
+  assert.ok(bytes < 64000, `control request returned ${bytes} bytes`);
+  return { queries: records.length, bytes };
+}
+async function waitingInteraction(
+  f: Awaited<ReturnType<typeof reviewDatabase>>,
+  kind: "approval" | "question" = "question",
+  token?: string,
+) {
+  const ses = await f.service.createPersonalSession(f.actor, { agentId: "a" }),
+    root = await f.service.submit(
+      f.actor,
+      ses.id,
+      "wait",
+      undefined,
+      undefined,
+      undefined,
+      token,
+    ),
+    iid = id();
+  await f.sa.executionTx!(f.actor.userId, root.id, (s) => {
+    s.runs[root.id]!.state = "WAITING_INPUT";
+    s.interactions[iid] = {
+      id: iid,
+      runId: root.id,
+      kind,
+      payload: { question: "Continue?" },
+      resolved: false,
+    };
+  });
+  return { ses, root, iid };
+}
+
+test(
+  "cancel HTTP reads only its task chain at 5k Runs/50k Events and serializes concurrent cancellation",
+  { skip: !url },
+  async () => {
+    const { buildAPI } = await import("../src/api.js"),
+      { sqlMetrics } = await import("./personal-sql-metrics.js");
+    const f = await reviewDatabase(),
+      app = buildAPI(
+        f.service,
+        async () => ({ ...f.actor, personal: false }),
+        new SandboxManager(f.sa, new DemoSandbox()),
+      );
+    try {
+      const ses = await f.service.createPersonalSession(f.actor, {
+          agentId: "a",
+        }),
+        root = await f.service.submit(f.actor, ses.id, "cancel");
+      const m = await sqlMetrics(f.a.pool),
+        samples = [];
+      for (const history of [false, true]) {
+        if (history) await largeSessionHistory(f);
+        await f.sa.executionTx!(f.actor.userId, root.id, (s) => {
+          s.runs[root.id]!.state = "QUEUED";
+          delete s.runs[root.id]!.cancelRequested;
+        });
+        m.start();
+        const start = performance.now();
+        const response = await app.inject({
+          method: "POST",
+          url: `/api/v1/runs/${root.id}/cancel`,
+        });
+        const ms = performance.now() - start,
+          stats = controlReads(m.stop());
+        assert.equal(response.statusCode, 200, response.body);
+        assert.equal(response.json().state, "CANCELLED");
+        samples.push({ history, ...stats, ms });
+      }
+      assert.equal(samples[0]!.queries, samples[1]!.queries);
+      await f.a.pool.query("ANALYZE personal_runs");
+      const plan = (
+        await f.a.pool.query(
+          "EXPLAIN (ANALYZE,FORMAT JSON) SELECT data FROM personal_runs WHERE user_id=$1 AND (COALESCE(data->>'taskId',data->>'rootRunId',run_id)=$2 OR run_id=ANY($3::text[])) ORDER BY run_id FOR UPDATE",
+          [f.actor.userId, root.taskId, [root.id]],
+        )
+      ).rows[0]["QUERY PLAN"];
+      assert.match(JSON.stringify(plan), /personal_runs_task_identity/);
+      const children = [];
+      for (const state of ["QUEUED", "WAITING_INPUT", "COMPLETED"]) {
+        const childSession = await f.service.createPersonalSession(f.actor, {
+          agentId: "a",
+        });
+        children.push({
+          ...root,
+          id: id(),
+          sessionId: childSession.id,
+          state,
+          parentRunId: root.id,
+        });
+        if (state === "WAITING_INPUT") delete children.at(-1)!.taskId;
+      }
+      await f.sa.executionTx!(f.actor.userId, root.id, (s) => {
+        const r = s.runs[root.id]!;
+        r.state = "RUNNING";
+        delete r.cancelRequested;
+        r.lease = { owner: "live", expires: Date.now() + 30000 };
+        for (const child of children) s.runs[child.id] = child as typeof root;
+      });
+      await Promise.all([
+        f.service.cancel(f.actor, children[0]!.id),
+        f.other.cancel(f.actor, root.id),
+      ]);
+      await f.sa.executionTx!(f.actor.userId, root.id, (s) => {
+        assert.equal(s.runs[root.id]!.state, "RUNNING");
+        assert.equal(s.runs[root.id]!.cancelRequested, true);
+        for (const child of children.slice(0, 2))
+          assert.equal(s.runs[child.id]!.state, "CANCELLED");
+        assert.equal(s.runs[children[2]!.id]!.state, "COMPLETED");
+      });
+      const counts = await f.a.pool.query(
+        "SELECT run_id,count(*)::int AS n FROM personal_run_events WHERE user_id=$1 AND run_id=ANY($2::text[]) AND data->>'type'='run.cancelled' GROUP BY run_id",
+        [f.actor.userId, children.slice(0, 2).map((r) => r.id)],
+      );
+      assert.equal(counts.rows.length, 2);
+      assert.ok(counts.rows.every((r) => r.n === 1));
+      const foreign = await principal(f.ar, {
+        tenantId: "outside",
+        userId: "outside",
+        admin: false,
+      });
+      await assert.rejects(f.other.cancel(foreign, root.id), {
+        code: "RUN_NOT_FOUND",
+      });
+      console.log(JSON.stringify({ round7Cancel: samples }));
+    } finally {
+      await app.close();
+      await f.close();
+    }
+  },
+);
+
+test(
+  "Interaction HTTP resumes with bounded history reads, fresh sealed credentials and concurrent response idempotency",
+  { skip: !url },
+  async () => {
+    const { buildAPI } = await import("../src/api.js"),
+      { sqlMetrics } = await import("./personal-sql-metrics.js"),
+      { openToken } = await import("../src/security/token-vault.js");
+    const oldKey = process.env.RUN_TOKEN_KEY;
+    process.env.RUN_TOKEN_KEY = Buffer.alloc(32, 7).toString("base64");
+    const f = await reviewDatabase(),
+      app = buildAPI(
+        f.service,
+        async () => ({
+          ...f.actor,
+          personal: false,
+          expiresAt: Date.now() + 60000,
+        }),
+        new SandboxManager(f.sa, new DemoSandbox()),
+      );
+    try {
+      await f.ar.tx((s) => {
+        s.managedAgents!.a!.config.userTokenAccess = true;
+      });
+      const pending = await waitingInteraction(f, "approval", "expired-token");
+      await f.sa.executionTx!(f.actor.userId, pending.root.id, (s) => {
+        s.runs[pending.root.id]!.actor.expiresAt = Date.now() - 1;
+      });
+      await f.ar.tx((s) => {
+        s.managedAgents!.a!.config.userTokenAccess = false;
+      });
+      await largeSessionHistory(f);
+      await f.ar.tx((s) => {
+        s.managedAgents!.a!.config.userTokenAccess = true;
+        s.managedAgents!.a!.config.systemPrompt = "new-config";
+      });
+      const m = await sqlMetrics(f.a.pool);
+      m.start();
+      const start = performance.now();
+      const send = () =>
+        app.inject({
+          method: "POST",
+          url: `/api/v1/interactions/${pending.iid}/response`,
+          headers: { authorization: "Bearer refreshed-token" },
+          payload: { response: "approve" },
+        });
+      const replies = await Promise.all([send(), send()]),
+        stats = controlReads(m.stop()),
+        ms = performance.now() - start;
+      for (const r of replies) assert.equal(r.statusCode, 202, r.body);
+      assert.equal(replies[0]!.json().id, replies[1]!.json().id);
+      const next = await f.sa.readRun(
+        f.actor.userId,
+        replies[0]!.json().id,
+        (s) => s.runs[replies[0]!.json().id]!,
+      );
+      assert.deepEqual(next.capabilities, pending.root.capabilities);
+      assert.equal(
+        openToken(
+          next.userTokenRef!,
+          f.actor.userId + ":" + pending.root.taskId,
+        ),
+        "refreshed-token",
+      );
+      const sealed = next.userTokenRef;
+      assert.equal(
+        (await f.other.respond(
+          f.actor,
+          pending.iid,
+          "approve",
+          "another-token",
+        ))!.userTokenRef,
+        sealed,
+      );
+      await assert.rejects(
+        f.other.respond(f.actor, pending.iid, "deny", "another-token"),
+        { code: "INTERACTION_ALREADY_RESOLVED" },
+      );
+      assert.equal(
+        (
+          await f.a.pool.query(
+            "SELECT count(*)::int AS n FROM personal_runs WHERE user_id=$1 AND data->>'resumedFrom'=$2",
+            [f.actor.userId, pending.iid],
+          )
+        ).rows[0].n,
+        1,
+      );
+      const question = await waitingInteraction(f, "question", "old-token");
+      await assert.rejects(f.other.respond(f.actor, question.iid, "answer"), {
+        code: "USER_TOKEN_REQUIRED",
+      });
+      await f.sa.executionTx!(f.actor.userId, question.root.id, (s) => {
+        assert.equal(s.interactions[question.iid]!.resolved, false);
+        assert.equal(s.runs[question.root.id]!.state, "WAITING_INPUT");
+      });
+      assert.equal(
+        (await f.other.respond(
+          f.actor,
+          question.iid,
+          "answer",
+          "question-token",
+        ))!.taskId,
+        question.root.taskId,
+      );
+      console.log(
+        JSON.stringify({
+          round7Interaction: { ...stats, ms, continuations: 1 },
+        }),
+      );
+    } finally {
+      await app.close();
+      await f.close();
+      if (oldKey === undefined) delete process.env.RUN_TOKEN_KEY;
+      else process.env.RUN_TOKEN_KEY = oldKey;
+    }
+  },
+);
+
+test(
+  "Interaction control transactions retain checkpoint, live-policy and admission guards and serialize cancellation",
+  { skip: !url },
+  async () => {
+    const f = await reviewDatabase();
+    try {
+      const pending = await waitingInteraction(f);
+      await f.sa.executionTx!(f.actor.userId, pending.root.id, (s) => {
+        s.runs[pending.root.id]!.lease = {
+          owner: "checkpoint",
+          expires: Date.now() + 30000,
+        };
+      });
+      await assert.rejects(f.other.respond(f.actor, pending.iid, "answer"), {
+        code: "CHECKPOINT_PENDING",
+      });
+      await f.sa.executionTx!(f.actor.userId, pending.root.id, (s) => {
+        delete s.runs[pending.root.id]!.lease;
+      });
+      await f.ar.tx((s) => {
+        s.managedAgents!.a!.enabled = false;
+      });
+      await assert.rejects(f.other.respond(f.actor, pending.iid, "answer"), {
+        code: "AGENT_REVOKED",
+      });
+      await f.ar.tx((s) => {
+        s.managedAgents!.a!.enabled = true;
+      });
+      const [admission, resumed] = await Promise.allSettled([
+        f.service.submit(f.actor, pending.ses.id, "competing root"),
+        f.other.respond(f.actor, pending.iid, "answer"),
+      ]);
+      assert.equal(admission.status, "rejected");
+      if (admission.status === "rejected")
+        assert.equal(admission.reason.code, "SESSION_BUSY");
+      assert.equal(resumed.status, "fulfilled");
+      const foreign = await principal(f.ar, {
+        tenantId: "foreign",
+        userId: "foreign",
+        admin: false,
+      });
+      await assert.rejects(f.other.respond(foreign, pending.iid, "answer"), {
+        code: "INTERACTION_NOT_FOUND",
+      });
+      for (let n = 0; n < 4; n++) {
+        const p = await waitingInteraction(f, n % 2 ? "approval" : "question"),
+          answer = n % 2 ? "approve" : "answer";
+        const [c, r] = await Promise.allSettled([
+          f.service.cancel(f.actor, p.root.id),
+          f.other.respond(f.actor, p.iid, answer),
+        ]);
+        assert.equal(c.status, "fulfilled");
+        if (r.status === "rejected")
+          assert.equal(r.reason.code, "RUN_NOT_WAITING");
+        await f.sa.executionTx!(f.actor.userId, p.root.id, (s) => {
+          assert.ok(
+            Object.values(s.runs).every((r) =>
+              ["COMPLETED", "CANCELLED"].includes(r.state),
+            ),
+          );
+        });
+      }
+    } finally {
+      await f.close();
+    }
+  },
+);
+
+test(
+  "Audit HTTP pages use indexed tenant-local SQL, stable timestamp cursors and compatible offsets under large history",
+  { skip: !url },
+  async () => {
+    const { buildAPI } = await import("../src/api.js"),
+      { sqlMetrics } = await import("./personal-sql-metrics.js");
+    const f = await reviewDatabase(),
+      app = buildAPI(
+        f.service,
+        async (header) => ({
+          ...f.actor,
+          personal: false,
+          admin: header !== "Bearer ordinary",
+        }),
+        new SandboxManager(f.sa, new DemoSandbox()),
+      );
+    try {
+      await largeSessionHistory(f);
+      for (let n = 0; n < 6; n++)
+        await f.sa.appendAudit(f.actor.userId, {
+          id: `page-${n}`,
+          timestamp: "1990-01-01T00:00:00.000Z",
+          actorId: f.actor.userId,
+          action: "test",
+          resource: "test",
+          result: "allowed",
+        });
+      const m = await sqlMetrics(f.a.pool);
+      let cursor: string | undefined;
+      const seen: string[] = [];
+      const samples = [];
+      for (let n = 0; n < 3; n++) {
+        m.start();
+        const r = await app.inject({
+          url: `/api/v1/admin/audit?limit=2${cursor ? "&cursor=" + cursor : ""}`,
+        });
+        const records = m.stop();
+        assert.equal(r.statusCode, 200, r.body);
+        const p = r.json();
+        seen.push(...p.items.map((a: { id: string }) => a.id));
+        cursor = p.nextCursor;
+        const selects = records.filter((r) =>
+          /FROM personal_audit\b/.test(r.sql),
+        );
+        assert.equal(selects.length, 1);
+        assert.equal(selects[0]!.rows, 3);
+        assert.ok(
+          !records.some((r) =>
+            /FROM personal_(runs|sessions|run_events|usage_requests|resource_transitions)\b/.test(
+              r.sql,
+            ),
+          ),
+        );
+        const bytes = records.reduce((n, r) => n + r.bytes, 0);
+        assert.ok(bytes < 3000);
+        samples.push({ queries: records.length, bytes });
+        if (n === 0)
+          await f.sb.appendAudit(f.actor.userId, {
+            id: "earlier",
+            timestamp: "1980-01-01T00:00:00.000Z",
+            actorId: f.actor.userId,
+            action: "insert",
+            resource: "test",
+            result: "allowed",
+          });
+      }
+      assert.deepEqual(
+        seen,
+        Array.from({ length: 6 }, (_, n) => `page-${n}`),
+      );
+      assert.deepEqual(
+        (await app.inject({ url: "/api/v1/admin/audit?offset=2&limit=2" }))
+          .json()
+          .items.map((a: { id: string }) => a.id),
+        ["page-1", "page-2"],
+      );
+      for (const query of ["cursor=bad", `cursor=${cursor}&offset=1`])
+        assert.equal(
+          (await app.inject({ url: "/api/v1/admin/audit?" + query }))
+            .statusCode,
+          400,
+        );
+      assert.equal(
+        (
+          await app.inject({
+            url: "/api/v1/admin/audit",
+            headers: { authorization: "Bearer ordinary" },
+          })
+        ).statusCode,
+        403,
+      );
+      assert.deepEqual(await f.a.listAudit("foreign", 0, 10), []);
+      await f.a.pool.query("ANALYZE personal_audit");
+      const plan = (
+        await f.a.pool.query(
+          "EXPLAIN (ANALYZE,FORMAT JSON) SELECT data FROM personal_audit WHERE user_id=$1 AND (data->>'timestamp',id)>($2,$3) ORDER BY data->>'timestamp',id LIMIT 3",
+          [f.actor.userId, "1990-01-01T00:00:00.000Z", "page-1"],
+        )
+      ).rows[0]["QUERY PLAN"];
+      assert.match(JSON.stringify(plan), /personal_audit_page/);
+      assert.doesNotMatch(JSON.stringify(plan), /"Node Type":"Sort"/);
+      console.log(JSON.stringify({ round7Audit: samples }));
+    } finally {
+      await app.close();
+      await f.close();
+    }
+  },
+);
+
+test(
+  "manual Memory HTTP appends attempt/success/failure audits and scopes sandbox lifecycle without historical reads",
+  { skip: !url },
+  async () => {
+    const { buildAPI } = await import("../src/api.js"),
+      { sqlMetrics } = await import("./personal-sql-metrics.js"),
+      { Fault } = await import("../src/domain.js");
+    const f = await reviewDatabase(),
+      provider = new DemoSandbox(),
+      sandbox = new SandboxManager(f.sa, provider),
+      app = buildAPI(
+        f.service,
+        async () => ({ ...f.actor, personal: false }),
+        sandbox,
+      );
+    try {
+      await largeSessionHistory(f);
+      const execute = provider.execute.bind(provider);
+      let fail = false;
+      provider.execute = async (sid, op, args) => {
+        if (fail && op === "write")
+          throw new Fault(503, "MEMORY_SANDBOX_FAILURE");
+        return execute(sid, op, args);
+      };
+      const m = await sqlMetrics(f.a.pool),
+        samples = [];
+      // Any accidental fallback would reintroduce the history load even if audit appends were fixed.
+      f.a.tx = async () => {
+        throw new Error("manual Memory used full tx");
+      };
+      for (const failure of [false, true]) {
+        fail = failure;
+        m.start();
+        const r = await app.inject({
+          method: "PUT",
+          url: "/api/v1/me/memory/note.md",
+          payload: { content: "remember this" },
+        });
+        const stats = controlReads(m.stop());
+        assert.equal(r.statusCode, failure ? 503 : 200, r.body);
+        samples.push({ failure, ...stats });
+      }
+      const rows = await f.a.pool.query(
+        "SELECT data FROM personal_audit WHERE user_id=$1 AND data->>'resource'='/workspace/memory/note.md' ORDER BY data->>'timestamp',id",
+        [f.actor.userId],
+      );
+      const actions = rows.rows.map((r) => r.data.action);
+      assert.equal(
+        actions.filter((a) => a === "memory.write.attempt").length,
+        2,
+      );
+      assert.equal(actions.filter((a) => a === "memory.write").length, 1);
+      assert.equal(
+        actions.filter((a) => a === "memory.write.failed").length,
+        1,
+      );
+      assert.equal(
+        rows.rows.find((r) => r.data.action === "memory.write.failed")!.data
+          .result,
+        "MEMORY_SANDBOX_FAILURE",
+      );
+      fail = false;
+      const read = await app.inject({ url: "/api/v1/me/memory/note.md" });
+      assert.equal(read.statusCode, 200, read.body);
+      assert.match(read.json().text, /remember this/);
+      console.log(JSON.stringify({ round7ManualMemory: samples }));
+    } finally {
+      await app.close();
       await f.close();
     }
   },

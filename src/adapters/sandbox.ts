@@ -714,6 +714,70 @@ export class SandboxManager {
       { write: !["read", "ls", "grep", "find"].includes(op), authorize },
     );
   }
+  // Manual workspace operations share scoped lifecycle transactions with file APIs.
+  async executeWorkspace(
+    a: Actor,
+    wid: string,
+    owner: string,
+    bundle: string,
+    op: string,
+    args: Record<string, unknown>,
+    signal?: AbortSignal,
+    skillIds: readonly string[] = [],
+    authorize?: (s: State) => void,
+  ) {
+    if (!a.personal)
+      return this.execute(
+        a,
+        wid,
+        owner,
+        bundle,
+        op,
+        args,
+        signal,
+        skillIds,
+        authorize,
+      );
+    // Scope every nested lease/volume/cleanup operation to workspace state.
+    // Keep the normal execution manager's full Run authorization path intact.
+    if (!this.fileManager) {
+      const store = this.store.workspaceTx
+        ? new Proxy(this.store, {
+            get: (target, key) => {
+              if (key === "read" || key === "tx")
+                return target.workspaceTx!.bind(target);
+              const value = Reflect.get(target, key);
+              return typeof value === "function" ? value.bind(target) : value;
+            },
+          })
+        : this.store;
+      this.fileManager = new SandboxManager(
+        store,
+        this.provider,
+        this.policy,
+        this.canUseBundle,
+        this.limits,
+      );
+    }
+    const manager = this.fileManager;
+    const w = await manager.store.read(a.tenantId, (s) => {
+      const w = workspace(s, a, wid, true);
+      if (Object.values(s.runs).some((r) => r.state === "RUNNING"))
+        throw new Fault(409, "WORKSPACE_BUSY");
+      return w;
+    });
+    return manager.execute(
+      a,
+      wid,
+      owner,
+      w.bundle ?? bundle,
+      op,
+      { ...args, _workspaceOnly: true },
+      signal,
+      w.sandboxSkills ?? skillIds,
+      authorize,
+    );
+  }
   // File APIs use a temporary instance with only the workspace volume. Its
   // capacity entry survives failed cleanup, while the Agent instance is untouched.
   async executeFile(
@@ -723,46 +787,8 @@ export class SandboxManager {
     op: "read" | "ls" | "write" | "delete",
     args: Record<string, unknown>,
   ) {
-    if (a.personal) {
-      // Scope every nested lease/volume/cleanup operation to workspace state.
-      // Keep the normal execution manager's full Run authorization path intact.
-      if (!this.fileManager) {
-        const store = this.store.workspaceTx
-          ? new Proxy(this.store, {
-              get: (target, key) => {
-                if (key === "read" || key === "tx")
-                  return target.workspaceTx!.bind(target);
-                const value = Reflect.get(target, key);
-                return typeof value === "function" ? value.bind(target) : value;
-              },
-            })
-          : this.store;
-        this.fileManager = new SandboxManager(
-          store,
-          this.provider,
-          this.policy,
-          this.canUseBundle,
-          this.limits,
-        );
-      }
-      const manager = this.fileManager;
-      const w = await manager.store.read(a.tenantId, (s) => {
-        const w = workspace(s, a, wid, true);
-        if (Object.values(s.runs).some((r) => r.state === "RUNNING"))
-          throw new Fault(409, "WORKSPACE_BUSY");
-        return w;
-      });
-      return manager.execute(
-        a,
-        wid,
-        owner,
-        w.bundle ?? "default",
-        op,
-        { ...args, _workspaceOnly: true },
-        undefined,
-        w.sandboxSkills ?? [],
-      );
-    }
+    if (a.personal)
+      return this.executeWorkspace(a, wid, owner, "default", op, args);
     owner = `${owner}:${crypto.randomUUID()}`;
     if (!["read", "ls", "write", "delete"].includes(op))
       throw new Fault(403, "TOOL_DENIED");

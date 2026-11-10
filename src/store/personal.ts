@@ -58,9 +58,14 @@ export function personalStore(backing: Store, registry: Registry): Store {
           fn: (s: State) => unknown,
           idempotencyKey?: string,
         ) => target.txLight!(user, sid, await overlay(fn), idempotencyKey);
-      if ((key === "runTx" || key === "claimRun") && target[key])
+      if (
+        ["runTx", "claimRun", "cancelTaskTx", "interactionTx"].includes(
+          String(key),
+        ) &&
+        target[key as "runTx"]
+      )
         return async (user: string, rid: string, fn: (s: State) => unknown) =>
-          target[key]!(user, rid, await overlay(fn));
+          target[key as "runTx"]!(user, rid, await overlay(fn));
       if (key === "scheduleTx" && target.scheduleTx)
         return async (
           user: string,

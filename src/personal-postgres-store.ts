@@ -47,7 +47,7 @@ import type {
   CapacityState,
 } from "./adapters/sandbox-policy.js";
 import { type WorkerHealth } from "./health.js";
-const SCHEMA_VERSION = 11;
+const SCHEMA_VERSION = 12;
 function candidateLimit(limit: number) {
   if (!Number.isInteger(limit) || limit < 1 || limit > 100)
     throw new Error("Invalid candidate limit");
@@ -375,7 +375,9 @@ export class PersonalPostgresStore implements Store {
       EXISTS(SELECT 1 FROM pg_index WHERE indexrelid=to_regclass('personal_run_work_expired') AND indrelid=to_regclass('personal_run_work') AND indisvalid AND indisready) AS work_expired,
       EXISTS(SELECT 1 FROM pg_index WHERE indexrelid=to_regclass('personal_workspace_rotation') AND indrelid=to_regclass('personal_workspace_runtime') AND indisvalid AND indisready) AS rotation,
       EXISTS(SELECT 1 FROM pg_index WHERE indexrelid=to_regclass('personal_schedule_fires_history') AND indrelid=to_regclass('personal_schedule_fires') AND indisvalid AND indisready) AS fire_history,
-      EXISTS(SELECT 1 FROM pg_index WHERE indexrelid=to_regclass('personal_run_work_dispatchable') AND indrelid=to_regclass('personal_run_work') AND indisvalid AND indisready) AS dispatchable`);
+      EXISTS(SELECT 1 FROM pg_index WHERE indexrelid=to_regclass('personal_run_work_dispatchable') AND indrelid=to_regclass('personal_run_work') AND indisvalid AND indisready) AS dispatchable,
+      EXISTS(SELECT 1 FROM pg_index WHERE indexrelid=to_regclass('personal_audit_page') AND indrelid=to_regclass('personal_audit') AND indisvalid AND indisready) AS audit_page,
+      EXISTS(SELECT 1 FROM pg_index WHERE indexrelid=to_regclass('personal_runs_task_identity') AND indrelid=to_regclass('personal_runs') AND indisvalid AND indisready) AS task_identity`);
     if (Object.values(indexes.rows[0]).some((v) => v !== true))
       throw new Error("SCHEMA_INDEXES_INCOMPLETE");
     const triggers = await this.healthPool
@@ -431,6 +433,43 @@ export class PersonalPostgresStore implements Store {
     } finally {
       c.release();
     }
+  }
+  async cancelTaskTx<T>(
+    user: string,
+    runId: string,
+    fn: (s: State) => T | Promise<T>,
+  ) {
+    return this.executionTx(user, runId, fn);
+  }
+  async interactionTx<T>(
+    user: string,
+    interactionId: string,
+    fn: (s: State) => T | Promise<T>,
+  ) {
+    return this.executionTx(user, "", fn, { interactionId, admission: true });
+  }
+  async listAudit(
+    user: string,
+    offset: number,
+    limit: number,
+    after?: { timestamp: string; id: string },
+  ) {
+    if (
+      !Number.isSafeInteger(offset) ||
+      offset < 0 ||
+      !Number.isInteger(limit) ||
+      limit < 1 ||
+      limit > 101 ||
+      (after && offset !== 0)
+    )
+      throw new Error("Invalid audit pagination");
+    const result = await this.pool.query(
+      `SELECT data FROM personal_audit WHERE user_id=$1${after ? " AND (data->>'timestamp',id)>($4::text,$5::text)" : ""} ORDER BY data->>'timestamp',id LIMIT $2 OFFSET $3`,
+      after
+        ? [user, limit, offset, after.timestamp, after.id]
+        : [user, limit, offset],
+    );
+    return result.rows.map((r) => r.data) as State["audit"];
   }
   async executionTx<T>(
     user: string,

@@ -553,7 +553,11 @@ export class HarnessService {
     });
   }
   async cancel(a: Actor, rid: string) {
-    return this.store.tx(a.tenantId, (s) => {
+    const transact = this.store.cancelTaskTx
+      ? <T>(fn: (s: State) => T | Promise<T>) =>
+          this.store.cancelTaskTx!(a.tenantId, rid, fn)
+      : <T>(fn: (s: State) => T | Promise<T>) => this.store.tx(a.tenantId, fn);
+    return transact((s) => {
       const r = run(s, a, rid, true);
       const taskId = taskIdentity(s, r);
       for (const member of Object.values(s.runs)) {
@@ -570,7 +574,11 @@ export class HarnessService {
     });
   }
   async respond(a: Actor, iid: string, response: string, bearerToken?: string) {
-    return this.store.tx(a.tenantId, (s) => {
+    const transact = this.store.interactionTx
+      ? <T>(fn: (s: State) => T | Promise<T>) =>
+          this.store.interactionTx!(a.tenantId, iid, fn)
+      : <T>(fn: (s: State) => T | Promise<T>) => this.store.tx(a.tenantId, fn);
+    return transact((s) => {
       const i = s.interactions[iid];
       if (!i) throw new Fault(404, "INTERACTION_NOT_FOUND");
       const r = run(s, a, i.runId, true);

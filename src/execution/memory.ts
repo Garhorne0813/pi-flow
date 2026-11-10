@@ -1,6 +1,7 @@
 import { posix } from "node:path";
 import {
   Fault,
+  emptyState,
   audit,
   id,
   type AgentConfig,
@@ -95,10 +96,20 @@ export class MemoryManager {
       throw new Fault(429, "MEMORY_FILE_LIMIT");
     signal.throwIfAborted();
     const reservation = id();
-    const transact = <T>(fn: (s: State) => T | Promise<T>) =>
-      !manual && this.store.executionTx
+    const transact = async <T>(fn: (s: State) => T | Promise<T>) => {
+      if (manual && !authorize) {
+        const s = emptyState(),
+          result = await fn(s);
+        for (const entry of s.audit)
+          await this.store.appendAudit(a.tenantId, entry);
+        return result;
+      }
+      if (manual && this.store.workspaceTx)
+        return this.store.workspaceTx(a.tenantId, fn);
+      return !manual && this.store.executionTx
         ? this.store.executionTx(a.tenantId, runId, fn)
         : this.store.tx(a.tenantId, fn);
+    };
     await transact((s) => {
       authorize?.(s);
       if (!manual) {
@@ -125,7 +136,9 @@ export class MemoryManager {
     let failure: unknown;
     try {
       const execute = (op: string, args: Record<string, unknown>) =>
-        this.sandbox.execute(
+        (manual && a.personal
+          ? this.sandbox.executeWorkspace.bind(this.sandbox)
+          : this.sandbox.execute.bind(this.sandbox))(
           a,
           wid,
           runId,
