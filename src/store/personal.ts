@@ -1,5 +1,5 @@
 import type { Store } from "../store.js";
-import type { State } from "../domain.js";
+import { Fault, type State } from "../domain.js";
 import type { Registry } from "./registry.js";
 const keys = [
   "agents",
@@ -31,6 +31,13 @@ export function personalStore(backing: Store, registry: Registry): Store {
   };
   return new Proxy(backing, {
     get(target, key) {
+      if (key === "verifyActor")
+        return async (a: import("../domain.js").Actor) => {
+          if (a.expiresAt && a.expiresAt <= Date.now())
+            throw new Fault(401, "ACTOR_TOKEN_EXPIRED");
+          if (!a.issuer || !a.subject) throw new Fault(403, "USER_DISABLED");
+          await registry.verifyIdentity(a.issuer, a.subject, a.userId);
+        };
       if (key === "sessionTx" && target.sessionTx)
         return async (
           user: string,

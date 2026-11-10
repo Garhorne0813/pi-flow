@@ -47,7 +47,7 @@ import type {
   CapacityState,
 } from "./adapters/sandbox-policy.js";
 import { type WorkerHealth } from "./health.js";
-const SCHEMA_VERSION = 12;
+const SCHEMA_VERSION = 13;
 function candidateLimit(limit: number) {
   if (!Number.isInteger(limit) || limit < 1 || limit > 100)
     throw new Error("Invalid candidate limit");
@@ -377,7 +377,8 @@ export class PersonalPostgresStore implements Store {
       EXISTS(SELECT 1 FROM pg_index WHERE indexrelid=to_regclass('personal_schedule_fires_history') AND indrelid=to_regclass('personal_schedule_fires') AND indisvalid AND indisready) AS fire_history,
       EXISTS(SELECT 1 FROM pg_index WHERE indexrelid=to_regclass('personal_run_work_dispatchable') AND indrelid=to_regclass('personal_run_work') AND indisvalid AND indisready) AS dispatchable,
       EXISTS(SELECT 1 FROM pg_index WHERE indexrelid=to_regclass('personal_audit_page') AND indrelid=to_regclass('personal_audit') AND indisvalid AND indisready) AS audit_page,
-      EXISTS(SELECT 1 FROM pg_index WHERE indexrelid=to_regclass('personal_runs_task_identity') AND indrelid=to_regclass('personal_runs') AND indisvalid AND indisready) AS task_identity`);
+      EXISTS(SELECT 1 FROM pg_index WHERE indexrelid=to_regclass('personal_runs_task_identity') AND indrelid=to_regclass('personal_runs') AND indisvalid AND indisready) AS task_identity,
+      EXISTS(SELECT 1 FROM pg_index WHERE indexrelid=to_regclass('personal_tool_failures') AND indrelid=to_regclass('personal_run_events') AND indisvalid AND indisready) AS tool_failures`);
     if (Object.values(indexes.rows[0]).some((v) => v !== true))
       throw new Error("SCHEMA_INDEXES_INCOMPLETE");
     const triggers = await this.healthPool
@@ -433,6 +434,25 @@ export class PersonalPostgresStore implements Store {
     } finally {
       c.release();
     }
+  }
+  async adminStats(user: string): Promise<import("./store.js").AdminStats> {
+    const result = await this.pool.query(
+      `WITH summaries AS (
+      SELECT state,count(*) AS n,
+      sum(CASE WHEN NULLIF(data->>'startedAt','') IS NOT NULL AND NULLIF(data->>'endedAt','') IS NOT NULL
+        THEN extract(epoch FROM ((data->>'endedAt')::timestamptz-(data->>'startedAt')::timestamptz))*1000 END) AS duration,
+      count(*) FILTER (WHERE NULLIF(data->>'startedAt','') IS NOT NULL AND NULLIF(data->>'endedAt','') IS NOT NULL) AS samples
+      FROM personal_runs WHERE user_id=$1 GROUP BY state
+    ) SELECT COALESCE(jsonb_object_agg(state,n),'{}'::jsonb) AS runs,
+      COALESCE(sum(duration)/NULLIF(sum(samples),0),0)::float8 AS "averageRunDurationMs",
+      (SELECT count(*)::int FROM personal_user_state u CROSS JOIN LATERAL jsonb_each(COALESCE(u.state->'interactions','{}'::jsonb)) i
+       JOIN personal_runs r ON r.user_id=u.user_id AND r.run_id=i.value->>'runId'
+       WHERE u.user_id=$1 AND NOT COALESCE((i.value->>'resolved')::boolean,false) AND r.state='WAITING_INPUT') AS "pendingInteractions",
+      (SELECT count(*)::int FROM personal_run_events WHERE user_id=$1 AND data->>'type'='tool.failed') AS "toolFailures"
+      FROM summaries`,
+      [user],
+    );
+    return result.rows[0];
   }
   async cancelTaskTx<T>(
     user: string,

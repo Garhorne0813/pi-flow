@@ -771,6 +771,7 @@ export function buildAPI(
   app.get("/api/v1/admin/stats", async (req) => {
     const a = actor(req);
     admin(a);
+    if (service.store.adminStats) return service.store.adminStats(a.tenantId);
     return service.store.read(a.tenantId, (s) => {
       const runs = Object.values(s.runs);
       const byState: Record<string, number> = {};

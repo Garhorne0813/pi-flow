@@ -21,7 +21,15 @@ import type {
   CapacityState,
 } from "./adapters/sandbox-policy.js";
 import { SCHEMA_VERSION, type WorkerHealth } from "./health.js";
+export type AdminStats = {
+  runs: Record<string, number>;
+  pendingInteractions: number;
+  averageRunDurationMs: number;
+  toolFailures: number;
+};
 export interface Store {
+  adminStats?(user: string): Promise<AdminStats>;
+  verifyActor?(actor: import("./domain.js").Actor): Promise<void>;
   cancelTaskTx?<T>(
     user: string,
     runId: string,

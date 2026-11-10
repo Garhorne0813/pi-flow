@@ -353,6 +353,12 @@ test(
       await backing.pool.query(
         await readFile("migrations/014_personal_control_paths.sql", "utf8"),
       );
+      await backing.pool.query(
+        await readFile(
+          "migrations/015_personal_legacy_tasks_stats.sql",
+          "utf8",
+        ),
+      );
       await backing.ready();
       const store = personalStore(backing, registry),
         service = new PersonalService(store, registry);
@@ -883,7 +889,7 @@ test(
 );
 
 test(
-  "personal readiness requires committed migrations 009/010/011/012/013/014, normalized schedules and all valid hot-path indexes",
+  "personal readiness requires committed migrations 009/010/011/012/013/014/015, normalized schedules and all valid hot-path indexes",
   { skip: !url },
   async () => {
     const { ScheduleService } = await import("../src/schedules/service.js"),
@@ -964,7 +970,12 @@ test(
           "utf8",
         )) +
         "\n" +
-        (await readFile("migrations/014_personal_control_paths.sql", "utf8"));
+        (await readFile("migrations/014_personal_control_paths.sql", "utf8")) +
+        "\n" +
+        (await readFile(
+          "migrations/015_personal_legacy_tasks_stats.sql",
+          "utf8",
+        ));
       const c = await f.a.pool.connect();
       try {
         await c.query("BEGIN");
@@ -1002,7 +1013,7 @@ test(
             )
           ).rows[0].version,
         ),
-        12,
+        13,
       );
       for (const index of [
         "personal_runs_running",
@@ -1022,6 +1033,7 @@ test(
         "personal_run_work_dispatchable",
         "personal_audit_page",
         "personal_runs_task_identity",
+        "personal_tool_failures",
       ]) {
         await f.a.pool.query(`DROP INDEX ${index}`);
         await assert.rejects(f.a.ready(), /SCHEMA_INDEXES_INCOMPLETE/);
@@ -1838,6 +1850,12 @@ test(
       await f.a.pool.query(
         await readFile("migrations/014_personal_control_paths.sql", "utf8"),
       );
+      await f.a.pool.query(
+        await readFile(
+          "migrations/015_personal_legacy_tasks_stats.sql",
+          "utf8",
+        ),
+      );
       await f.a.ready();
       await f.a.pool.query(migration);
       await f.a.pool.query(
@@ -1851,6 +1869,12 @@ test(
       );
       await f.a.pool.query(
         await readFile("migrations/014_personal_control_paths.sql", "utf8"),
+      );
+      await f.a.pool.query(
+        await readFile(
+          "migrations/015_personal_legacy_tasks_stats.sql",
+          "utf8",
+        ),
       );
       const records = await f.sb.readMetadata(
         f.actor.userId,
@@ -2061,7 +2085,15 @@ test(
             "utf8",
           )) +
           "\n" +
-          (await readFile("migrations/014_personal_control_paths.sql", "utf8")),
+          (await readFile(
+            "migrations/014_personal_control_paths.sql",
+            "utf8",
+          )) +
+          "\n" +
+          (await readFile(
+            "migrations/015_personal_legacy_tasks_stats.sql",
+            "utf8",
+          )),
         c = await f.a.pool.connect();
       try {
         await c.query("BEGIN");
@@ -2804,6 +2836,12 @@ test(
       await f.a.pool.query(
         await readFile("migrations/014_personal_control_paths.sql", "utf8"),
       );
+      await f.a.pool.query(
+        await readFile(
+          "migrations/015_personal_legacy_tasks_stats.sql",
+          "utf8",
+        ),
+      );
       await f.a.ready();
       assert.deepEqual(
         (await f.a.listRunWork(Date.now(), 10)).map((r) => r.runId),
@@ -3347,6 +3385,544 @@ test(
       assert.equal(read.statusCode, 200, read.body);
       assert.match(read.json().text, /remember this/);
       console.log(JSON.stringify({ round7ManualMemory: samples }));
+    } finally {
+      await app.close();
+      await f.close();
+    }
+  },
+);
+
+test(
+  "015 backfills parent/resumedFrom-only task identities atomically and cancels whole legacy chains from root or child",
+  { skip: !url },
+  async () => {
+    const { taskIdentity } = await import("../src/service.js");
+    const f = await reviewDatabase();
+    try {
+      const rootSession = await f.service.createPersonalSession(f.actor, {
+          agentId: "a",
+        }),
+        root = await f.service.submit(f.actor, rootSession.id, "legacy root");
+      const runs = [root],
+        iids = [id(), id()];
+      for (let n = 0; n < 3; n++) {
+        const ses = await f.service.createPersonalSession(f.actor, {
+          agentId: "a",
+        });
+        runs.push({
+          ...root,
+          id: id(),
+          sessionId: ses.id,
+          prompt: `legacy ${n}`,
+          parentRunId: n === 0 ? root.id : undefined,
+          resumedFrom: n > 0 ? iids[n - 1] : undefined,
+        });
+      }
+      await f.sa.executionTx!(f.actor.userId, root.id, (s) => {
+        for (const r of runs) s.runs[r.id] = { ...r };
+        s.interactions[iids[0]!] = {
+          id: iids[0]!,
+          runId: runs[1]!.id,
+          kind: "question",
+          resolved: true,
+          payload: {},
+          response: "yes",
+          continuationRunId: runs[2]!.id,
+        };
+        s.interactions[iids[1]!] = {
+          id: iids[1]!,
+          runId: runs[2]!.id,
+          kind: "approval",
+          resolved: true,
+          payload: {},
+          response: "approve",
+          continuationRunId: runs[3]!.id,
+        };
+      });
+      await f.a.pool.query(
+        "UPDATE personal_runs SET data=data-'taskId'-'rootRunId' WHERE user_id=$1 AND run_id=ANY($2::text[])",
+        [f.actor.userId, runs.map((r) => r.id)],
+      );
+      const before = await f.sa.read(f.actor.userId, (s) => {
+        for (const r of runs)
+          assert.equal(taskIdentity(s, s.runs[r.id]!), root.id);
+        return Object.fromEntries(runs.map((r) => [r.id, s.runs[r.id]]));
+      });
+      await f.a.pool.query("UPDATE personal_schema SET version=12 WHERE id=1");
+      const migration = await readFile(
+          "migrations/015_personal_legacy_tasks_stats.sql",
+          "utf8",
+        ),
+        c = await f.a.pool.connect();
+      try {
+        await c.query("BEGIN");
+        await c.query(migration);
+        await assert.rejects(f.b.ready(), /SCHEMA_MISMATCH/);
+        await c.query("ROLLBACK");
+      } finally {
+        c.release();
+      }
+      const rolled = await f.a.pool.query(
+        "SELECT data FROM personal_runs WHERE user_id=$1 AND run_id=ANY($2::text[])",
+        [f.actor.userId, runs.map((r) => r.id)],
+      );
+      assert.ok(rolled.rows.every((r) => !r.data.taskId && !r.data.rootRunId));
+      await f.a.pool.query(migration);
+      await f.a.ready();
+      await f.a.pool.query(migration);
+      await f.sa.executionTx!(f.actor.userId, root.id, (s) => {
+        for (const r of runs) {
+          const actual = s.runs[r.id]!;
+          assert.equal(actual.taskId, root.id);
+          assert.equal(actual.rootRunId, root.id);
+          const { taskId, rootRunId, ...rest } = actual;
+          assert.deepEqual(rest, before[r.id]);
+        }
+      });
+      await f.other.cancel(f.actor, root.id);
+      await f.sa.executionTx!(f.actor.userId, root.id, (s) => {
+        for (const r of runs) {
+          assert.equal(s.runs[r.id]!.state, "CANCELLED");
+          s.runs[r.id]!.state = "QUEUED";
+          delete s.runs[r.id]!.cancelRequested;
+        }
+      });
+      await f.other.cancel(f.actor, runs[3]!.id);
+      await f.sa.executionTx!(f.actor.userId, root.id, (s) => {
+        assert.equal(Object.keys(s.runs).length, 4);
+        assert.ok(Object.values(s.runs).every((r) => r.state === "CANCELLED"));
+      });
+    } finally {
+      await f.close();
+    }
+  },
+);
+
+test(
+  "015 rejects cyclic legacy ancestry without partial backfill and preserves dangling/cross-user parent semantics",
+  { skip: !url },
+  async () => {
+    const f = await reviewDatabase();
+    try {
+      const roots = [];
+      for (let n = 0; n < 3; n++) {
+        const ses = await f.service.createPersonalSession(f.actor, {
+          agentId: "a",
+        });
+        roots.push(await f.service.submit(f.actor, ses.id, "legacy"));
+      }
+      for (let n = 0; n < 3; n++)
+        await f.a.pool.query(
+          "UPDATE personal_runs SET data=(data-'taskId'-'rootRunId')||jsonb_build_object('parentRunId',$3::text) WHERE user_id=$1 AND run_id=$2",
+          [
+            f.actor.userId,
+            roots[n]!.id,
+            n < 2 ? roots[1 - n]!.id : "missing-parent",
+          ],
+        );
+      await f.a.pool.query("UPDATE personal_schema SET version=12 WHERE id=1");
+      const migration = await readFile(
+        "migrations/015_personal_legacy_tasks_stats.sql",
+        "utf8",
+      );
+      await assert.rejects(
+        f.a.pool.query(migration),
+        /Legacy personal Run cycle detected/,
+      );
+      assert.equal(
+        (await f.a.pool.query("SELECT version FROM personal_schema WHERE id=1"))
+          .rows[0].version,
+        12,
+      );
+      assert.equal(
+        (
+          await f.a.pool.query(
+            "SELECT count(*)::int AS n FROM personal_runs WHERE user_id=$1 AND data->>'taskId' IS NOT NULL",
+            [f.actor.userId],
+          )
+        ).rows[0].n,
+        0,
+      );
+      const foreign = await principal(f.ar, {
+          tenantId: "foreign",
+          userId: "foreign",
+          admin: false,
+        }),
+        ses = await f.service.createPersonalSession(foreign, { agentId: "a" }),
+        other = await f.service.submit(foreign, ses.id, "foreign root");
+      await f.a.pool.query(
+        "UPDATE personal_runs SET data=jsonb_set(data,'{parentRunId}',$3::jsonb) WHERE user_id=$1 AND run_id=$2",
+        [f.actor.userId, roots[1]!.id, JSON.stringify(other.id)],
+      );
+      await f.a.pool.query(migration);
+      await f.a.ready();
+      const r = await f.a.pool.query(
+        "SELECT run_id,data FROM personal_runs WHERE user_id=$1",
+        [f.actor.userId],
+      );
+      const expected = new Map([
+        [roots[0]!.id, roots[1]!.id],
+        [roots[1]!.id, roots[1]!.id],
+        [roots[2]!.id, roots[2]!.id],
+      ]);
+      for (const row of r.rows)
+        assert.equal(row.data.taskId, expected.get(row.run_id));
+      await f.other.cancel(f.actor, roots[0]!.id);
+      assert.equal(
+        (await f.sa.readRun(foreign.userId, other.id, (s) => s.runs[other.id]!))
+          .state,
+        "QUEUED",
+      );
+    } finally {
+      await f.close();
+    }
+  },
+);
+
+test(
+  "manual Memory batches file steps under one lease and serializes concurrent note/index updates",
+  { skip: !url },
+  async () => {
+    const { buildAPI } = await import("../src/api.js"),
+      { sqlMetrics } = await import("./personal-sql-metrics.js");
+    const f = await reviewDatabase(),
+      provider = new DemoSandbox(),
+      app = buildAPI(
+        f.service,
+        async () => ({ ...f.actor, personal: false }),
+        new SandboxManager(f.sa, provider),
+      );
+    let release!: () => void, enter!: () => void;
+    const gate = new Promise<void>((r) => (release = r)),
+      ready = new Promise<void>((r) => (enter = r));
+    try {
+      await largeSessionHistory(f);
+      const execute = provider.execute.bind(provider),
+        owners: string[] = [],
+        steps: string[] = [];
+      let hold = true;
+      provider.execute = async (sid, op, args) => {
+        const w = (
+          await f.b.pool.query(
+            "SELECT state->'workspaces'->$2::text AS w FROM personal_user_state WHERE user_id=$1",
+            [f.actor.userId, f.actor.userId],
+          )
+        ).rows[0].w;
+        owners.push(w.lock.owner);
+        steps.push(`${op}:${args.path}`);
+        if (hold && op === "find") {
+          hold = false;
+          enter();
+          await gate;
+        }
+        return execute(sid, op, args);
+      };
+      const m = await sqlMetrics(f.a.pool);
+      m.start();
+      const first = app.inject({
+        method: "PUT",
+        url: "/api/v1/me/memory/one.md",
+        payload: { content: "one" },
+      });
+      await ready;
+      const second = app.inject({
+        method: "PUT",
+        url: "/api/v1/me/memory/two.md",
+        payload: { content: "two" },
+      });
+      await new Promise((r) => setTimeout(r, 40));
+      assert.equal(new Set(owners).size, 1);
+      assert.equal(steps.length, 2);
+      release();
+      const replies = await Promise.all([first, second]);
+      for (const r of replies) assert.equal(r.statusCode, 200, r.body);
+      const stats = controlReads(m.stop());
+      assert.ok(stats.queries < 400, `${stats.queries} queries for two writes`);
+      const groups = owners.filter((o, i) => i === 0 || o !== owners[i - 1]);
+      assert.equal(groups.length, 2);
+      assert.equal(new Set(groups).size, 2);
+      assert.equal(
+        steps.filter((s) => s === "write:/workspace/memory/MEMORY.md").length,
+        2,
+      );
+      const w = await f.sa.readMetadata(
+        f.actor.userId,
+        ["workspaces"],
+        (s) => s.workspaces[f.actor.userId]!,
+      );
+      const files = provider.volumes.get(w.volumeId!)!;
+      assert.match(files.get("/workspace/memory/MEMORY.md")!, /one\.md/);
+      assert.match(files.get("/workspace/memory/MEMORY.md")!, /two\.md/);
+      assert.equal(w.lock, undefined);
+      console.log(
+        JSON.stringify({
+          round8MemoryBatch: {
+            ...stats,
+            requests: 2,
+            leaseOwners: groups.length,
+          },
+        }),
+      );
+    } finally {
+      release?.();
+      await app.close();
+      await f.close();
+    }
+  },
+);
+
+test(
+  "manual Memory rechecks policy, account, workspace ACL and grants before each remote write and cleans aborts",
+  { skip: !url },
+  async () => {
+    const { MemoryManager } = await import("../src/execution/memory.js");
+    const f = await reviewDatabase(),
+      provider = new DemoSandbox();
+    let granted = true;
+    const sandbox = new SandboxManager(f.sa, provider, {}, () => granted),
+      memory = new MemoryManager(f.sa, sandbox),
+      config = AgentConfig.parse({ ...f.config, memory: { enabled: true } });
+    try {
+      await f.service.ensureWorkspace(f.actor);
+      const execute = provider.execute.bind(provider);
+      for (const revocation of ["policy", "account", "acl", "grant", "abort"]) {
+        const ac = new AbortController();
+        let fired = false,
+          indexWrites = 0;
+        provider.execute = async (sid, op, args) => {
+          if (op === "write" && String(args.path).endsWith("/MEMORY.md"))
+            indexWrites++;
+          const result = await execute(sid, op, args);
+          if (!fired && op === "write") {
+            fired = true;
+            if (revocation === "policy")
+              await f.br.tx((s) => {
+                s.policy = { disabledTools: ["write"] };
+              });
+            if (revocation === "account")
+              await f.b.pool.query(
+                "UPDATE personal_users SET enabled=false WHERE id=$1",
+                [f.actor.userId],
+              );
+            if (revocation === "acl")
+              await f.sb.workspaceTx!(f.actor.userId, (s) => {
+                s.workspaces[f.actor.userId]!.members[f.actor.userId] =
+                  "viewer";
+              });
+            if (revocation === "grant") granted = false;
+            if (revocation === "abort") ac.abort();
+          }
+          return result;
+        };
+        const expected = {
+          policy: "TOOL_DISABLED",
+          account: "USER_DISABLED",
+          acl: "READ_ONLY",
+          grant: "BUNDLE_NOT_GRANTED",
+        }[revocation];
+        await assert.rejects(
+          memory.write(
+            f.actor,
+            f.actor.userId,
+            id(),
+            config,
+            "/workspace",
+            `/workspace/memory/${revocation}.md`,
+            revocation,
+            ac.signal,
+            true,
+          ),
+          (e) =>
+            revocation === "abort"
+              ? (e as Error).name === "AbortError"
+              : (e as { code: string }).code === expected,
+        );
+        assert.equal(fired, true);
+        assert.equal(indexWrites, 0, "revocation must stop the index write");
+        granted = true;
+        await f.br.tx((s) => {
+          s.policy = { disabledTools: [] };
+        });
+        await f.b.pool.query(
+          "UPDATE personal_users SET enabled=true WHERE id=$1",
+          [f.actor.userId],
+        );
+        await f.sb.workspaceTx!(f.actor.userId, (s) => {
+          s.workspaces[f.actor.userId]!.members[f.actor.userId] = "owner";
+        });
+        const w = await f.sa.readMetadata(
+          f.actor.userId,
+          ["workspaces"],
+          (s) => s.workspaces[f.actor.userId]!,
+        );
+        assert.equal(w.lock, undefined);
+      }
+      const ac = new AbortController();
+      const expired = { ...f.actor, expiresAt: Date.now() - 1 };
+      let calls = 0;
+      provider.execute = async (...args) => {
+        calls++;
+        return execute(...args);
+      };
+      await assert.rejects(
+        memory.write(
+          expired,
+          f.actor.userId,
+          id(),
+          config,
+          "/workspace",
+          "/workspace/memory/expired.md",
+          "expired",
+          ac.signal,
+          true,
+        ),
+        { code: "ACTOR_TOKEN_EXPIRED" },
+      );
+      assert.equal(calls, 0);
+    } finally {
+      await f.close();
+    }
+  },
+);
+
+test(
+  "admin stats aggregate in SQL with an indexed failure count and bounded HTTP payload under 50k historical Events",
+  { skip: !url },
+  async () => {
+    const { buildAPI } = await import("../src/api.js"),
+      { sqlMetrics } = await import("./personal-sql-metrics.js");
+    const f = await reviewDatabase(),
+      app = buildAPI(
+        f.service,
+        async (h) => ({
+          ...f.actor,
+          personal: false,
+          admin: h !== "Bearer ordinary",
+        }),
+        new SandboxManager(f.sa, new DemoSandbox()),
+      );
+    try {
+      const zero = {
+        runs: {},
+        pendingInteractions: 0,
+        averageRunDurationMs: 0,
+        toolFailures: 0,
+      };
+      assert.deepEqual(await f.a.adminStats("absent"), zero);
+      assert.deepEqual(await f.a.adminStats(f.actor.userId), zero);
+      const pending = await waitingInteraction(f),
+        resolved = await waitingInteraction(f),
+        ended = await waitingInteraction(f);
+      await f.sa.executionTx!(f.actor.userId, resolved.root.id, (s) => {
+        s.interactions[resolved.iid]!.resolved = true;
+      });
+      await f.sa.executionTx!(f.actor.userId, ended.root.id, (s) => {
+        s.runs[ended.root.id]!.state = "COMPLETED";
+        s.runs[ended.root.id]!.startedAt = "2020-01-01T00:00:00.000Z";
+        s.runs[ended.root.id]!.endedAt = "2020-01-01T00:00:01.000Z";
+        event(s, s.runs[ended.root.id]!, "tool.failed");
+      });
+      const ses = await f.service.createPersonalSession(f.actor, {
+          agentId: "a",
+        }),
+        failed = await f.service.submit(f.actor, ses.id, "failure");
+      await f.sa.executionTx!(f.actor.userId, failed.id, (s) => {
+        const r = s.runs[failed.id]!;
+        r.state = "FAILED";
+        r.startedAt = "2020-01-01T00:00:00.000Z";
+        r.endedAt = "2020-01-01T00:00:03.000Z";
+        event(s, r, "tool.failed");
+        event(s, r, "tool.failed");
+      });
+      const base = {
+        runs: { WAITING_INPUT: 2, COMPLETED: 1, FAILED: 1 },
+        pendingInteractions: 1,
+        averageRunDurationMs: 2000,
+        toolFailures: 3,
+      };
+      assert.deepEqual(await f.a.adminStats(f.actor.userId), base);
+      const m = await sqlMetrics(f.a.pool),
+        samples = [];
+      let statsSQL = "";
+      for (const history of [false, true]) {
+        if (history) await largeSessionHistory(f);
+        m.start();
+        const started = performance.now();
+        const r = await app.inject({ url: "/api/v1/admin/stats" });
+        const ms = performance.now() - started;
+        const records = m.stop();
+        statsSQL = records.find((r) => r.sql.startsWith("WITH summaries"))!.sql;
+        assert.equal(r.statusCode, 200, r.body);
+        assert.deepEqual(r.json(), {
+          ...base,
+          runs: { ...base.runs, COMPLETED: history ? 5002 : 1 },
+        });
+        assert.equal(records.length, 2);
+        assert.equal(
+          records.filter((r) => r.sql.startsWith("WITH summaries")).length,
+          1,
+        );
+        assert.ok(
+          !records.some((r) => /^SELECT data FROM personal_/.test(r.sql)),
+        );
+        const bytes = records.reduce((n, r) => n + r.bytes, 0);
+        assert.ok(bytes < 1000);
+        samples.push({ history, queries: records.length, bytes, ms });
+      }
+      const foreign = await principal(f.ar, {
+          tenantId: "other-stats",
+          userId: "other-stats",
+          admin: false,
+        }),
+        fs = await f.service.createPersonalSession(foreign, { agentId: "a" }),
+        fr = await f.service.submit(foreign, fs.id, "outside");
+      await f.sa.executionTx!(foreign.userId, fr.id, (s) =>
+        event(s, s.runs[fr.id]!, "tool.failed"),
+      );
+      assert.equal((await f.a.adminStats(f.actor.userId)).toolFailures, 3);
+      assert.equal(
+        (
+          await app.inject({
+            url: "/api/v1/admin/stats",
+            headers: { authorization: "Bearer ordinary" },
+          })
+        ).statusCode,
+        403,
+      );
+      await f.a.pool.query("ANALYZE personal_run_events");
+      const plan = (
+        await f.a.pool.query(
+          "EXPLAIN (ANALYZE,FORMAT JSON) SELECT count(*) FROM personal_run_events WHERE user_id=$1 AND data->>'type'='tool.failed'",
+          [f.actor.userId],
+        )
+      ).rows[0]["QUERY PLAN"];
+      assert.match(JSON.stringify(plan), /personal_tool_failures/);
+      assert.doesNotMatch(JSON.stringify(plan), /"Node Type":"Seq Scan"/);
+      const allPlan = (
+        await f.a.pool.query(
+          "EXPLAIN (ANALYZE,BUFFERS,FORMAT JSON) " + statsSQL,
+          [f.actor.userId],
+        )
+      ).rows[0]["QUERY PLAN"];
+      const scans: unknown[] = [];
+      const walk = (p: any) => {
+        if (p["Relation Name"])
+          scans.push({
+            relation: p["Relation Name"],
+            index: p["Index Name"],
+            rows: p["Actual Rows"],
+            loops: p["Actual Loops"],
+            ms: p["Actual Total Time"],
+          });
+        for (const n of p.Plans ?? []) walk(n);
+      };
+      walk(allPlan[0].Plan);
+      console.log(
+        JSON.stringify({
+          round8Stats: samples,
+          statsPlan: { ms: allPlan[0]["Execution Time"], scans },
+        }),
+      );
     } finally {
       await app.close();
       await f.close();

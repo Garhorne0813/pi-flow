@@ -1,0 +1,69 @@
+{
+  "baselineHead": "17932abc65d64787194860efc713e7459b507e95",
+  "schema": 13,
+  "scope": "Local PostgreSQL regression samples; SQL returned JSON bytes, not database page reads; timings are not a production SLA. Prior v12 Memory numbers are historical, not a rerun.",
+  "previousV12ManualMemory": {
+    "successSQL": 496,
+    "failureSQL": 450
+  },
+  "manualMemory": [
+    {
+      "failure": false,
+      "queries": 190,
+      "bytes": 16867
+    },
+    {
+      "failure": true,
+      "queries": 144,
+      "bytes": 18261
+    }
+  ],
+  "adminStats": {
+    "round8Stats": [
+      {
+        "history": false,
+        "queries": 2,
+        "bytes": 186,
+        "ms": 12.829482999999527
+      },
+      {
+        "history": true,
+        "queries": 2,
+        "bytes": 189,
+        "ms": 7.964979000000312
+      }
+    ],
+    "statsPlan": {
+      "ms": 6.1,
+      "scans": [
+        {
+          "relation": "personal_user_state",
+          "index": "personal_user_state_pkey",
+          "rows": 1,
+          "loops": 1,
+          "ms": 0.011
+        },
+        {
+          "relation": "personal_runs",
+          "rows": 2,
+          "loops": 1,
+          "ms": 0.02
+        },
+        {
+          "relation": "personal_run_events",
+          "index": "personal_tool_failures",
+          "rows": 3,
+          "loops": 1,
+          "ms": 0.007
+        },
+        {
+          "relation": "personal_runs",
+          "rows": 5005,
+          "loops": 1,
+          "ms": 2.591
+        }
+      ]
+    }
+  },
+  "concurrency": "Two concurrent manual Memory writes retain two distinct consecutive lease owners and both note links in the final index; the current suite repeats the regression."
+}

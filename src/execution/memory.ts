@@ -135,57 +135,78 @@ export class MemoryManager {
     let succeeded = false;
     let failure: unknown;
     try {
-      const execute = (op: string, args: Record<string, unknown>) =>
-        (manual && a.personal
-          ? this.sandbox.executeWorkspace.bind(this.sandbox)
-          : this.sandbox.execute.bind(this.sandbox))(
-          a,
-          wid,
-          runId,
-          config.skillBundle,
-          op,
-          args,
-          signal,
-          config.skills,
-          authorize,
+      const write = async (
+        execute: (
+          op: string,
+          args: Record<string, unknown>,
+        ) => Promise<unknown>,
+      ) => {
+        await execute("mkdir", { path: c.root });
+        const found = (await execute("find", { path: c.root })) as {
+          matches?: string[];
+          entries?: string[];
+          truncated?: boolean;
+        };
+        if (found.truncated) throw new Fault(429, "MEMORY_TOTAL_LIMIT");
+        const paths = (found.matches ?? found.entries ?? []).filter(
+          (p) =>
+            p.startsWith(c.root + "/") &&
+            p.endsWith(".md") &&
+            p !== c.root + "/MEMORY.md",
         );
-      await execute("mkdir", { path: c.root });
-      const found = (await execute("find", { path: c.root })) as {
-        matches?: string[];
-        entries?: string[];
-        truncated?: boolean;
+        const sizes: Record<string, number> = {};
+        for (const p of paths) {
+          const result = (await execute("read", { path: p })) as {
+            text: string;
+          };
+          sizes[p] = Buffer.byteLength(result.text);
+        }
+        sizes[path] = Buffer.byteLength(text);
+        if (
+          Object.keys(sizes).length > limits.maxFiles ||
+          Object.values(sizes).reduce((a, b) => a + b, 0) > limits.maxTotalBytes
+        )
+          throw new Fault(429, "MEMORY_TOTAL_LIMIT");
+        const index =
+          "# Memory\n\n" +
+          Object.keys(sizes)
+            .sort()
+            .map((p) => `- [${posix.basename(p, ".md")}](${posix.basename(p)})`)
+            .join("\n") +
+          "\n";
+        if (Buffer.byteLength(index) > limits.maxIndexBytes)
+          throw new Fault(429, "MEMORY_INDEX_LIMIT");
+        await execute("write", { path, content: text });
+        await execute("write", { path: c.root + "/MEMORY.md", content: index });
+        return { written: true, path };
       };
-      if (found.truncated) throw new Fault(429, "MEMORY_TOTAL_LIMIT");
-      const paths = (found.matches ?? found.entries ?? []).filter(
-        (p) =>
-          p.startsWith(c.root + "/") &&
-          p.endsWith(".md") &&
-          p !== c.root + "/MEMORY.md",
-      );
-      const sizes: Record<string, number> = {};
-      for (const p of paths) {
-        const result = (await execute("read", { path: p })) as { text: string };
-        sizes[p] = Buffer.byteLength(result.text);
-      }
-      sizes[path] = Buffer.byteLength(text);
-      if (
-        Object.keys(sizes).length > limits.maxFiles ||
-        Object.values(sizes).reduce((a, b) => a + b, 0) > limits.maxTotalBytes
-      )
-        throw new Fault(429, "MEMORY_TOTAL_LIMIT");
-      const index =
-        "# Memory\n\n" +
-        Object.keys(sizes)
-          .sort()
-          .map((p) => `- [${posix.basename(p, ".md")}](${posix.basename(p)})`)
-          .join("\n") +
-        "\n";
-      if (Buffer.byteLength(index) > limits.maxIndexBytes)
-        throw new Fault(429, "MEMORY_INDEX_LIMIT");
-      await execute("write", { path, content: text });
-      await execute("write", { path: c.root + "/MEMORY.md", content: index });
+      const result =
+        manual && a.personal
+          ? await this.sandbox.withWorkspaceLease(
+              a,
+              wid,
+              runId,
+              config.skillBundle,
+              write,
+              signal,
+              config.skills,
+              authorize,
+            )
+          : await write((op, args) =>
+              this.sandbox.execute(
+                a,
+                wid,
+                runId,
+                config.skillBundle,
+                op,
+                args,
+                signal,
+                config.skills,
+                authorize,
+              ),
+            );
       succeeded = true;
-      return { written: true, path };
+      return result;
     } catch (error) {
       failure = error;
       throw error;
