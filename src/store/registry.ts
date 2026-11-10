@@ -6,6 +6,11 @@ export interface Registry {
   read<T>(fn: (s: State) => T | Promise<T>): Promise<T>;
   tx<T>(fn: (s: State) => T | Promise<T>): Promise<T>;
   identify(issuer: string, subject: string): Promise<string>;
+  verifyIdentity(
+    issuer: string,
+    subject: string,
+    userId: string,
+  ): Promise<void>;
 }
 export class MemoryRegistry implements Registry {
   private state = emptyState();
@@ -23,6 +28,15 @@ export class MemoryRegistry implements Registry {
     });
     this.tail = task.catch(() => {});
     return task;
+  }
+  async verifyIdentity(issuer: string, subject: string, userId: string) {
+    const key = createHash("sha256")
+      .update(JSON.stringify([issuer, subject]))
+      .digest("hex");
+    await this.read((s) => {
+      const u = s.identities?.[key];
+      if (!u?.enabled || u.id !== userId) throw new Fault(403, "USER_DISABLED");
+    });
   }
   async identify(issuer: string, subject: string) {
     const key = createHash("sha256")
@@ -119,6 +133,14 @@ export class PostgresRegistry implements Registry {
     } finally {
       c.release();
     }
+  }
+  async verifyIdentity(issuer: string, subject: string, userId: string) {
+    const result = await this.pool.query(
+      "SELECT id,enabled FROM personal_users WHERE issuer=$1 AND subject=$2",
+      [issuer, subject],
+    );
+    const u = result.rows[0];
+    if (!u?.enabled || u.id !== userId) throw new Fault(403, "USER_DISABLED");
   }
   async identify(issuer: string, subject: string) {
     const r = await this.pool.query(

@@ -1,7 +1,7 @@
 import pg from "pg";
 import { telemetry } from "./telemetry.js";
 import { EventEmitter } from "node:events";
-import type { Event, RunState } from "./domain.js";
+import type { Session, Event, RunState } from "./domain.js";
 import type { Audit } from "./domain.js";
 import {
   loadState,
@@ -22,6 +22,12 @@ import type {
 } from "./adapters/sandbox-policy.js";
 import { SCHEMA_VERSION, type WorkerHealth } from "./health.js";
 export interface Store {
+  listSessions?(
+    tenant: string,
+    userId: string,
+    offset: number,
+    limit: number,
+  ): Promise<Omit<Session, "entries">[]>;
   // Workspace lifecycle only: metadata and active Runs, never execution history.
   workspaceTx?<T>(tenant: string, fn: (s: State) => T | Promise<T>): Promise<T>;
   claimRun?<T>(

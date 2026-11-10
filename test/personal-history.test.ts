@@ -4,7 +4,7 @@ const url = process.env.TEST_DATABASE_URL;
 if (process.env.REQUIRE_POSTGRES_TESTS === "true" && !url)
   throw new Error("TEST_DATABASE_URL required");
 test(
-  "personal claim, scheduler and file HTTP APIs read bounded rows/bytes with 5k Runs, 50k Events and 5k Fires",
+  "personal claim, scheduler, file and Session list HTTP APIs read bounded rows/bytes with 5k Runs, 50k Events and 5k Fires",
   { skip: !url },
   async () => {
     console.log(

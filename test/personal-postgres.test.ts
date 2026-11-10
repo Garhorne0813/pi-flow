@@ -308,6 +308,13 @@ test(
       await backing.pool.query(
         await readFile("migrations/009_personal_execution_indexes.sql", "utf8"),
       );
+      await assert.rejects(backing.ready(), /SCHEMA_MISMATCH/);
+      await backing.pool.query(
+        await readFile(
+          "migrations/010_personal_session_pagination.sql",
+          "utf8",
+        ),
+      );
       await backing.ready();
       const store = personalStore(backing, registry),
         service = new PersonalService(store, registry);
@@ -421,7 +428,7 @@ async function reviewDatabase(includeExecutionMigration = true) {
     .filter(
       (n) =>
         n.endsWith(".sql") &&
-        (includeExecutionMigration || !n.startsWith("009")),
+        (includeExecutionMigration || Number(n.slice(0, 3)) < 9),
     )
     .sort())
     await a.pool.query(await readFile("migrations/" + name, "utf8"));
@@ -529,7 +536,9 @@ test(
         two = new ScheduleService(f.other);
       const task = await one.create(f.actor, {
         agentId: "a",
-        cron: "* * * * *",
+        // Explicitly force each due time below; avoid a real minute boundary
+        // introducing an unrelated cron Fire during the settlement assertions.
+        cron: "0 0 1 1 *",
         prompt: "tick",
       });
       let dueTime = 0;
@@ -836,7 +845,7 @@ test(
 );
 
 test(
-  "personal readiness requires committed migration 009, normalized schedules and all valid hot-path indexes",
+  "personal readiness requires committed migrations 009/010, normalized schedules and all valid hot-path indexes",
   { skip: !url },
   async () => {
     const { ScheduleService } = await import("../src/schedules/service.js"),
@@ -878,10 +887,16 @@ test(
         (await app.inject({ url: "/health/ready" })).statusCode,
         503,
       );
-      const migration = await readFile(
-        "migrations/009_personal_execution_indexes.sql",
-        "utf8",
-      );
+      const migration =
+        (await readFile(
+          "migrations/009_personal_execution_indexes.sql",
+          "utf8",
+        )) +
+        "\n" +
+        (await readFile(
+          "migrations/010_personal_session_pagination.sql",
+          "utf8",
+        ));
       const c = await f.a.pool.connect();
       try {
         await c.query("BEGIN");
@@ -919,12 +934,13 @@ test(
             )
           ).rows[0].version,
         ),
-        7,
+        8,
       );
       for (const index of [
         "personal_runs_running",
         "personal_scheduled_tasks_due",
         "personal_schedule_fires_pending",
+        "personal_sessions_list",
       ]) {
         await f.a.pool.query(`DROP INDEX ${index}`);
         await assert.rejects(f.a.ready(), /SCHEMA_INDEXES_INCOMPLETE/);
@@ -1115,6 +1131,275 @@ test(
       );
     } finally {
       await app.close();
+      await f.close();
+    }
+  },
+);
+
+test(
+  "concurrent personal SSE identity checks perform SELECT only, preserve row versions, and revoke every connection",
+  { skip: !url },
+  async () => {
+    const { buildAPI } = await import("../src/api.js");
+    const f = await reviewDatabase();
+    const ses = await f.service.createPersonalSession(f.actor, {
+        agentId: "a",
+      }),
+      r = await f.service.submit(f.actor, ses.id, "stream");
+    await f.sa.runTx(f.actor.userId, r.id, (s) => {
+      s.runs[r.id]!.state = "RUNNING";
+    });
+    const app = buildAPI(
+      f.service,
+      async () => ({
+        ...f.actor,
+        personal: false,
+        expiresAt: Date.now() + 60000,
+      }),
+      new SandboxManager(f.sa, new DemoSandbox()),
+    );
+    let connected = 0,
+      checks = 0;
+    app.addHook("onRequest", async () => {
+      connected++;
+    });
+    const verify = f.ar.verifyIdentity.bind(f.ar);
+    f.ar.verifyIdentity = async (...args) => {
+      await verify(...args);
+      checks++;
+    };
+    const streams = Array.from({ length: 8 }, () =>
+      app
+        .inject({ method: "GET", url: `/api/v1/runs/${r.id}/events` })
+        .then((r) => r),
+    );
+    try {
+      const deadline = Date.now() + 5000;
+      while (connected < 8 && Date.now() < deadline)
+        await new Promise((r) => setTimeout(r, 10));
+      assert.equal(connected, 8);
+      const version = async () =>
+        (
+          await f.b.pool.query(
+            "SELECT xmin::text FROM personal_users WHERE id=$1",
+            [f.actor.userId],
+          )
+        ).rows[0].xmin;
+      const before = await version();
+      while (checks < 16 && Date.now() < deadline)
+        await new Promise((r) => setTimeout(r, 20));
+      assert.ok(
+        checks >= 16,
+        "each open connection must recheck identity repeatedly",
+      );
+      assert.equal(
+        await version(),
+        before,
+        "periodic checks must not UPDATE the user row",
+      );
+      const count = (
+        await f.b.pool.query("SELECT count(*)::int AS n FROM personal_users")
+      ).rows[0].n;
+      await assert.rejects(
+        f.ar.verifyIdentity("missing", "missing", f.actor.userId),
+        { code: "USER_DISABLED" },
+      );
+      await assert.rejects(
+        f.ar.verifyIdentity(f.actor.issuer!, f.actor.subject!, id()),
+        { code: "USER_DISABLED" },
+      );
+      assert.equal(
+        (await f.b.pool.query("SELECT count(*)::int AS n FROM personal_users"))
+          .rows[0].n,
+        count,
+      );
+      await f.b.pool.query(
+        "UPDATE personal_users SET enabled=false WHERE id=$1",
+        [f.actor.userId],
+      );
+      for (const response of await Promise.all(streams))
+        assert.match(response.body, /"code":"ACCESS_REVOKED"/);
+    } finally {
+      await f.b.pool.query(
+        "UPDATE personal_users SET enabled=false WHERE id=$1",
+        [f.actor.userId],
+      );
+      await Promise.all(streams);
+      await app.close();
+      await f.close();
+    }
+  },
+);
+
+test(
+  "personal Session HTTP pagination excludes transcripts, deleted Sessions and other users with stable timestamp ties",
+  { skip: !url },
+  async () => {
+    const { buildAPI } = await import("../src/api.js");
+    const f = await reviewDatabase(),
+      ids = Array.from({ length: 6 }, () => id())
+        .sort()
+        .reverse();
+    const other = await principal(f.ar, {
+      tenantId: "external",
+      userId: "other",
+      admin: false,
+    });
+    await f.service.ensureWorkspace(f.actor);
+    await f.service.ensureWorkspace(other);
+    const createdAt = "2026-01-01T00:00:00.000Z";
+    for (let i = 0; i < ids.length; i++) {
+      const user = i === 5 ? other : f.actor;
+      await f.a.pool.query(
+        "INSERT INTO personal_sessions(user_id,session_id,workspace_id,data) VALUES($1,$2,$1,$3)",
+        [
+          user.userId,
+          ids[i],
+          JSON.stringify({
+            id: ids[i],
+            workspaceId: user.userId,
+            userId: user.userId,
+            createdAt,
+            title: "session",
+            entries: ["transcript".repeat(10000)],
+            ...(i === 4 ? { deletedAt: createdAt } : {}),
+          }),
+        ],
+      );
+    }
+    const app = buildAPI(
+      f.service,
+      async () => ({ ...f.actor, personal: false }),
+      new SandboxManager(f.sa, new DemoSandbox()),
+    );
+    try {
+      for (let offset = 0; offset < 4; offset++) {
+        const response = await app.inject({
+          url: `/api/v1/sessions?offset=${offset}&limit=1`,
+        });
+        assert.equal(response.statusCode, 200, response.body);
+        assert.deepEqual(
+          response.json().items.map((s: { id: string }) => s.id),
+          [ids[offset]],
+        );
+        assert.equal(response.json().items[0].entries, undefined);
+        assert.doesNotMatch(response.body, /transcript/);
+      }
+      assert.deepEqual(
+        (await app.inject({ url: "/api/v1/sessions?offset=4&limit=1" })).json()
+          .items,
+        [],
+      );
+      assert.deepEqual(
+        (await f.sb.listSessions!(other.userId, other.userId, 0, 100)).map(
+          (s) => s.id,
+        ),
+        [ids[5]],
+      );
+      const c = await f.a.pool.connect();
+      try {
+        await c.query("BEGIN");
+        await c.query("SET LOCAL enable_seqscan=off");
+        const plan = await c.query(
+          "EXPLAIN (FORMAT JSON) SELECT data-'entries' FROM personal_sessions WHERE user_id=$1 AND data->>'userId'=$1 AND COALESCE(data->>'deletedAt','')='' ORDER BY data->>'createdAt' DESC,session_id DESC LIMIT 1",
+          [f.actor.userId],
+        );
+        assert.match(JSON.stringify(plan.rows), /personal_sessions_list/);
+        assert.doesNotMatch(
+          JSON.stringify(plan.rows),
+          /\"Node Type\":\"Sort\"/,
+        );
+      } finally {
+        await c.query("ROLLBACK");
+        c.release();
+      }
+    } finally {
+      await app.close();
+      await f.close();
+    }
+  },
+);
+
+test(
+  "Memory quota reservations and failed-write refunds persist across PostgreSQL clients",
+  { skip: !url },
+  async () => {
+    const { MemoryManager } = await import("../src/execution/memory.js"),
+      { Fault } = await import("../src/domain.js");
+    const f = await reviewDatabase(),
+      provider = new DemoSandbox();
+    const m1 = new MemoryManager(f.sa, new SandboxManager(f.sa, provider)),
+      m2 = new MemoryManager(f.sb, new SandboxManager(f.sb, provider));
+    const cfg = AgentConfig.parse({
+      ...f.config,
+      memory: { enabled: true, maxWritesPerRun: 1 },
+    });
+    const ses = await f.service.createPersonalSession(f.actor, {
+        agentId: "a",
+      }),
+      run = await f.service.submit(f.actor, ses.id, "remember");
+    let entered!: () => void, release!: () => void;
+    const ready = new Promise<void>((r) => {
+        entered = r;
+      }),
+      gate = new Promise<void>((r) => {
+        release = r;
+      });
+    const execute = provider.execute.bind(provider);
+    let block = true;
+    provider.execute = async (sid, op, args) => {
+      if (block && op === "find") {
+        entered();
+        await gate;
+        throw new Fault(502, "TEST_WRITE_FAILED");
+      }
+      return execute(sid, op, args);
+    };
+    const write = (m: typeof m1) =>
+      m.write(
+        f.actor,
+        f.actor.userId,
+        run.id,
+        cfg,
+        "/workspace",
+        "/workspace/memory/note.md",
+        "hello",
+        new AbortController().signal,
+      );
+    const first = assert.rejects(write(m1), { code: "TEST_WRITE_FAILED" });
+    try {
+      await ready;
+      await assert.rejects(write(m2), { code: "MEMORY_WRITE_LIMIT" });
+      release();
+      await first;
+      const refunded = await f.sb.readRun(
+        f.actor.userId,
+        run.id,
+        (s) => s.runs[run.id]!,
+      );
+      assert.equal(refunded.memoryWrites ?? 0, 0);
+      assert.equal(refunded.memoryWriteReservations, undefined);
+      block = false;
+      await write(m2);
+      const current = await f.sa.readRun(
+        f.actor.userId,
+        run.id,
+        (s) => s.runs[run.id]!,
+      );
+      assert.equal(current.memoryWrites, 1);
+      assert.equal(current.memoryWriteReservations, undefined);
+      await assert.rejects(write(m1), { code: "MEMORY_WRITE_LIMIT" });
+      assert.equal(
+        (
+          await f.sa.readMetadata(f.actor.userId, ["audit"], (s) =>
+            s.audit.filter((a) => a.action === "memory.write"),
+          )
+        ).length,
+        1,
+      );
+    } finally {
+      release();
+      await first;
       await f.close();
     }
   },

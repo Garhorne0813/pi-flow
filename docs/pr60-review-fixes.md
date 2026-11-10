@@ -1,6 +1,6 @@
 # PR #60 评审修复
 
-1. **Compose 初始化**：挂载全部 001–009 迁移。`npm run smoke:compose` 用独立项目、随机端口和全新数据库卷启动 PostgreSQL/API，检查两个 schema 版本并通过 HTTP 完成一个个人 Run；结束后只删除该项目的资源。CI 执行完整构建及启动。可通过 `COMPOSE_SMOKE_IMAGE` 使用已经构建的镜像。
+1. **Compose 初始化**：挂载全部 001–010 迁移。`npm run smoke:compose` 用独立项目、随机端口和全新数据库卷启动 PostgreSQL/API，检查两个 schema 版本并通过 HTTP 完成一个个人 Run；结束后只删除该项目的资源。CI 执行完整构建及启动。可通过 `COMPOSE_SMOKE_IMAGE` 使用已经构建的镜像。
 2. **模型执行快照**：管理模型目录时生成只追加的 `modelGatewayVersions` 和 `modelSecretVersions`，密钥版本只保存加密密文。Run 保存私有 `modelGatewayRef`，审批续跑继承该引用；Worker 按引用解析 URL 和密钥版本，不再用当前目录重新批准旧 Run。`null` 固定使用部署环境网关。启动时为既有目录补齐版本；没有该字段的升级前 Run 保留兼容解析，但无法恢复升级前已丢失的历史网关/密钥。版本随平台配置持久化，当前不自动清理；更换 `CONFIG_SECRET_KEY` 前须重新封装仍被引用的密文。
 3. **工具撤销边界**：平台策略在事务取得锁后读取，沙箱租约授权、准备结束和实际 Provider 调用前均重新检查 Run/工具策略。内存工具派生写入也使用原工具授权；MCP 在 HTTP dispatch 前复核。已发送的远程命令不能原子撤回，也不保证取消会回滚已产生的效果。
 4. **定时任务更新**：修改 Agent、cwd 或 Session 模式会清除复用 Session 绑定，下次触发创建正确的 Session。更新及触发都检查 Agent 可访问性和用户 Token 限制。旧 Run 不随任务编辑改变；Session 缺失、删除或配置不匹配时也不会复用。
@@ -28,7 +28,7 @@
 ## Token 刷新与 009 readiness 补充
 
 - 审批/提问响应将已认证请求的 Bearer 传入 Service，根据原 Run 的 Token 能力封装新密文，绑定原 userId/taskId。只刷新同一调用者的未终态任务链，保留全部配置、模型和任务标识快照；缺少 Token 或校验失败时事务回滚，不消费交互。幂等重试返回已有续跑，不改写已接受的凭证。审计仅记录刷新动作和 taskId，不写 Token 或密文。
-- 009 在归一化数据和索引完成后将个人 schema 推进到 v7；`ready()` 校验调度表和三个索引的表归属、`indisvalid`、`indisready`。漏执行、未提交或回滚 009，以及迁移后缺表/索引都不能通过 readiness。共享 schema 保持 v6，Compose 期望 `6:7`。升级前须停止旧 API/Worker 并重新执行全部迁移，当前迁移器会幂等重放 009。
+- 009 在归一化数据和索引完成后将个人 schema 推进到 v7；`ready()` 校验调度表和三个索引的表归属、`indisvalid`、`indisready`。漏执行、未提交或回滚 009，以及迁移后缺表/索引都不能通过 readiness。共享 schema 保持 v6，当轮 Compose 期望 `6:7`，新增 010 后为 `6:8`。升级前须停止旧 API/Worker 并重新执行全部迁移，当前迁移器会幂等重放 009。
 - 内存/API 和真实 PostgreSQL 回归验证：旧 Token 过期、新认证批准、实际 bash 使用新 Token，原配置仍生效；以及 v6 拒绝就绪、009 回滚/提交、旧调度数据回填、逐个删除索引后拒绝就绪。
 
 ## 管理员白名单、账号撤权、调度失败与文件 API 补充
@@ -49,3 +49,21 @@
 | 5000 / 50000 / 5000 | 114 | 74448 | 171.93 |
 
 本轮最终全量强制验收：**301 通过、0 失败、0 跳过**；类型检查、构建、Demo 冒烟和差异检查通过。既有 Token 到期背压回归改为持续观察背压，避免并发负载下固定 350ms 取样未进入背压造成误判；仍要求到期关闭服务器连接。
+
+## 只读身份复核、调度入场回滚、Session 分页与 Memory 成功配额
+
+- Registry 新增只读 verifyIdentity；SSE 和 Worker 对既有身份的复核只执行 SELECT id,enabled，不调用身份注册的 INSERT/UPSERT。缺失、禁用或 UUID 不匹配均拒绝，复核不创建用户。真实 PostgreSQL 下建立 8 条并发 SSE，等待每条多次复核后，用户行 xmin 保持不变；随后禁用账号，全部连接收到撤权错误并结束。
+- Schedule 入场失败只移除本次新建 Session，并恢复 task.sessionId 的原值（原来未绑定则删除该字段）。失败 Fire 和连续失败计数仍正常提交；既有会话和已提交 Run 保留。覆盖 sessionMode=new、默认模型不可用、重复失败、首次成功后再次失败及阈值停用。
+- GET /sessions 在 PostgreSQL 中按 user_id、Session.userId 和 deletedAt 筛选，以 createdAt DESC、session_id DESC 稳定排序，再执行 LIMIT/OFFSET。结果排除 entries；内存实现返回同样的摘要形状。010_personal_session_pagination.sql 增加部分索引 personal_sessions_list 并发布个人 schema v8；readiness 要求 v8 及该索引归属正确、indisvalid/indisready。Compose 挂载 001–010 并验证共享/个人版本 6:8。部署须停止旧 API/Worker，再执行全部迁移后启动。
+- Memory 的 maxWritesPerRun 按成功完成主题与派生索引写入的次数计算。事务原子预留并发槽位，memoryWrites 仅在两次远程写入都返回成功后累计；失败/取消释放预留。不同 Worker 租约的遗留预留在新尝试时清除。memory.write.attempt、memory.write.failed 与成功的 memory.write 分开记录，错误仅审计固定代码。预留/结算和对应审计分别在同一事务中提交；此处仍使用兼容的完整状态事务。
+- Memory 回归覆盖总量超限的十次失败、沙箱/主题/索引写入错误、取消、成功重试、达到配额后的拒绝、多个 MemoryManager 并发及真实 PostgreSQL 跨客户端退款/成功结算。远程文件变更与数据库不是分布式事务：失败可能已留下部分文件；进程在远程成功与数据库结算之间崩溃，也不能保证精确一次计数。
+- Session 分页回归覆盖隔离、软删除、同时间戳分页、排除 transcript，并检查查询计划使用新增索引而无需排序。既有大历史基准增加 5,000 个带 1 KiB entries 的 Session，并实际请求 limit=1，验证返回行数/字节有界且不读取历史 Event。OFFSET 的深分页仍需遍历前面的索引项，JSONB 字段提取仍可能有数据库端 TOAST 成本。
+
+本轮最终强制验收：**311 通过、0 失败、0 跳过**，类型检查、构建、Demo 冒烟及差异检查通过。定时任务的并发结算回归使用显式 due 时间和年度 cron，避免测试跨真实分钟边界时产生额外 Fire 干扰断言。
+
+本地最终全量验收中的 Session 列表 limit=1 基准（P95 毫秒，不作为生产 SLA）：
+
+| 额外历史 Session / Run / Event | 返回行数 | 返回字节 | Session 列表 P95 |
+| --- | --- | --- | --- |
+| 0 / 0 / 0 | 1 | 237 | 6.22 |
+| 5000 / 5000 / 50000 | 1 | 237 | 7.06 |

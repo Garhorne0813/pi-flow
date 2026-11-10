@@ -145,6 +145,8 @@ export class ScheduleService {
       audit(s, a, "schedule.fire", fire.id, fire.state);
       return fire;
     }
+    const previousSessionId = task.sessionId;
+    let createdSessionId: string | undefined;
     if (
       !task.sessionId ||
       task.sessionMode === "new" ||
@@ -163,7 +165,7 @@ export class ScheduleService {
         entries: [],
         createdAt: new Date(now).toISOString(),
       };
-      task.sessionId = sid;
+      task.sessionId = createdSessionId = sid;
     }
     try {
       const r = createRun(
@@ -184,6 +186,11 @@ export class ScheduleService {
       fire.runId = r.id;
     } catch (e) {
       if (!(e instanceof Fault)) throw e;
+      if (createdSessionId) {
+        delete s.sessions[createdSessionId];
+        if (previousSessionId === undefined) delete task.sessionId;
+        else task.sessionId = previousSessionId;
+      }
       this.settle(
         task,
         fire,

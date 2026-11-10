@@ -5,6 +5,7 @@ import { telemetry } from "./telemetry.js";
 import {
   emptyState,
   type State,
+  type Session,
   type Event,
   type RunState,
   type Audit,
@@ -29,7 +30,7 @@ import type {
   CapacityState,
 } from "./adapters/sandbox-policy.js";
 import { type WorkerHealth } from "./health.js";
-const SCHEMA_VERSION = 7;
+const SCHEMA_VERSION = 8;
 function candidateLimit(limit: number) {
   if (!Number.isInteger(limit) || limit < 1 || limit > 100)
     throw new Error("Invalid candidate limit");
@@ -156,6 +157,28 @@ export class PersonalPostgresStore implements Store {
     ]);
     return structuredClone(await fn(snapshotState(result.rows[0])));
   }
+  async listSessions(
+    tenant: string,
+    userId: string,
+    offset: number,
+    limit: number,
+  ): Promise<Omit<Session, "entries">[]> {
+    if (
+      !Number.isSafeInteger(offset) ||
+      offset < 0 ||
+      !Number.isInteger(limit) ||
+      limit < 1 ||
+      limit > 100
+    )
+      throw new Error("Invalid pagination");
+    const result = await this.pool.query(
+      `SELECT data-'entries' AS data FROM personal_sessions
+       WHERE user_id=$1 AND data->>'userId'=$2 AND COALESCE(data->>'deletedAt','')=''
+       ORDER BY data->>'createdAt' DESC,session_id DESC LIMIT $3 OFFSET $4`,
+      [tenant, userId, limit, offset],
+    );
+    return result.rows.map(({ data }) => data);
+  }
   async readMetadata<T>(
     tenant: string,
     keys: (keyof State)[],
@@ -214,7 +237,9 @@ export class PersonalPostgresStore implements Store {
       EXISTS(SELECT 1 FROM pg_index WHERE indexrelid=to_regclass('personal_scheduled_tasks_due')
         AND indrelid=to_regclass('personal_scheduled_tasks') AND indisvalid AND indisready) AS due,
       EXISTS(SELECT 1 FROM pg_index WHERE indexrelid=to_regclass('personal_schedule_fires_pending')
-        AND indrelid=to_regclass('personal_schedule_fires') AND indisvalid AND indisready) AS pending`);
+        AND indrelid=to_regclass('personal_schedule_fires') AND indisvalid AND indisready) AS pending,
+      EXISTS(SELECT 1 FROM pg_index WHERE indexrelid=to_regclass('personal_sessions_list')
+        AND indrelid=to_regclass('personal_sessions') AND indisvalid AND indisready) AS session_list`);
     if (Object.values(indexes.rows[0]).some((v) => v !== true))
       throw new Error("SCHEMA_INDEXES_INCOMPLETE");
   }

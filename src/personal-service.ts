@@ -69,12 +69,8 @@ export class PersonalService extends HarnessService {
     });
   }
   override async verifyActor(a: Actor) {
-    if (
-      !a.issuer ||
-      !a.subject ||
-      (await this.registry.identify(a.issuer, a.subject)) !== a.userId
-    )
-      throw new Fault(403, "USER_DISABLED");
+    if (!a.issuer || !a.subject) throw new Fault(403, "USER_DISABLED");
+    await this.registry.verifyIdentity(a.issuer, a.subject, a.userId);
   }
   async ensureWorkspace(a: Actor) {
     const existing = await this.store.readMetadata(

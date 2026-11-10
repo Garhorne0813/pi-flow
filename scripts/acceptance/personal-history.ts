@@ -33,7 +33,7 @@ export async function personalHistoryBenchmark(url: string) {
           bytes += Buffer.byteLength(JSON.stringify(r.rows ?? []));
           assert.ok(
             !/FROM personal_run_events/i.test(sql),
-            "claim/scheduler/files must not read historical events",
+            "claim/scheduler/files/session lists must not read historical events",
           );
         }
         return r;
@@ -94,6 +94,9 @@ export async function personalHistoryBenchmark(url: string) {
       claimP95Ms: number;
       scheduleP95Ms: number;
       filesP95Ms: number;
+      sessionsP95Ms: number;
+      sessionsRows: number;
+      sessionsBytes: number;
       filesRows: number;
       filesBytes: number;
       claimRows: number;
@@ -110,7 +113,8 @@ export async function personalHistoryBenchmark(url: string) {
     const sample = async (runs: number, events: number) => {
       const claimTimes: number[] = [],
         scheduleTimes: number[] = [],
-        filesTimes: number[] = [];
+        filesTimes: number[] = [],
+        sessionsTimes: number[] = [];
       const totals = {
         claimRows: 0,
         scheduleRows: 0,
@@ -118,6 +122,8 @@ export async function personalHistoryBenchmark(url: string) {
         scheduleBytes: 0,
         filesRows: 0,
         filesBytes: 0,
+        sessionsRows: 0,
+        sessionsBytes: 0,
       };
       for (let i = 0; i < 25; i++) {
         await backing.pool.query(
@@ -199,12 +205,31 @@ export async function personalHistoryBenchmark(url: string) {
           totals.filesBytes = Math.max(totals.filesBytes, bytes);
         }
       }
+      for (let i = 0; i < 25; i++) {
+        rows = bytes = 0;
+        measured = true;
+        const begin = performance.now();
+        try {
+          const page = await app!.inject({ url: "/api/v1/sessions?limit=1" });
+          assert.equal(page.statusCode, 200, page.body);
+          assert.equal(page.json().items.length, 1);
+          assert.equal(page.json().items[0].entries, undefined);
+        } finally {
+          measured = false;
+        }
+        if (i >= 5) {
+          sessionsTimes.push(performance.now() - begin);
+          totals.sessionsRows = Math.max(totals.sessionsRows, rows);
+          totals.sessionsBytes = Math.max(totals.sessionsBytes, bytes);
+        }
+      }
       results.push({
         runs,
         events,
         claimP95Ms: p95(claimTimes),
         scheduleP95Ms: p95(scheduleTimes),
         filesP95Ms: p95(filesTimes),
+        sessionsP95Ms: p95(sessionsTimes),
         ...totals,
       });
     };
@@ -236,6 +261,12 @@ export async function personalHistoryBenchmark(url: string) {
       SELECT $1,'past-'||n,$2,'cron',-n,jsonb_build_object('id','past-'||n,'scheduleId',$2::text,'trigger','cron','scheduledFor',-n,'state','completed') FROM generate_series(1,5000) n`,
       [actor.userId, task.id],
     );
+    await backing.pool.query(
+      `INSERT INTO personal_sessions(user_id,session_id,workspace_id,data)
+       SELECT $1,'past-session-'||n,$1,jsonb_build_object('id','past-session-'||n,'workspaceId',$1::text,'userId',$1::text,'createdAt','2020-01-01T00:00:00.000Z','entries',jsonb_build_array(repeat('x',1024))) FROM generate_series(1,5000) n`,
+      [actor.userId],
+    );
+    await backing.pool.query("ANALYZE personal_sessions");
     await backing.pool.query("ANALYZE personal_runs");
     await backing.pool.query("ANALYZE personal_schedule_fires");
     await sample(5000, 50000);
@@ -243,6 +274,8 @@ export async function personalHistoryBenchmark(url: string) {
     assert.equal(large!.claimRows, small!.claimRows);
     assert.equal(large!.scheduleRows, small!.scheduleRows);
     assert.equal(large!.filesRows, small!.filesRows);
+    assert.equal(large!.sessionsRows, small!.sessionsRows);
+    assert.ok(large!.sessionsBytes < small!.sessionsBytes * 1.2 + 1000);
     assert.ok(large!.filesBytes < small!.filesBytes * 1.2 + 1000);
     assert.ok(large!.claimBytes < small!.claimBytes * 1.2 + 1000);
     assert.ok(large!.scheduleBytes < small!.scheduleBytes * 1.2 + 1000);

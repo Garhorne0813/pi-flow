@@ -1245,3 +1245,219 @@ test("schedule admission failures count once, busy skips preserve failures, succ
   );
   await f.worker.stop();
 });
+
+test("failed new-mode schedule admission restores Session bindings and leaves no empty Sessions", async () => {
+  const { ScheduleService } = await import("../src/schedules/service.js");
+  const f = await fixture(),
+    scheduler = new ScheduleService(f.service);
+  const task = await scheduler.create(f.alice, {
+    agentId: "assistant",
+    cron: "* * * * *",
+    prompt: "tick",
+    sessionMode: "new",
+    maxConsecutiveFailures: 3,
+  });
+  let time = Date.now();
+  const fire = () =>
+    f.store.tx(f.alice.tenantId, (s) =>
+      scheduler.fire(s, s.schedules![task.id]!, ++time, "manual"),
+    );
+  try {
+    await f.registry.tx((s) => {
+      s.managedAgents!.assistant!.config.model = {
+        provider: "default",
+        modelId: "default",
+      };
+    });
+    for (let n = 0; n < 2; n++) {
+      assert.equal((await fire()).error, "DEFAULT_MODEL_UNAVAILABLE");
+      const snapshot = await f.store.read(f.alice.tenantId, (s) => ({
+        sessions: Object.keys(s.sessions),
+        task: s.schedules![task.id]!,
+      }));
+      assert.deepEqual(snapshot.sessions, []);
+      assert.equal(snapshot.task.sessionId, undefined);
+      assert.equal(snapshot.task.failures, n + 1);
+    }
+    await f.registry.tx((s) => {
+      s.managedAgents!.assistant!.config = config();
+    });
+    const submitted = await fire();
+    const originalSession = await f.store.readRun(
+      f.alice.tenantId,
+      submitted.runId!,
+      (s) => s.runs[submitted.runId!]!.sessionId,
+    );
+    await f.registry.tx((s) => {
+      s.managedAgents!.assistant!.config.model = {
+        provider: "default",
+        modelId: "default",
+      };
+    });
+    assert.equal((await fire()).error, "DEFAULT_MODEL_UNAVAILABLE");
+    const snapshot = await f.store.read(f.alice.tenantId, (s) => ({
+      sessions: Object.keys(s.sessions),
+      task: s.schedules![task.id]!,
+    }));
+    assert.deepEqual(snapshot.sessions, [originalSession]);
+    assert.equal(snapshot.task.sessionId, originalSession);
+    assert.equal(snapshot.task.enabled, false);
+  } finally {
+    await f.worker.stop();
+  }
+});
+
+for (const failure of ["total", "sandbox", "topic", "index", "abort"])
+  test(`Memory ${failure} failures release successful-write quota and do not emit success audits`, async () => {
+    const { MemoryManager } = await import("../src/execution/memory.js"),
+      { Fault } = await import("../src/domain.js");
+    const f = await fixture(),
+      memory = new MemoryManager(f.store, f.sandbox);
+    const ses = await f.service.createPersonalSession(f.alice, {
+      agentId: "assistant",
+    });
+    const r = await f.service.submit(f.alice, ses.id, "remember");
+    const cfg = config({
+      memory: {
+        enabled: true,
+        scopes: ["user"],
+        maxWritesPerRun: 1,
+        maxFiles: 1,
+      },
+    });
+    await f.provider.createVolume(`ws-${f.alice.userId}`);
+    const files = f.provider.volumes.get(`ws-${f.alice.userId}`)!;
+    if (failure === "total") files.set("/workspace/memory/old.md", "old");
+    let fail = true;
+    const execute = f.provider.execute.bind(f.provider);
+    f.provider.execute = async (sid, op, args) => {
+      if (
+        fail &&
+        ((failure === "sandbox" && op === "mkdir") ||
+          (failure === "topic" &&
+            op === "write" &&
+            args.path === "/workspace/memory/note.md") ||
+          (failure === "index" &&
+            op === "write" &&
+            String(args.path).endsWith("/MEMORY.md")))
+      )
+        throw new Fault(502, "TEST_WRITE_FAILED");
+      if (fail && failure === "abort" && op === "find")
+        throw new DOMException("aborted", "AbortError");
+      return execute(sid, op, args);
+    };
+    const write = () =>
+      memory.write(
+        f.alice,
+        f.alice.userId,
+        r.id,
+        cfg,
+        "/workspace",
+        "/workspace/memory/note.md",
+        "remember",
+        new AbortController().signal,
+      );
+    try {
+      for (let i = 0; i < (failure === "total" ? 10 : 1); i++)
+        await assert.rejects(write());
+      const snapshot = await f.store.readRun(
+        f.alice.tenantId,
+        r.id,
+        (s) => s.runs[r.id]!,
+      );
+      assert.equal(snapshot.memoryWrites ?? 0, 0);
+      assert.equal(snapshot.memoryWriteReservations, undefined);
+      const audits = await f.store.readMetadata(
+        f.alice.tenantId,
+        ["audit"],
+        (s) => s.audit.filter((a) => a.action.startsWith("memory.write")),
+      );
+      assert.ok(audits.some((a) => a.action === "memory.write.failed"));
+      assert.ok(!audits.some((a) => a.action === "memory.write"));
+      fail = false;
+      files.delete("/workspace/memory/old.md");
+      assert.equal((await write()).written, true);
+      assert.equal(
+        (await f.store.readRun(f.alice.tenantId, r.id, (s) => s.runs[r.id]!))
+          .memoryWrites,
+        1,
+      );
+      await assert.rejects(write(), { code: "MEMORY_WRITE_LIMIT" });
+      assert.equal(
+        (
+          await f.store.readMetadata(f.alice.tenantId, ["audit"], (s) =>
+            s.audit.filter((a) => a.action === "memory.write"),
+          )
+        ).length,
+        1,
+      );
+    } finally {
+      await f.worker.stop();
+    }
+  });
+
+test("Memory quota reservations serialize concurrent managers, release on failure and ignore stale Worker leases", async () => {
+  const { MemoryManager } = await import("../src/execution/memory.js"),
+    { Fault } = await import("../src/domain.js");
+  const f = await fixture(),
+    m1 = new MemoryManager(f.store, f.sandbox),
+    m2 = new MemoryManager(f.store, f.sandbox);
+  const ses = await f.service.createPersonalSession(f.alice, {
+      agentId: "assistant",
+    }),
+    r = await f.service.submit(f.alice, ses.id, "remember");
+  const cfg = config({
+    memory: { enabled: true, scopes: ["user"], maxWritesPerRun: 1 },
+  });
+  await f.store.runTx(f.alice.tenantId, r.id, (s) => {
+    s.runs[r.id]!.memoryWriteReservations = { stale: { owner: "dead-worker" } };
+  });
+  let entered!: () => void, release!: () => void;
+  const ready = new Promise<void>((r) => {
+      entered = r;
+    }),
+    gate = new Promise<void>((r) => {
+      release = r;
+    });
+  const execute = f.provider.execute.bind(f.provider);
+  let block = true;
+  f.provider.execute = async (sid, op, args) => {
+    if (block && op === "find") {
+      entered();
+      await gate;
+      throw new Fault(502, "TEST_WRITE_FAILED");
+    }
+    return execute(sid, op, args);
+  };
+  const write = (m: typeof m1) =>
+    m.write(
+      f.alice,
+      f.alice.userId,
+      r.id,
+      cfg,
+      "/workspace",
+      "/workspace/memory/note.md",
+      "remember",
+      new AbortController().signal,
+    );
+  const first = assert.rejects(write(m1), { code: "TEST_WRITE_FAILED" });
+  try {
+    await ready;
+    await assert.rejects(write(m2), { code: "MEMORY_WRITE_LIMIT" });
+    release();
+    await first;
+    block = false;
+    assert.equal((await write(m2)).written, true);
+    const current = await f.store.readRun(
+      f.alice.tenantId,
+      r.id,
+      (s) => s.runs[r.id]!,
+    );
+    assert.equal(current.memoryWrites, 1);
+    assert.equal(current.memoryWriteReservations, undefined);
+  } finally {
+    release();
+    await first;
+    await f.worker.stop();
+  }
+});

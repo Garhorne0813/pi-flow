@@ -110,7 +110,7 @@ Agent 当前配置 A ── 创建 Run 1 ── 快照 A ── 排队/执行/�
 
 ## 6. 数据迁移与兼容
 
-个人 Schema 当前版本为 **7**。`008_editable_agents.sql` 完成 v6 可编辑 Agent 转换；`009_personal_execution_indexes.sql` 在完成调度归一化和执行索引后发布 v7。readiness 要求 v7、调度表及三个有效的热路径索引；共享引擎的 schema 仍为 v6。
+个人 Schema 当前版本为 **8**。`008_editable_agents.sql` 完成 v6 可编辑 Agent 转换；`009_personal_execution_indexes.sql` 在完成调度归一化和执行索引后发布 v7。`010_personal_session_pagination.sql` 为 Session 列表补齐分页索引并发布 v8。readiness 要求 v8、调度表及四个有效的热路径索引；共享引擎的 schema 仍为 v6。
 
 - 将 v5 的 active Agent 配置迁入 `personal_agents`，保留稳定 key 和实时访问限制。
 - 为旧 Run 补足必要快照和 agentId；保留已有解析模型与任务链。

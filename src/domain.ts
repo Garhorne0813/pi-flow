@@ -183,6 +183,7 @@ export type Run = {
   resumedFrom?: string;
   userTokenRef?: string;
   memoryWrites?: number;
+  memoryWriteReservations?: Record<string, { owner?: string }>;
   schedule?: {
     id: string;
     fireId: string;

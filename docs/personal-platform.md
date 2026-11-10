@@ -24,20 +24,20 @@ npm start
 npm run worker
 ```
 
-个人 schema 版本为 **7**；迁移文件顺序为 `005_agent_task_versions.sql`、`006_logical_agent_acl.sql`、`007_personal_platform.sql`、`008_editable_agents.sql`、`009_personal_execution_indexes.sql`，两个 schema 独立管理。v6 将已有个人平台的 active Agent 转为当前可编辑配置，并保留旧 Run 快照和等待交互任务；009 在完成调度记录归一化和热路径索引后推进到 v7，readiness 同时要求相关表和有效索引；旧版本表仅作历史档案。`harness_*` 表不自动迁移、不重命名，也不推断旧工作区的数据归属。应备份数据库后在部署窗口执行迁移。
+个人 schema 版本为 **8**；迁移文件顺序为 `005_agent_task_versions.sql`、`006_logical_agent_acl.sql`、`007_personal_platform.sql`、`008_editable_agents.sql`、`009_personal_execution_indexes.sql`、`010_personal_session_pagination.sql`，两个 schema 独立管理。v6 将已有个人平台的 active Agent 转为当前可编辑配置，并保留旧 Run 快照和等待交互任务；009 在完成调度记录归一化和热路径索引后推进到 v7，010 增加 Session 列表索引并推进到 v8；readiness 同时要求相关表和有效索引；旧版本表仅作历史档案。`harness_*` 表不自动迁移、不重命名，也不推断旧工作区的数据归属。应备份数据库后在部署窗口执行迁移。
 
 ## 当前契约
 
 - OIDC 管理员用户/角色白名单按逗号拆分、去除首尾空白并剔除空项；空角色不授予管理员权限。
 - 身份按 `(issuer, subject)` 解析为持久 UUID；用户数据按 UUID 分区。OIDC 个人模式不要求 tenant claim。DEV_TOKEN 支持 `DEV_SUBJECT`。
 - 每人一个私有 `/workspace`、一个持久卷和一个沙箱绑定；不同会话可使用不同 cwd，但同一用户的 Run 串行执行。旧 workspace/members HTTP 接口不开放。
-- `POST /api/v1/sessions {agentId, cwd?, title?}`；`GET /sessions`；`GET/PATCH/DELETE /sessions/:id`；`POST /sessions/:id/fork`。删除为软删除且要求会话空闲。
-- SSE 每秒复查账号有效性；禁用后发送 `ACCESS_REVOKED` 并关闭。背压时直接销毁连接以释放等待，错误帧可能无法送达。
+- `POST /api/v1/sessions {agentId, cwd?, title?}`；`GET /sessions`（SQL 分页、按 createdAt/id 倒序、排除软删除和 entries）；`GET/PATCH/DELETE /sessions/:id`；`POST /sessions/:id/fork`。删除为软删除且要求会话空闲。
+- SSE 每秒通过只读 SELECT 复查已有账号有效性，不执行注册/upsert；禁用后发送 `ACCESS_REVOKED` 并关闭。背压时直接销毁连接以释放等待，错误帧可能无法送达。
 - 原有 Run、审批/提问续跑、取消、SSE 契约保留。根 Run 提交时保存有效配置、模型、cwd、taskId/rootRunId；下一根 Run 读取当前 Agent 配置，续跑继承原快照。Session 不再保存或升级 Agent 版本。
 - `GET /me/files?path=...&operation=ls|read`、`PUT /me/files {path,content}`、`DELETE /me/files?path=...`。文件操作复用个人沙箱；Run 执行期间返回冲突。已有工作区先读元数据；初始化及文件沙箱租约使用原子工作区事务，仅读取工作区与 RUNNING Run，不读取历史 Run/Session/Event。
 - `GET /me/sandbox`；`POST /me/sandbox/resume`、`/release`。release 不删除卷。
-- `GET /me/memory`、`GET/PUT /me/memory/:name`，支持 `scope=user|project&cwd=...`。模型启用 memory 后只注入索引，主题写入重建索引并受配额限制。
-- `SCHEDULES_ENABLED=true` 开启 `/schedules` 的创建、列表、查询、更新、删除、手动触发、运行历史及 cron 预览。严格五段 cron；触发与 Run 创建同事务；无人值守不产生交互。触发前置失败和已提交 Run 的失败统一累计 `maxConsecutiveFailures`，达到阈值自动禁用；成功完成清零，SESSION_BUSY 跳过既不累计也不清零。
+- `GET /me/memory`、`GET/PUT /me/memory/:name`，支持 `scope=user|project&cwd=...`。模型启用 memory 后只注入索引，主题写入重建索引并受配额限制。每 Run 写入配额仅计主题和索引都返回成功的写入；并发尝试原子占位，失败释放，旧 Worker 租约的占位不阻塞接管。memory.write.attempt/failed 区分尝试与失败，memory.write 仅表示成功；远程文件变更与数据库结算并非分布式事务，失败可能已留下部分文件。
+- `SCHEDULES_ENABLED=true` 开启 `/schedules` 的创建、列表、查询、更新、删除、手动触发、运行历史及 cron 预览。严格五段 cron；触发与 Run 创建同事务；无人值守不产生交互；Run 入场失败时移除本次新建 Session 并恢复先前 Session 绑定。触发前置失败和已提交 Run 的失败统一累计 `maxConsecutiveFailures`，达到阈值自动禁用；成功完成清零，SESSION_BUSY 跳过既不累计也不清零。
 - 工具增加 `web_search` / `web_fetch`。Web 请求在控制面执行，拒绝私网地址，DNS 结果固定到连接并逐次验证重定向；搜索需配置 `WEB_SEARCH_URL`（通过 `q` 参数调用搜索服务）。
 
 ## 当前配置与可选导入

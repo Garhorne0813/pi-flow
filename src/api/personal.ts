@@ -196,11 +196,24 @@ export function personalRoutes(
   app.get("/api/v1/sessions", async (req) => {
     const a = actor(req),
       p = pagination.parse(req.query);
+    if (service.store.listSessions)
+      return {
+        items: await service.store.listSessions(
+          a.tenantId,
+          a.userId,
+          p.offset,
+          p.limit,
+        ),
+      };
     return service.store.read(a.tenantId, (s) => ({
       items: Object.values(s.sessions)
         .filter((v) => v.userId === a.userId && !v.deletedAt)
-        .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
-        .slice(p.offset, p.offset + p.limit),
+        .sort(
+          (a, b) =>
+            b.createdAt.localeCompare(a.createdAt) || b.id.localeCompare(a.id),
+        )
+        .slice(p.offset, p.offset + p.limit)
+        .map(({ entries, ...summary }) => summary),
     }));
   });
   app.patch("/api/v1/sessions/:id", async (req) =>
