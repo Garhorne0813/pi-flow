@@ -22,6 +22,8 @@ import type {
 } from "./adapters/sandbox-policy.js";
 import { SCHEMA_VERSION, type WorkerHealth } from "./health.js";
 export interface Store {
+  // Workspace lifecycle only: metadata and active Runs, never execution history.
+  workspaceTx?<T>(tenant: string, fn: (s: State) => T | Promise<T>): Promise<T>;
   claimRun?<T>(
     tenant: string,
     runId: string,

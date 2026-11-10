@@ -77,7 +77,15 @@ export class PersonalService extends HarnessService {
       throw new Fault(403, "USER_DISABLED");
   }
   async ensureWorkspace(a: Actor) {
-    return this.store.tx(a.tenantId, (s) => {
+    const existing = await this.store.readMetadata(
+      a.tenantId,
+      ["workspaces"],
+      (s) => s.workspaces[a.userId],
+    );
+    if (existing) return existing;
+    return (
+      this.store.workspaceTx?.bind(this.store) ?? this.store.tx.bind(this.store)
+    )(a.tenantId, (s) => {
       const w = (s.workspaces[a.userId] ??= {
         id: a.userId,
         name: "Personal workspace",

@@ -1162,3 +1162,86 @@ test("approval reauthentication seals the fresh caller token for bash without ch
     else process.env.RUN_TOKEN_KEY = previous;
   }
 });
+
+test("schedule admission failures count once, busy skips preserve failures, success resets, and cron auto-disables", async () => {
+  const { ScheduleService } = await import("../src/schedules/service.js");
+  const f = await fixture(),
+    scheduler = new ScheduleService(f.service);
+  const task = await scheduler.create(f.alice, {
+    agentId: "assistant",
+    cron: "* * * * *",
+    prompt: "tick",
+    maxConsecutiveFailures: 3,
+  });
+  let time = Date.now();
+  const fire = () =>
+    f.store.tx(f.alice.tenantId, (s) =>
+      scheduler.fire(s, s.schedules![task.id]!, ++time, "manual"),
+    );
+  const failures = () =>
+    f.store.readMetadata(
+      f.alice.tenantId,
+      ["schedules"],
+      (s) => s.schedules![task.id]!,
+    );
+  // Agent is available, but Run creation fails validation before submission.
+  await f.registry.tx((s) => {
+    s.managedAgents!.assistant!.config.model = {
+      provider: "default",
+      modelId: "default",
+    };
+  });
+  const first = await fire();
+  assert.equal(first.state, "failed");
+  assert.equal(first.error, "DEFAULT_MODEL_UNAVAILABLE");
+  assert.equal((await failures()).failures, 1);
+  await f.store.tx(f.alice.tenantId, (s) =>
+    scheduler.fire(s, s.schedules![task.id]!, time, "manual"),
+  );
+  await scheduler.tick();
+  assert.equal(
+    (await failures()).failures,
+    1,
+    "deduplication and settlement must not double-count",
+  );
+  await f.registry.tx((s) => {
+    s.managedAgents!.assistant!.config = config();
+  });
+  const submitted = await fire();
+  assert.equal(submitted.state, "submitted");
+  assert.equal((await fire()).state, "skipped");
+  assert.equal(
+    (await failures()).failures,
+    1,
+    "SESSION_BUSY neither counts nor resets",
+  );
+  await f.store.runTx(f.alice.tenantId, submitted.runId!, (s) => {
+    s.runs[submitted.runId!]!.state = "COMPLETED";
+  });
+  await scheduler.tick();
+  assert.equal((await failures()).failures, 0);
+  await f.registry.tx((s) => {
+    s.managedAgents!.assistant!.enabled = false;
+  });
+  for (let n = 1; n <= 3; n++) {
+    await f.store.tx(f.alice.tenantId, (s) => {
+      s.schedules![task.id]!.nextFireAt = Date.now() - 1;
+    });
+    await scheduler.tick();
+    assert.equal((await failures()).failures, n);
+  }
+  assert.equal((await failures()).enabled, false);
+  const count = await f.store.read(
+    f.alice.tenantId,
+    (s) => Object.keys(s.scheduleFires!).length,
+  );
+  await scheduler.tick();
+  assert.equal(
+    await f.store.read(
+      f.alice.tenantId,
+      (s) => Object.keys(s.scheduleFires!).length,
+    ),
+    count,
+  );
+  await f.worker.stop();
+});

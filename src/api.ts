@@ -994,18 +994,40 @@ export function buildAPI(
     let expiryTimer: ReturnType<typeof setTimeout> | undefined;
     const expired = () =>
       a.expiresAt !== undefined && Date.now() >= a.expiresAt;
-    const expire = () => {
+    const closeStream = (code: string) => {
       if (closed) return;
       closed = true;
       disconnected.abort();
       // A stalled reader may prevent end() from flushing and emitting close.
-      // Destroy a backpressured response so expiry also releases the waiter.
+      // Destroy a backpressured response so revocation/expiry releases the waiter.
       if (reply.raw.writableNeedDrain) reply.raw.destroy();
       else
         reply.raw.end(
-          'event: stream.error\ndata: {"code":"AUTHENTICATION_EXPIRED"}\n\n',
+          `event: stream.error\ndata: ${JSON.stringify({ code })}\n\n`,
         );
     };
+    const expire = () => closeStream("AUTHENTICATION_EXPIRED");
+    let checkingActor = false;
+    const checkActor = async () => {
+      if (closed || checkingActor) return;
+      checkingActor = true;
+      try {
+        await service.verifyActor(a);
+      } catch (error) {
+        closeStream(
+          error instanceof Fault && error.code === "USER_DISABLED"
+            ? "ACCESS_REVOKED"
+            : "ACCESS_REVOKED_OR_UNAVAILABLE",
+        );
+      } finally {
+        checkingActor = false;
+      }
+    };
+    // Independent of event paging/backpressure: disabled accounts lose even
+    // idle or stalled connections within one second plus identity lookup time.
+    const actorTimer = setInterval(() => {
+      void checkActor();
+    }, 1000);
     const armExpiry = () => {
       if (a.expiresAt === undefined || closed) return;
       const remaining = a.expiresAt - Date.now();
@@ -1021,6 +1043,7 @@ export function buildAPI(
     reply.raw.on("close", () => {
       closed = true;
       clearTimeout(expiryTimer);
+      clearInterval(actorTimer);
       disconnected.abort();
       telemetry.count("sse_active", -1);
     });
@@ -1093,6 +1116,8 @@ export function buildAPI(
           'event: stream.error\ndata: {"code":"ACCESS_REVOKED_OR_UNAVAILABLE"}\n\n',
         );
     } finally {
+      closed = true;
+      clearInterval(actorTimer);
       clearTimeout(expiryTimer);
       reply.raw.end();
     }

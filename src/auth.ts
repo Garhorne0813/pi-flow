@@ -56,6 +56,13 @@ export function authFromEnv(options: { personal?: boolean } = {}): Auth {
   const url = new URL(UCS_JWKS_URL);
   if (url.protocol !== "https:") throw new Error("UCS JWKS requires HTTPS");
   const jwks = createRemoteJWKSet(url, { timeoutDuration: 5000 });
+  const whitelist = (value?: string) =>
+    (value ?? "")
+      .split(",")
+      .map((entry) => entry.trim())
+      .filter(Boolean);
+  const adminUsers = whitelist(process.env.UCS_ADMIN_USER_IDS);
+  const adminRoles = whitelist(process.env.UCS_ADMIN_ROLE_KEYS);
   return async (header) => {
     try {
       if (!header?.startsWith("Bearer ")) throw new Error();
@@ -85,14 +92,10 @@ export function authFromEnv(options: { personal?: boolean } = {}): Auth {
         admin:
           (Array.isArray(payload.roles) &&
             payload.roles.includes("harness-admin")) ||
-          (process.env.UCS_ADMIN_USER_IDS ?? "")
-            .split(",")
-            .includes(payload.sub) ||
+          adminUsers.includes(payload.sub) ||
           (Array.isArray(payload.roles) &&
-            payload.roles.some((r) =>
-              (process.env.UCS_ADMIN_ROLE_KEYS ?? "")
-                .split(",")
-                .includes(String(r)),
+            payload.roles.some(
+              (r) => typeof r === "string" && adminRoles.includes(r),
             )),
       };
     } catch {

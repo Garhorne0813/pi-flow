@@ -44,6 +44,7 @@ export class SandboxManager {
   readonly policy: SandboxPolicy;
   readonly capacity: SandboxCapacity;
   private nextSweepAt = 0;
+  private fileManager?: SandboxManager;
 
   constructor(
     private store: Store,
@@ -713,13 +714,35 @@ export class SandboxManager {
     args: Record<string, unknown>,
   ) {
     if (a.personal) {
-      const w = await this.store.read(a.tenantId, (s) => {
+      // Scope every nested lease/volume/cleanup operation to workspace state.
+      // Keep the normal execution manager's full Run authorization path intact.
+      if (!this.fileManager) {
+        const store = this.store.workspaceTx
+          ? new Proxy(this.store, {
+              get: (target, key) => {
+                if (key === "read" || key === "tx")
+                  return target.workspaceTx!.bind(target);
+                const value = Reflect.get(target, key);
+                return typeof value === "function" ? value.bind(target) : value;
+              },
+            })
+          : this.store;
+        this.fileManager = new SandboxManager(
+          store,
+          this.provider,
+          this.policy,
+          this.canUseBundle,
+          this.limits,
+        );
+      }
+      const manager = this.fileManager;
+      const w = await manager.store.read(a.tenantId, (s) => {
         const w = workspace(s, a, wid, true);
         if (Object.values(s.runs).some((r) => r.state === "RUNNING"))
           throw new Fault(409, "WORKSPACE_BUSY");
         return w;
       });
-      return this.execute(
+      return manager.execute(
         a,
         wid,
         owner,

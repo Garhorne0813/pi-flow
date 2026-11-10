@@ -943,3 +943,179 @@ test(
     }
   },
 );
+
+for (const paused of [false, true])
+  test(
+    `personal SSE revokes a disabled database account on an existing ${paused ? "backpressured" : "idle"} connection`,
+    { skip: !url },
+    async () => {
+      const { buildAPI } = await import("../src/api.js"),
+        { get } = await import("node:http");
+      const f = await reviewDatabase();
+      const session = await f.service.createPersonalSession(f.actor, {
+        agentId: "a",
+      });
+      const run = await f.service.submit(f.actor, session.id, "stream");
+      await f.sa.runTx(f.actor.tenantId, run.id, (s) => {
+        s.runs[run.id]!.state = "RUNNING";
+        if (paused)
+          for (let i = 0; i < 100; i++)
+            event(s, s.runs[run.id]!, "message.delta", {
+              delta: "x".repeat(256 * 1024),
+            });
+      });
+      const app = buildAPI(
+        f.service,
+        async () => ({
+          ...f.actor,
+          personal: false,
+          expiresAt: Date.now() + 60000,
+        }),
+        new SandboxManager(f.sa, new DemoSandbox()),
+      );
+      let closed = false,
+        blocked = false,
+        body = "";
+      let raw: import("node:http").ServerResponse | undefined;
+      app.addHook("onRequest", async (_req, reply) => {
+        raw = reply.raw;
+        reply.raw.once("close", () => {
+          closed = true;
+        });
+      });
+      const base = await app.listen({ host: "127.0.0.1", port: 0 });
+      const request = get(
+        `${base}/api/v1/runs/${run.id}/events`,
+        (response) => {
+          response.on("error", () => {});
+          if (paused) response.pause();
+          else
+            response.on("data", (chunk) => {
+              body += chunk;
+            });
+        },
+      );
+      request.on("error", () => {});
+      try {
+        const startDeadline = Date.now() + 5000;
+        while (Date.now() < startDeadline) {
+          blocked = raw?.writableNeedDrain ?? false;
+          if (paused ? blocked : body.includes("run.queued")) break;
+          await new Promise((r) => setTimeout(r, 20));
+        }
+        assert.equal(closed, false);
+        if (paused) assert.equal(blocked, true);
+        else assert.match(body, /run.queued/);
+        await f.b.pool.query(
+          "UPDATE personal_users SET enabled=false WHERE id=$1",
+          [f.actor.userId],
+        );
+        const deadline = Date.now() + 3000;
+        while (!closed && Date.now() < deadline)
+          await new Promise((r) => setTimeout(r, 20));
+        assert.equal(
+          closed,
+          true,
+          "disable must close SSE without waiting for JWT expiry or new events",
+        );
+        if (!paused) {
+          await new Promise((r) => setTimeout(r, 20));
+          assert.match(body, /"code":"ACCESS_REVOKED"/);
+        }
+        const denied = await app.inject({
+          method: "GET",
+          url: `/api/v1/runs/${run.id}/events`,
+        });
+        assert.equal(denied.statusCode, 403);
+      } finally {
+        request.destroy();
+        await app.close();
+        await f.close();
+      }
+    },
+  );
+
+test(
+  "workspace initialization and file leases preserve unrelated metadata and reject active Runs across clients",
+  { skip: !url },
+  async () => {
+    const { buildAPI } = await import("../src/api.js");
+    const f = await reviewDatabase();
+    const app = buildAPI(
+      f.other,
+      async () => ({ ...f.actor, personal: false }),
+      new SandboxManager(f.sb, new DemoSandbox()),
+    );
+    try {
+      const workspaces = await Promise.all(
+        Array.from({ length: 8 }, (_, i) =>
+          (i % 2 ? f.service : f.other).ensureWorkspace(f.actor),
+        ),
+      );
+      assert.equal(new Set(workspaces.map((w) => w.id)).size, 1);
+      await f.a.pool.query(
+        "UPDATE personal_user_state SET state=state||$2::jsonb WHERE user_id=$1",
+        [
+          f.actor.userId,
+          JSON.stringify({
+            custom: { preserved: true },
+            audit: [{ id: "old-audit" }],
+            usage: { requests: {}, resources: [{ state: "old-resource" }] },
+          }),
+        ],
+      );
+      const session = await f.service.createPersonalSession(f.actor, {
+        agentId: "a",
+      });
+      const r = await f.service.submit(f.actor, session.id, "active");
+      await f.sa.runTx(f.actor.userId, r.id, (s) => {
+        s.runs[r.id]!.state = "RUNNING";
+      });
+      const blocked = await app.inject({
+        method: "PUT",
+        url: "/api/v1/me/files",
+        payload: { path: "test.txt", content: "no" },
+      });
+      assert.equal(blocked.statusCode, 409, blocked.body);
+      await f.sa.runTx(f.actor.userId, r.id, (s) => {
+        s.runs[r.id]!.state = "COMPLETED";
+      });
+      const written = await app.inject({
+        method: "PUT",
+        url: "/api/v1/me/files",
+        payload: { path: "test.txt", content: "yes" },
+      });
+      assert.equal(written.statusCode, 200, written.body);
+      const row = (
+        await f.a.pool.query(
+          "SELECT state FROM personal_user_state WHERE user_id=$1",
+          [f.actor.userId],
+        )
+      ).rows[0].state;
+      assert.deepEqual(row.custom, { preserved: true });
+      assert.ok(row.audit.some((a: { id: string }) => a.id === "old-audit"));
+      assert.ok(
+        row.audit.some(
+          (a: { action: string }) => a.action === "sandbox.creation.dispatched",
+        ),
+      );
+      assert.ok(
+        row.usage.resources.some(
+          (r: { state: string }) => r.state === "old-resource",
+        ),
+      );
+      assert.ok(
+        row.usage.resources.some(
+          (r: { state: string }) => r.state === "active",
+        ),
+      );
+      assert.equal(
+        (await f.sa.readRun(f.actor.userId, r.id, (s) => s.runs[r.id]!)).state,
+        "COMPLETED",
+      );
+    } finally {
+      await app.close();
+      await f.close();
+    }
+  },
+);

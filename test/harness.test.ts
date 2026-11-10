@@ -755,19 +755,19 @@ test("SSE token expiry closes a backpressured connection even when the client st
   });
   const app = buildAPI(
     f.service,
-    async () => ({ ...alice, expiresAt: Date.now() + 500 }),
+    async () => ({ ...alice, expiresAt: Date.now() + 2500 }),
     f.sandbox,
   );
   let closed = false,
     backpressured = false;
-  let probe: ReturnType<typeof setTimeout> | undefined;
+  let probe: ReturnType<typeof setInterval> | undefined;
   app.addHook("onRequest", async (_req, reply) => {
     reply.raw.once("close", () => {
       closed = true;
     });
-    probe = setTimeout(() => {
-      backpressured = reply.raw.writableNeedDrain;
-    }, 350);
+    probe = setInterval(() => {
+      backpressured ||= reply.raw.writableNeedDrain;
+    }, 20);
   });
   const base = await app.listen({ host: "127.0.0.1", port: 0 });
   const request = get(`${base}/api/v1/runs/${r.id}/events`, (response) => {
@@ -776,7 +776,7 @@ test("SSE token expiry closes a backpressured connection even when the client st
   });
   request.on("error", () => {});
   try {
-    const end = Date.now() + 2000;
+    const end = Date.now() + 6000;
     while (!closed && Date.now() < end)
       await new Promise((resolve) => setTimeout(resolve, 20));
     assert.equal(
@@ -790,7 +790,7 @@ test("SSE token expiry closes a backpressured connection even when the client st
       "expiry must release the server connection despite an unread response",
     );
   } finally {
-    clearTimeout(probe);
+    clearInterval(probe);
     request.destroy();
     await app.close();
   }

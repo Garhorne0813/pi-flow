@@ -31,6 +31,9 @@ export function personalStore(backing: Store, registry: Registry): Store {
   };
   return new Proxy(backing, {
     get(target, key) {
+      if (key === "workspaceTx" && target.workspaceTx)
+        return async (user: string, fn: (s: State) => unknown) =>
+          target.workspaceTx!(user, await overlay(fn));
       if (["read", "tx"].includes(String(key)))
         return async (user: string, fn: (s: State) => unknown) =>
           target[key as "read" | "tx"](user, await overlay(fn));

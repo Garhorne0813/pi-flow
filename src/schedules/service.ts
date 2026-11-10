@@ -141,8 +141,8 @@ export class ScheduleService {
     const a = task.actor,
       av = s.managedAgents?.[task.agentId];
     if (!av || !agentAllowed(av, a) || av.config.userTokenAccess) {
-      fire.state = "failed";
-      fire.error = "SCHEDULE_AGENT_UNAVAILABLE";
+      this.settle(task, fire, "failed", "SCHEDULE_AGENT_UNAVAILABLE");
+      audit(s, a, "schedule.fire", fire.id, fire.state);
       return fire;
     }
     if (
@@ -184,8 +184,12 @@ export class ScheduleService {
       fire.runId = r.id;
     } catch (e) {
       if (!(e instanceof Fault)) throw e;
-      fire.state = e.code === "SESSION_BUSY" ? "skipped" : "failed";
-      fire.error = e.code;
+      this.settle(
+        task,
+        fire,
+        e.code === "SESSION_BUSY" ? "skipped" : "failed",
+        e.code,
+      );
     }
     audit(s, a, "schedule.fire", fire.id, fire.state);
     return fire;
@@ -211,18 +215,32 @@ export class ScheduleService {
         this.settleAndFire(s, Date.now()),
       );
   }
+  private settle(
+    task: ScheduledTask | undefined,
+    fire: Fire,
+    state: "completed" | "failed" | "skipped",
+    error?: string,
+  ) {
+    if (fire.state !== "submitted") return;
+    fire.state = state;
+    fire.error = error;
+    // Busy-session skips neither increment nor reset consecutive failures.
+    if (!task || state === "skipped") return;
+    task.failures = state === "failed" ? task.failures + 1 : 0;
+    if (task.failures >= task.maxConsecutiveFailures) task.enabled = false;
+  }
   private settleAndFire(s: State, now: number) {
     for (const fire of Object.values(s.scheduleFires ?? {})) {
       if (fire.state !== "submitted" || !fire.runId) continue;
       const run = s.runs[fire.runId],
         task = s.schedules?.[fire.scheduleId];
       if (!run || !terminal(run.state)) continue;
-      fire.state = run.state === "COMPLETED" ? "completed" : "failed";
-      fire.error = run.error;
-      if (task) {
-        task.failures = fire.state === "failed" ? task.failures + 1 : 0;
-        if (task.failures >= task.maxConsecutiveFailures) task.enabled = false;
-      }
+      this.settle(
+        task,
+        fire,
+        run.state === "COMPLETED" ? "completed" : "failed",
+        run.error,
+      );
     }
     for (const task of Object.values(s.schedules ?? {}))
       if (task.enabled && task.nextFireAt <= now)

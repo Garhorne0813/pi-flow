@@ -267,7 +267,20 @@ export class PersonalPostgresStore implements Store {
       c.release();
     }
   }
+  async workspaceTx<T>(
+    tenant: string,
+    fn: (s: State) => T | Promise<T>,
+  ): Promise<T> {
+    return this.transact(tenant, fn, true);
+  }
   async tx<T>(tenant: string, fn: (s: State) => T | Promise<T>): Promise<T> {
+    return this.transact(tenant, fn, false);
+  }
+  private async transact<T>(
+    tenant: string,
+    fn: (s: State) => T | Promise<T>,
+    workspaceOnly: boolean,
+  ): Promise<T> {
     const c = await this.pool.connect();
     try {
       await c.query("BEGIN");
@@ -275,14 +288,35 @@ export class PersonalPostgresStore implements Store {
         "INSERT INTO personal_user_state (user_id,state) VALUES ($1,$2) ON CONFLICT DO NOTHING",
         [tenant, JSON.stringify(emptyState())],
       );
-      const before = await loadState(c, tenant, true),
+      const before = await loadState(c, tenant, true, undefined, true, {
+          workspaceOnly,
+        }),
         s = structuredClone(before);
       const result = await personalConnection.run(
         { pool: this.pool, client: c },
         () => fn(s),
       );
       resourceTransitions(before, s);
-      await saveState(c, tenant, before, s);
+      await saveState(c, tenant, before, s, workspaceOnly);
+      if (
+        workspaceOnly &&
+        (JSON.stringify(before.workspaces) !== JSON.stringify(s.workspaces) ||
+          s.audit.length ||
+          s.usage?.resources.length)
+      )
+        await c.query(
+          `UPDATE personal_user_state SET state=
+            jsonb_set(state,'{workspaces}',$2::jsonb)
+            || CASE WHEN jsonb_array_length($3::jsonb)>0 THEN jsonb_build_object('audit',COALESCE(state->'audit','[]'::jsonb)||$3::jsonb) ELSE '{}'::jsonb END
+            || CASE WHEN jsonb_array_length($4::jsonb)>0 THEN jsonb_build_object('usage',COALESCE(state->'usage','{}'::jsonb)||jsonb_build_object('resources',COALESCE(state->'usage'->'resources','[]'::jsonb)||$4::jsonb)) ELSE '{}'::jsonb END,
+            revision=revision+1 WHERE user_id=$1`,
+          [
+            tenant,
+            JSON.stringify(s.workspaces),
+            JSON.stringify(s.audit),
+            JSON.stringify(s.usage?.resources ?? []),
+          ],
+        );
       await c.query("COMMIT");
       return structuredClone(result);
     } catch (e) {

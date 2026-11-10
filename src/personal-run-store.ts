@@ -10,10 +10,10 @@ export async function loadState(
   lock = false,
   runId?: string,
   targetLock = true,
-  options: { claim?: boolean } = {},
+  options: { claim?: boolean; workspaceOnly?: boolean } = {},
 ): Promise<State> {
   const row = await c.query(
-    (options.claim
+    (options.claim || options.workspaceOnly
       ? "SELECT jsonb_build_object('workspaces',state->'workspaces') AS state"
       : "SELECT state") +
       " FROM personal_user_state WHERE user_id=$1" +
@@ -21,6 +21,16 @@ export async function loadState(
     [tenant],
   );
   const s = { ...emptyState(), ...row.rows[0]?.state } as State;
+  if (options.workspaceOnly) {
+    // Same metadata row lock as Run admission, so file lease acquisition and
+    // the active-Run check remain atomic across API/Worker clients.
+    const active = await c.query(
+      "SELECT data FROM personal_runs WHERE user_id=$1 AND state='RUNNING' ORDER BY run_id FOR UPDATE",
+      [tenant],
+    );
+    s.runs = Object.fromEntries(active.rows.map(({ data }) => [data.id, data]));
+    return s;
+  }
   const runs = await c.query(
     "SELECT data FROM personal_runs WHERE user_id=$1" +
       (runId

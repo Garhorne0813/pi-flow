@@ -6,6 +6,8 @@ import { PersonalPostgresStore } from "../../src/personal-postgres-store.js";
 import { PostgresRegistry, principal } from "../../src/store/registry.js";
 import { personalStore } from "../../src/store/personal.js";
 import { PersonalService } from "../../src/personal-service.js";
+import { buildAPI } from "../../src/api.js";
+import { DemoSandbox, SandboxManager } from "../../src/adapters/sandbox.js";
 import { ScheduleService } from "../../src/schedules/service.js";
 import { AgentConfig, event, id, type State } from "../../src/domain.js";
 import { replaceAgents } from "../../src/config/agents.js";
@@ -31,7 +33,7 @@ export async function personalHistoryBenchmark(url: string) {
           bytes += Buffer.byteLength(JSON.stringify(r.rows ?? []));
           assert.ok(
             !/FROM personal_run_events/i.test(sql),
-            "claim/scheduler must not read historical events",
+            "claim/scheduler/files must not read historical events",
           );
         }
         return r;
@@ -47,6 +49,7 @@ export async function personalHistoryBenchmark(url: string) {
       return (query as any)(...args).then(capture);
     }) as typeof c.query;
   });
+  let app: ReturnType<typeof buildAPI> | undefined;
   try {
     for (const name of (await readdir("migrations"))
       .filter((n) => n.endsWith(".sql"))
@@ -90,20 +93,31 @@ export async function personalHistoryBenchmark(url: string) {
       events: number;
       claimP95Ms: number;
       scheduleP95Ms: number;
+      filesP95Ms: number;
+      filesRows: number;
+      filesBytes: number;
       claimRows: number;
       scheduleRows: number;
       claimBytes: number;
       scheduleBytes: number;
     }[] = [];
+    app = buildAPI(
+      service,
+      async () => ({ ...actor, personal: false }),
+      new SandboxManager(store, new DemoSandbox()),
+    );
     let fireTime = 1;
     const sample = async (runs: number, events: number) => {
       const claimTimes: number[] = [],
-        scheduleTimes: number[] = [];
+        scheduleTimes: number[] = [],
+        filesTimes: number[] = [];
       const totals = {
         claimRows: 0,
         scheduleRows: 0,
         claimBytes: 0,
         scheduleBytes: 0,
+        filesRows: 0,
+        filesBytes: 0,
       };
       for (let i = 0; i < 25; i++) {
         await backing.pool.query(
@@ -152,11 +166,45 @@ export async function personalHistoryBenchmark(url: string) {
           [actor.userId, task.id],
         );
       }
+      // Exercise the actual HTTP path, including workspace initialization,
+      // sandbox lease/volume lifecycle, capacity, and completion audit.
+      for (let i = 0; i < 25; i++) {
+        rows = bytes = 0;
+        measured = true;
+        const begin = performance.now();
+        try {
+          const put = await app!.inject({
+            method: "PUT",
+            url: "/api/v1/me/files",
+            payload: { path: "bench.txt", content: "hello" },
+          });
+          assert.equal(put.statusCode, 200, put.body);
+          const get = await app!.inject({
+            method: "GET",
+            url: "/api/v1/me/files?operation=read&path=bench.txt",
+          });
+          assert.equal(get.statusCode, 200, get.body);
+          assert.deepEqual(get.json(), { text: "hello" });
+          const del = await app!.inject({
+            method: "DELETE",
+            url: "/api/v1/me/files?path=bench.txt",
+          });
+          assert.equal(del.statusCode, 200, del.body);
+        } finally {
+          measured = false;
+        }
+        if (i >= 5) {
+          filesTimes.push(performance.now() - begin);
+          totals.filesRows = Math.max(totals.filesRows, rows);
+          totals.filesBytes = Math.max(totals.filesBytes, bytes);
+        }
+      }
       results.push({
         runs,
         events,
         claimP95Ms: p95(claimTimes),
         scheduleP95Ms: p95(scheduleTimes),
+        filesP95Ms: p95(filesTimes),
         ...totals,
       });
     };
@@ -194,12 +242,15 @@ export async function personalHistoryBenchmark(url: string) {
     const [small, large] = results;
     assert.equal(large!.claimRows, small!.claimRows);
     assert.equal(large!.scheduleRows, small!.scheduleRows);
+    assert.equal(large!.filesRows, small!.filesRows);
+    assert.ok(large!.filesBytes < small!.filesBytes * 1.2 + 1000);
     assert.ok(large!.claimBytes < small!.claimBytes * 1.2 + 1000);
     assert.ok(large!.scheduleBytes < small!.scheduleBytes * 1.2 + 1000);
 
     return results;
   } finally {
     measured = false;
+    await app?.close();
     await backing.close();
     await control.query(`DROP SCHEMA ${schema} CASCADE`);
     await control.end();
