@@ -27,7 +27,11 @@ export interface RuntimeContext {
   skills: Skill[];
   specs: ToolSpec[];
   signal: AbortSignal;
-  call: (name: string, args: Record<string, unknown>) => Promise<unknown>;
+  call: (
+    name: string,
+    args: Record<string, unknown>,
+    callId?: string,
+  ) => Promise<unknown>;
   emit: (type: string, data: unknown) => Promise<void>;
   checkpoint: (entries: unknown[]) => Promise<void>;
   consume: (tokens: number, turn: boolean) => Promise<void>;
@@ -203,7 +207,11 @@ export class PiRuntime implements Runtime {
       description: t.description,
       parameters: Type.Unsafe(t.schema),
       execute: async (_callId: string, args: unknown) => {
-        const result = await ctx.call(t.name, args as Record<string, unknown>);
+        const result = await ctx.call(
+          t.name,
+          args as Record<string, unknown>,
+          _callId,
+        );
         return {
           content: [{ type: "text" as const, text: JSON.stringify(result) }],
           details: {},
