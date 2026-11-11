@@ -1,3 +1,4 @@
+import type { EvalJobStore } from "./job-store.js";
 import { z } from "zod";
 import { id, Fault, type Actor } from "../domain/model.js";
 import type { EvalStore } from "./store.js";
@@ -17,11 +18,22 @@ export class EvalService {
   constructor(
     readonly store: EvalStore,
     readonly verifyActor: (a: Actor) => Promise<void>,
+    readonly jobs?: EvalJobStore,
   ) {}
   async authorize(a: Actor) {
     if (a.expiresAt !== undefined && a.expiresAt <= Date.now())
       throw new Fault(401, "AUTHENTICATION_EXPIRED");
     await this.verifyActor(a);
+  }
+  jobStore() {
+    if (!this.jobs) throw new Fault(503, "EVAL_POSTGRES_REQUIRED");
+    return this.jobs;
+  }
+  async authorizeJob(a: Actor, id: string) {
+    await this.authorize(a);
+    const job = await this.jobStore().job(a.userId, id);
+    await this.jobStore().access.authorize(job);
+    return job;
   }
   async createSuite(a: Actor, raw: unknown) {
     await this.authorize(a);

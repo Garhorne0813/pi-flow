@@ -1,6 +1,4 @@
-import { EvalService } from "../evals/service.js";
-import { PostgresEvalStore } from "../evals/postgres-store.js";
-import { MemoryEvalStore } from "../evals/memory-store.js";
+import { createEvals } from "../evals/factory.js";
 import { ScheduleService } from "../schedules/service.js";
 import { PersonalPostgresStore } from "../storage/personal-postgres-store.js";
 import { MemoryRegistry, PostgresRegistry } from "../storage/registry.js";
@@ -239,12 +237,7 @@ export async function bootstrap(role: "api" | "worker" = "api") {
   if (demo) await registry.tx(seedDemo);
   const evals =
     process.env.EVALS_ENABLED === "true"
-      ? new EvalService(
-          backing instanceof PersonalPostgresStore
-            ? new PostgresEvalStore(backing.pool)
-            : new MemoryEvalStore(),
-          (a) => service.verifyActor(a),
-        )
+      ? createEvals(service, backing, demo)
       : undefined;
   return {
     evals,
