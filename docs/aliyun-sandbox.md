@@ -209,6 +209,13 @@ SIGKILL 探针从共享逐行代码生成；正常测试会对两个分支执行
 要求操作系统报告 SIGKILL，并检查重命名前后的文件状态。云端断言同时要求 -9/137 信号退出、阶段标记和未超时，
 不能把 Python 语法错误或其他非零退出当作成功中断。这些本地测试仍不验证 OSS。
 异常时仍尝试清理实例；失败写入的测试文件和空前缀可能需要人工清理。
+工作区冒烟为每次创建分配独立的 `smoke-<probe>-create-<N>` operation。普通 SDK 超时/响应丢失、
+或未确认清理的 `SandboxCreationError` 会输出结构化 `SANDBOX_CREATION_OUTCOME_UNKNOWN`，
+包含 `operation`、`testOperation`、`workspace`、`volumeId`，已知时另含 `sandboxId`。
+最终诊断的 `unresolvedOperations` 列出全部未知尝试，`operation` 指向其中第一项，`testOperation` 标识整次测试。
+请通过云端实例清单中的 `harnessOperation` 和 `harnessWorkspaceVolume` 核对；诊断不打印 SDK 异常或凭证。
+未知 ID 的尝试会一直保留为待核对状态：即使其余已知实例全部删除，最终清理仍报错，
+不释放工作区、不输出冒烟通过，也不自动重试创建或猜测实例 ID。先完成人工核对，再运行新的测试。
 仓库测试使用 SDK mock 验证协议、只读挂载、隔离、错误映射、失败清理和空闲生命周期，
 不代表已经通过真实阿里云账号或 Cube 集群联调。
 Skill 冒烟脚本把测试 ZIP 发布到独立随机目录，读取实际挂载后的 SKILL.md、验证摘要并检查写权限被拒绝，
@@ -224,3 +231,6 @@ Skill 冒烟脚本把测试 ZIP 发布到独立随机目录，读取实际挂载
 第二轮 Review：核对 `7e457a4` 实际文件未发现引文中的顶层多余缩进，但原先“只要非零退出”的中断判定不充分。
 已改为共享探针、自动语法编译、真实本地 SIGKILL 和严格阶段/信号断言。手工源辅助文件的完整身份仍由外部发布保证，
 全局硬配额与自动 GC 仍是未实现项；本地测试、事件计数及只读盘点不能关闭真实云验收门槛。
+
+后续冒烟清理 Review：已补上工作区创建响应丢失且没有实例 ID 的诊断及状态保留，
+测试通过 mock 模拟服务端成功、客户端丢失响应，并核对诊断 operation/volume 与实际发出的创建 metadata 一致。
