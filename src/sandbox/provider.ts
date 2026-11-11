@@ -7,6 +7,13 @@ export type CreatedSandbox = {
   trafficToken?: string;
 };
 export interface SandboxProvider {
+  prepare?(
+    volume: string,
+    bundle: string,
+    skills: readonly Skill[],
+    operation?: string,
+    context?: { tenantId: string; workspaceId: string },
+  ): Promise<void>;
   readonly requiresTrafficToken?: boolean;
   readonly supportsSnapshotClone?: boolean;
   readonly supportsPause?: boolean;
@@ -19,6 +26,7 @@ export interface SandboxProvider {
     skills: readonly Skill[],
     snapshotId?: string,
     operation?: string,
+    context?: { tenantId: string; workspaceId: string },
   ): Promise<CreatedSandbox>;
   connect(sandboxId: string): Promise<void>;
   execute(

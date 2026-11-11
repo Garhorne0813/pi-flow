@@ -271,3 +271,8 @@ ZIP 内必须恰有一个 `SKILL.md`，位于 ZIP 根目录或唯一顶层 Skill
 `GET /admin/configuration` 返回 `skillUploads` 的 enabled 与各项大小/数量限制。Cube/demo 模式下 `SKILL_HOST_ROOTS_JSON=[]` 禁用上传；默认 `SKILL_UPLOAD_ROOT` 是第一个获批 Host 根目录。实际共享目录必须由部署端预先准备并允许 API 写入 `uploads/`，见[部署说明](deployment.md#skill-zip-uploads--技能-zip-上传)。新 Worker 根据租户持久化元数据和相同上传根目录解析只读挂载，不需要修改 `SKILL_VOLUMES_JSON` 或重启。阿里云模式配置 API 的 OSS 发布凭证后，上传直接发布到 OSS；Worker 从 `ossUpload` 元数据解析只读挂载，无需手动映射或重启，详见[阿里云发布配置](aliyun-sandbox.md)。
 
 失败返回 400（格式/授权 Bundle/ZIP 校验）、401/403（身份）、409（不可变版本/包已存在）、413（大小/数量超限）、415（非 multipart）、429（上传并发已满）、503（上传禁用或共享存储不可用），阿里云另有 502 `SKILL_OSS_PUBLISH_FAILED`（发布失败）和 `SKILL_OSS_CLEANUP_UNCONFIRMED`（清理未确认）。上传审计记录文件数/字节数，不包含文件内容。重复 ID 不覆盖现有版本；不同租户的相同 ID 写入不同目录。确定未登记的失败会清理新目录；无法确认数据库提交结果时保留目录，避免删除可能已被引用的版本，需先刷新登记列表或由运维核对数据库后处理孤立目录。
+
+
+## 内部 Skill 集合准备
+
+阿里云 Worker 使用独立机器凭证调用 `POST /internal/skill-collections/resolve`。此接口不接受用户/管理员 JWT，不属于前端文件上传或浏览器直传 API；普通业务 API 也不接受机器凭证。API 从租户 Store 和注册表校验工作区当前租约、bundle、选中版本身份及 scope，只为真实选择生成独立只读集合。参数不接受源路径或任意目标路径。配置、资源限制和缓存保留策略见 [阿里云接入](aliyun-sandbox.md#按选择聚合集合)。

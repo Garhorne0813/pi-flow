@@ -50,7 +50,7 @@ npm run worker
 
 目录导入器可将 HOUSE.md、SYSTEM.md、AGENTS.md 和 subagents 文件合并为普通 AgentConfig；运行时只使用数据库中的结果。Demo 仅在清单为空时创建内建示例，重启不会覆盖已有配置。生产镜像不必携带配置目录；如要使用目录导入 CLI，需自行挂载并指定 CONFIG_DIR。
 
-`config/skills/<id>/SKILL.md` 及辅助文件按内容归档；拒绝符号链接，限制文件数和总大小；支持 `disable-model-invocation` 和 `agents/<name>.md`。`npm run skills:deliver` 将版本原子物化到 `SKILL_DELIVER_DIR`。Cube 支持通过 `SKILL_VOLUMES_JSON` 配置只读卷或受 `SKILL_HOST_ROOTS_JSON` 限制的 hostPath。Cube ZIP 上传通过 `SKILL_UPLOAD_ROOT` 原子写入 hostPath；阿里云 ZIP 上传校验后自动发布到 OSS 并登记，Worker 从记录解析只读挂载，见 [阿里云接入](aliyun-sandbox.md)。目录物化本身不等于 Provider 已挂载。MCP 注册可放入 `config/mcp/servers.yaml`，格式为 `{id,endpointRef,allowedTools,enabled}` 数组；endpointRef 必须对应 Worker 的 `MCP_ENDPOINTS_JSON`。
+`config/skills/<id>/SKILL.md` 及辅助文件按内容归档；拒绝符号链接，限制文件数和总大小；支持 `disable-model-invocation` 和 `agents/<name>.md`。`npm run skills:deliver` 将版本原子物化到 `SKILL_DELIVER_DIR`。Cube 支持通过 `SKILL_VOLUMES_JSON` 配置只读卷或受 `SKILL_HOST_ROOTS_JSON` 限制的 hostPath。Cube ZIP 上传通过 `SKILL_UPLOAD_ROOT` 原子写入 hostPath；阿里云 ZIP 上传校验后自动发布到 OSS 并登记，API 按本次选择生成独立集合，Worker 将集合一次只读挂载到 /skills，见 [阿里云接入](aliyun-sandbox.md)。目录物化本身不等于 Provider 已挂载。MCP 注册可放入 `config/mcp/servers.yaml`，格式为 `{id,endpointRef,allowedTools,enabled}` 数组；endpointRef 必须对应 Worker 的 `MCP_ENDPOINTS_JSON`。
 
 `/admin/ui` 管理控制台支持个人 Agent 的原地编辑、访问权限、禁用、Skill/MCP 登记和 ZIP 上传。保存 Agent 使用整份清单的 revision 防止并发覆盖，并保留编辑器尚未支持的配置字段；排队和审批续跑任务继续使用原快照。管理配置与 Skill/MCP 写入平台 registry，对所有个人身份一致生效。旧共享引擎保留逻辑版本和 ACL 行为，个人运行不创建或升级 AgentVersion。
 

@@ -82,6 +82,7 @@ export class SandboxManager {
             "connect",
             "kill",
             "execute",
+            "prepare",
           ].includes(String(key))
         )
           return value.bind(target);
@@ -516,6 +517,23 @@ export class SandboxManager {
       }
       if (!sid) {
         await assertOwned();
+        if (this.provider.prepare) {
+          try {
+            await this.remote(
+              () =>
+                this.provider.prepare!(vid!, bundle, skills, owner, {
+                  tenantId: a.tenantId,
+                  workspaceId: wid,
+                }),
+              signal,
+              undefined,
+              125000,
+            );
+          } catch (error) {
+            throw new SandboxCreationError(error, true);
+          }
+          await assertOwned();
+        }
         await this.store.tx(a.tenantId, (s) =>
           audit(
             s,
@@ -529,7 +547,14 @@ export class SandboxManager {
           () => {
             instanceTouched = true;
             creationStarted = true;
-            return this.provider.create(vid!, bundle, skills, undefined, owner);
+            return this.provider.create(
+              vid!,
+              bundle,
+              skills,
+              undefined,
+              owner,
+              { tenantId: a.tenantId, workspaceId: wid },
+            );
           },
           signal,
           (created) => this.lateSandbox(a, wid, owner, created.sandboxId),

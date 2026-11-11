@@ -7,6 +7,7 @@
 - sandbox/cube-provider.ts：Cube SDK、挂载和受控远程工具适配。
 - sandbox/aliyun-provider.ts：E2B SDK 接入阿里云极速版、OSS 工作区及只读 Skill 挂载，显式拒绝未实现的暂停/快照。
 - sandbox/remote-tool.ts：两家 Provider 共用的远程命令编码和工具结果/错误解析。
+- skills/collection.ts、collection-service.ts、oss-collections.ts：按真实选择发布只读集合、机器鉴权请求及当前租约/注册记录校验；Worker 不持有 OSS 写凭证。
 - sandbox/demo-provider.ts：内存 Fake；不执行本地命令，测试可确定性替换 Provider。
 - sandbox/remote.ts：有界等待、取消、迟到结果回调；不自动重试远端操作。
 - sandbox/lease-manager.ts：纯租约/生命周期资格判断；不发起 SDK 请求。

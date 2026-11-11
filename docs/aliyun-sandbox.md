@@ -61,7 +61,11 @@ ALIYUN_SKILLS_JSON={}
 释放实例、超时回收、Skill 选择变化、文件 API 临时实例均复用这个前缀。
 实例的 connect 延长可用时间；单次命令上限 130 秒，实例超时最小为 180 秒。
 
-每个实例按 OSS 最多 5 个挂载点的保守上限校验：工作区占 1 个，因此最多选择 4 个 Skill。超限在 scope/create 前返回 400 `ALIYUN_OSS_MOUNT_LIMIT`，不会发起云端创建。模板不得额外预挂载 OSS；本项目不实现聚合更多 Skill 的挂载方案。
+每次实际选择的 Skill 会聚合为独立、不可变的 OSS 集合，并只读挂载一次到 `/skills`。
+工作区占 1 个挂载点，非空 Skill 集合占 1 个；20 个 Skill 也只占 2 个挂载点。
+不再受“最多 4 个 Skill”的逐目录挂载限制。当前集合预算为最多 64 个版本、4096 个文件、
+总计 64 MiB、单文件 8 MiB、准备时间 90 秒；超限明确拒绝，不截断选择或退回共享整库挂载。
+集合沿用原有 `/skills/.../SKILL.md` 及辅助文件路径，模板不得额外预挂载 OSS。
 
 手工只读 Skill 使用同一 Bucket 中单独、不可变的版本目录，必须先发布 `SKILL.md` 和辅助文件：
 
@@ -71,7 +75,7 @@ ALIYUN_SKILLS_JSON={"review@v1":{"bundle":"default","path":"/skills/review/v1/SK
 
 该 ID、bundle、path 必须与平台 Skill 注册记录一致，SKILL.md 内容须匹配其 digest。
 只挂载本次选择的版本，读权限、目录身份和 digest 在创建及工具执行前检查。
-工作区和 Skill 的 OSS 前缀不得重叠；手工 Skill 源之间也不得相同或相互包含，避免只选 A 就能读取未授权 B。手工挂载目录按 64 字符上限校验、bucketPath 按 128 字符上限校验（创建文档未列同等长度细节，本项目采用[追加挂载接口](https://help.aliyun.com/zh/agent-sandbox/append-mount-oss)的保守约束）。
+工作区和 Skill 的 OSS 前缀不得重叠；手工 Skill 源之间也不得相同或相互包含，避免只选 A 就能读取未授权 B。服务端只挂载 `/skills`（7 字符）；内部 Skill 路径不再作为独立挂载点。bucketPath 继续按 128 字符上限校验，集合命名空间与工作区、上传区和所有手工源必须分离。
 缺失挂载、可写 Skill 挂载或摘要不匹配均拒绝执行，并尝试删除创建失败的实例；
 删除未确认时保留容量占用，供现有生命周期清理逻辑处理。
 
@@ -92,10 +96,9 @@ ALIYUN_OSS_ACCESS_KEY_SECRET=<发布身份的 AccessKey Secret>
 # ALIYUN_OSS_SECURITY_TOKEN=<SecurityToken>
 ```
 
-只在 API 部署注入发布凭证；Worker 仅需相同 Bucket、Endpoint 和上传前缀配置。
-不配置凭证时上传入口禁用，手动 Skill 和沙箱仍可使用；只配置部分凭证则启动报错。
-发布身份需对上传前缀有 PutObject、DeleteObject 权限；沙箱挂载角色需有该前缀的
-GetObject、必要的列举权限，且不应有上传 Skill 前缀的写权限。
+只在 API 部署注入发布凭证；Worker 使用相同 Bucket、Endpoint、上传和集合前缀，以及下述内部接口配置。Worker 启动不会创建 OSS 发布客户端，即使误注入发布变量也不使用。
+API 未配置发布凭证时，ZIP 上传禁用，带 Skill 的新实例无法准备集合；无 Skill 工作区仍可使用。Worker 自身无需 OSS 凭证，但需连接已配置发布器的 API。只配置部分发布凭证则 API 启动报错。
+API 发布身份需对上传前缀有 PutObject/DeleteObject 权限，对上传区及手工 Skill 源有 GetObject 和带前缀约束的 ListObjects 权限，对集合区有 GetObject/ListObjects/PutObject/DeleteObject 权限。沙箱挂载角色对集合区仅授予 GetObject 和必要的列举权限，对工作区按需授予读写权限，不应拥有集合区或 Skill 源的写权限。
 本实现使用 OSS Node.js SDK V4 签名，支持静态 AccessKey 和 STS 临时凭证，
 不自动获取或续期 STS。凭证只留在 API 进程，不进入数据库、前端或 Sandbox metadata。
 
@@ -108,11 +111,51 @@ SDK 单请求超时 20 秒，发布预算 120 秒；失败尝试删除本次已�
 登记记录后处理孤立包；存储版本控制可能保留历史版本，按 Bucket 策略处理。
 网络超时的迟到写入也可能留下未登记对象；回收前应先核对持久化登记记录。
 
-早期 PR 产生的 `/skills/uploaded/<64字符hex>/SKILL.md` 旧 OSS 记录不会自动改写，因为路径属于已固定的 Skill 身份；上线前请用新版本 ID 重新上传以生成短路径，旧数据先保留。
+早期 PR 产生的 `/skills/uploaded/<64字符hex>/SKILL.md` 旧 OSS 记录也可聚合；它们保留原始逻辑路径，源目录仍由完整包身份解析，不需要自动改写历史记录。新上传仍使用较短的 base64url 逻辑路径。
 
 现有 Cube `hostUpload` 包不会自动迁移。切换后应使用新 Skill 版本 ID 在控制台重新上传，
 将使用该 Skill 的 Agent 更新为新版本。脚本执行位以 OSS 文件模式元数据保存，实际挂载
 驱动对执行位的支持仍需目标模板联调；也可显式使用 `bash`/`python3` 解释器运行脚本。
+
+## 按选择聚合集合
+
+```dotenv
+# API 与 Worker 使用相同值；集合区不能与任何源/工作区重叠。
+ALIYUN_OSS_SKILL_COLLECTION_PREFIX=/pi-flow/skill-collections
+# API 与所有 Worker 共享的独立机器凭证，至少 32 字符，不进入前端。
+ALIYUN_SKILL_COLLECTION_TOKEN=<随机机器凭证>
+# Worker 使用的 API origin；远程必须 HTTPS，仅 loopback 允许 HTTP。
+ALIYUN_SKILL_COLLECTION_API_URL=https://pi-flow-internal.example.com
+```
+
+API 的内联 Worker 可直接调用本地集合发布器；独立 Worker 通过
+`POST /internal/skill-collections/resolve` 请求准备集合，路径需要在反向代理中转发。
+该接口仅接受独立机器凭证，不接受普通管理员 JWT；普通业务路由也不接受机器凭证。
+请求仅携带工作区、当前租约 operation、选中版本身份和期望 scope，不能指定源或目标目录。
+API 从当前租户 Store/注册表读取真实 Skill，验证工作区 volume/bundle/租约仍有效、
+所选版本仍启用、内容身份及 scope 与 Worker 一致；发布完成后再检查一次租约和授权。
+未配置发布器/内部接口时，带 Skill 的新沙箱返回 `SKILL_COLLECTION_PUBLISHER_REQUIRED`；
+不带 Skill 的工作区和文件 API 不需要集合服务。
+
+缓存键包含工作区卷身份和完整的选择 scope，后者包含 bundle、版本/摘要、源映射、
+存储/模板/网络配置和聚合协议版本。排序不同的相同选择可复用；工作区不同、选择增减、
+版本或源改变都会得到独立集合，不会通过取并集把未选中的 Skill 暴露给任务。
+
+API 逐个读取已选源的对象（不列举整个 Bucket），校验路径、文件数/大小、SKILL.md 摘要，
+对自动上传版本还验证包含辅助文件及执行位的版本摘要，然后写入随机私有构建目录。
+保留二进制文件和已有执行位元数据。所有文件成功后才用禁止覆盖的写入发布 ready 指针。
+并发构建只能有一个 ready 指针获胜，失败方只删除自身的私有对象；ready 写入结果不确定时
+保留可能被引用的构建。Worker 只接收选择 ID 和不透明构建 ID，推导集合路径后挂载 `/skills`，
+工具前检查的是精确的 `/skills` 只读挂载及各 Skill 的原始清单路径/摘要。
+
+单次 OSS 请求最长 20 秒；发布预算 90 秒，私有失败对象尽力清理，清理未确认时输出安全遥测。
+Worker 的集合请求与沙箱创建分阶段等待，等待期间继续保持租约；集合准备失败不会派发
+Sandbox 创建，不占用 unknown 实例容量。API 每进程最多同时准备两个集合，忙时返回 429。
+
+**已经发布的集合不会自动删除或覆盖。** 释放实例、更新 Agent、源 ZIP 清理都不会删除现有集合。
+目前没有自动引用计数 GC：运维回收前必须确认所有活跃实例、工作区及保留任务/Agent 版本均不再引用，
+不能对整个集合区设置盲目的短期过期规则。失败构建的迟到写入仍可能成为孤立对象，按 ready 指针和
+平台引用核对后清理。此策略优先保证正在运行的任务不被误删，并非无限存储保留方案。
 
 ## 生命周期边界
 
@@ -150,11 +193,11 @@ npm run smoke:aliyun:skill -- /path/to/skill.zip
 仓库测试使用 SDK mock 验证协议、只读挂载、隔离、错误映射、失败清理和空闲生命周期，
 不代表已经通过真实阿里云账号或 Cube 集群联调。
 Skill 冒烟脚本把测试 ZIP 发布到独立随机目录，读取实际挂载后的 SKILL.md、验证摘要并检查写权限被拒绝，
-最后释放实例并删除该测试包，不向平台登记；HTTP 登记、并发与提交不确定性由仓库测试覆盖。
+最后释放实例并删除原始测试上传包；独立集合缓存保留供人工核对，不向平台登记；HTTP 登记、并发与提交不确定性由仓库测试覆盖。
 
 ## PR #62 Review 验收记录
 
-代码侧已处理：OSS 存储域名放行与冲突检查、最多 4 个 Skill、手工源相互重叠、60 字符上传挂载路径、创建/删除不确定时保留冒烟 Skill 包。
+代码侧已处理：OSS 存储域名放行与冲突检查、按选择聚合为一个只读挂载、手工源相互重叠、短路径及历史路径兼容、创建/删除不确定时保留冒烟 Skill 包。
 实例创建返回 `SandboxCreationError(cleanupConfirmed=false)` 或创建响应丢失时，Skill 冒烟不删除 OSS 包，输出实例 ID（未知时标记 unknown）和不透明包身份供人工核对；显式确认清理成功后才删除包。
 
 真实云验收仍待完成，不能用参数 mock 或 CI 通过代替。目标账号需记录地域、模板版本、运行时、OSS Endpoint、挂载驱动及有效网络策略，然后执行两个冒烟脚本并留存结果。应检查默认拒绝出网下 OSS 读写、短路径 Skill 读取与只读拒写、跨实例可见性、释放重建、SIGKILL 前后状态，并在业务要求时另测节点/网络异常。当前环境未配置阿里云凭证，此文不宣称这些项目已通过。

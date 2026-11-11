@@ -7,6 +7,7 @@ import { buildAPI } from "../src/api/server.js";
 import { Fault, type Skill, type State } from "../src/domain/model.js";
 import { HarnessService } from "../src/domain/service.js";
 import { MemoryStore } from "../src/storage/store.js";
+import { collectionId, collectionPath } from "../src/skills/collection.js";
 import { SandboxManager } from "../src/sandbox/manager.js";
 import {
   AliyunConfigSchema,
@@ -103,7 +104,10 @@ async function fixture(t: TestContext, disabled = false) {
     );
   const store = new MemoryStore(),
     service = new HarnessService(store, [], ["default"]);
-  const provider = new AliyunE2BProvider(storage),
+  const provider = new AliyunE2BProvider(storage, async (r) => ({
+      selectionId: collectionId(r.volume, r.scope),
+      artifact: "a".repeat(32),
+    })),
     manager = new SandboxManager(store, provider);
   const app = buildAPI(
     service,
@@ -240,8 +244,14 @@ test("OSS console ZIP upload publishes binary and auxiliary files and works in a
   assert.deepEqual(mounts[1], {
     bucketName: f.storage.bucket,
     endpoint: f.storage.endpoint,
-    mountDir: skill.path.slice(0, -"/SKILL.md".length),
-    bucketPath: binding.bucketPath,
+    mountDir: "/skills",
+    bucketPath: collectionPath(f.storage.skillCollectionPrefix, {
+      selectionId: collectionId(
+        (await f.store.read("one", (s) => s.workspaces[w.id]!.volumeId))!,
+        f.provider.scope("default", [skill]),
+      ),
+      artifact: "a".repeat(32),
+    }),
     readOnly: true,
   });
   assert.deepEqual(commands.at(-1).args._hostSkillMounts, [mounts[1].mountDir]);

@@ -18,6 +18,11 @@ import { SandboxManager } from "../src/sandbox/manager.js";
 import { MemoryStore } from "../src/storage/store.js";
 import { HarnessService } from "../src/domain/service.js";
 import { remoteScript } from "../src/sandbox/remote-script.js";
+import {
+  collectionId,
+  collectionPath,
+  type CollectionRequest,
+} from "../src/skills/collection.js";
 import type { Skill } from "../src/domain/model.js";
 
 const skill: Skill = {
@@ -48,6 +53,10 @@ const config = (extra = {}) =>
     },
     ...extra,
   });
+const resolveCollection = async (r: CollectionRequest) => ({
+  selectionId: collectionId(r.volume, r.scope),
+  artifact: "a".repeat(32),
+});
 const decode = (command: string) =>
   JSON.parse(Buffer.from(command.split("'").at(-2)!, "base64").toString());
 const result = (stdout = '{"entries":[]}') => ({
@@ -82,6 +91,7 @@ test("Aliyun uses secure E2B creation and isolated OSS prefixes with only select
       allowInternetAccess: true,
       network: { denyOut: ["evil.example"] },
     }),
+    resolveCollection,
   );
   const v1 = await p.createVolume("ws-one"),
     v2 = await p.createVolume("ws-two");
@@ -120,14 +130,17 @@ test("Aliyun uses secure E2B creation and isolated OSS prefixes with only select
     {
       bucketName: config().bucket,
       endpoint: config().endpoint,
-      mountDir: "/skills/review/v1",
-      bucketPath: "/skills/review/v1",
+      mountDir: "/skills",
+      bucketPath: collectionPath(config().skillCollectionPrefix, {
+        selectionId: collectionId(v1, p.scope("default", [skill])),
+        artifact: "a".repeat(32),
+      }),
       readOnly: true,
     },
   ]);
   assert.equal(mounts[1].length, 1);
   assert.equal(mounts[1][0].bucketPath, "/pi-flow/workspaces/ws-two");
-  assert.deepEqual(commands[0].args._hostSkillMounts, ["/skills/review/v1"]);
+  assert.deepEqual(commands[0].args._hostSkillMounts, ["/skills"]);
   assert.equal(commands[0].args._requireWorkspaceMount, true);
   assert.equal(commands[0].options.user, "user");
   assert.equal(created[0]!.volumeMounts, undefined);
@@ -176,8 +189,8 @@ test("Aliyun default-deny includes the exact OSS storage host and rejects explic
   assert.throws(() => config({ endpoint: "https://oss.example.com:8443" }));
 });
 
-test("Aliyun allows four Skills and rejects a fifth before any remote creation", async (t) => {
-  const skills = Array.from({ length: 5 }, (_, n) => ({
+test("Aliyun aggregates twenty selected Skills into one mount and bounds collections", async (t) => {
+  const skills = Array.from({ length: 65 }, (_, n) => ({
     ...skill,
     id: `skill${n}@v1`,
     path: `/skills/skill${n}/SKILL.md`,
@@ -192,26 +205,30 @@ test("Aliyun allows four Skills and rejects a fifth before any remote creation",
     Sandbox,
     "create",
     async (_template: string, opts: SandboxOpts) => {
-      assert.equal(
-        JSON.parse(opts.metadata!["fc.sandbox.storage.oss"]!).mountPoints
-          .length,
-        5,
-      );
+      const mounts = JSON.parse(
+        opts.metadata!["fc.sandbox.storage.oss"]!,
+      ).mountPoints;
+      assert.equal(mounts.length, 2);
+      assert.equal(mounts[1].mountDir, "/skills");
+      assert.equal(mounts[1].readOnly, true);
       return { sandboxId: "box", commands: { run: async () => result() } };
     },
   );
-  const p = new AliyunE2BProvider(config({ skills: bindings }));
+  const p = new AliyunE2BProvider(
+    config({ skills: bindings }),
+    resolveCollection,
+  );
   const volume = await p.createVolume("ws-one");
-  await p.create(volume, "default", skills.slice(0, 4));
+  await p.create(volume, "default", skills.slice(0, 20));
   assert.throws(() => p.scope("default", skills), {
-    code: "ALIYUN_OSS_MOUNT_LIMIT",
+    code: "SKILL_COLLECTION_LIMIT",
   });
   await assert.rejects(
     p.create(volume, "default", skills),
     (e: unknown) =>
       e instanceof SandboxCreationError &&
       e.cleanupConfirmed &&
-      e.code === "ALIYUN_OSS_MOUNT_LIMIT",
+      e.code === "SKILL_COLLECTION_LIMIT",
   );
   assert.equal(create.mock.callCount(), 1);
 });
@@ -249,7 +266,7 @@ test("Aliyun rejects overlapping manual sources and bounds mount directories and
       skills: {
         a: {
           bundle: "default",
-          path: path + "a/SKILL.md",
+          path: path + "a".repeat(2048) + "/SKILL.md",
           bucketPath: "/published/a",
         },
       },
@@ -382,7 +399,7 @@ test("Aliyun reconnects through envd auth, translates command exits and kills wi
     }),
     { code: "EDIT_CONFLICT" },
   );
-  assert.deepEqual(commands[0].args._hostSkillMounts, ["/skills/review/v1"]);
+  assert.deepEqual(commands[0].args._hostSkillMounts, ["/skills"]);
   assert.equal(commands[0].args._requireWorkspaceMount, true);
   await assert.rejects(p.execute("box", "read", { _skillIds: ["unknown"] }), {
     code: "ALIYUN_SKILL_NOT_PUBLISHED",

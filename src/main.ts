@@ -10,6 +10,7 @@ const app = buildAPI(
   context.sandbox,
   context.mcp,
   context.skillPackages,
+  context.skillCollections,
 );
 const inline =
   process.env.HARNESS_MODE === "demo" || process.env.INLINE_WORKER === "true";

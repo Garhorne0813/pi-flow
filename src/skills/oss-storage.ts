@@ -41,7 +41,8 @@ export function uploadedOssSkillBinding(
   if (
     !/^[a-f0-9]{64}$/.test(key) ||
     storageId !== ossSkillStorageId(storage) ||
-    skill.path !== uploadedOssSkillPath(key)
+    (skill.path !== uploadedOssSkillPath(key) &&
+      skill.path !== `/skills/uploaded/${key}/SKILL.md`)
   )
     throw new Fault(403, "ALIYUN_SKILL_NOT_PUBLISHED");
   return {

@@ -30,10 +30,10 @@ export interface OssPackageWriter {
   remove(keys: string[]): Promise<void>;
 }
 
-export function ossPackageWriter(
+export function ossClient(
   storage: OssSkillStorage,
   env: NodeJS.ProcessEnv = process.env,
-): OssPackageWriter | undefined {
+): OSS | undefined {
   const accessKeyId = env.ALIYUN_OSS_ACCESS_KEY_ID;
   const accessKeySecret = env.ALIYUN_OSS_ACCESS_KEY_SECRET;
   const stsToken = env.ALIYUN_OSS_SECURITY_TOKEN;
@@ -58,7 +58,17 @@ export function ossPackageWriter(
     timeout: 20000,
     retryMax: 0,
   };
-  const client = new OSS(options);
+  return new OSS(options);
+}
+
+export function ossPackageWriter(
+  storage: OssSkillStorage,
+  env: NodeJS.ProcessEnv = process.env,
+): OssPackageWriter | undefined {
+  const client = ossClient(storage, env);
+  return client ? ossWriter(client) : undefined;
+}
+export function ossWriter(client: OSS): OssPackageWriter {
   return {
     async put(key, data, executable, timeoutMs) {
       await client.put(key, data, {

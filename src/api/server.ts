@@ -1,5 +1,11 @@
 import Fastify from "fastify";
 import multipart from "@fastify/multipart";
+import { timingSafeEqual, createHash } from "node:crypto";
+import {
+  collectionRoute,
+  CollectionRequest,
+  type CollectionResolver,
+} from "../skills/collection.js";
 import { z } from "zod";
 import { Fault, id, type Actor, type State } from "../domain/model.js";
 import { PersonalService } from "../domain/personal-service.js";
@@ -30,7 +36,18 @@ export function buildAPI(
   sandbox: SandboxManager,
   mcp?: MCPManager,
   skillPackages?: SkillPackages,
+  collections?: { token: string; resolve: CollectionResolver },
 ) {
+  if (collections && collections.token.length < 32)
+    throw new Error("Collection API token must have at least 32 characters");
+  const authenticateCollection = (header?: string) => {
+    const hash = (value: string) => createHash("sha256").update(value).digest();
+    if (
+      !collections ||
+      !timingSafeEqual(hash(header ?? ""), hash(`Bearer ${collections.token}`))
+    )
+      throw new Fault(401, "UNAUTHENTICATED");
+  };
   const app = Fastify({
     logger: {
       redact: ["req.headers.authorization"],
@@ -88,6 +105,10 @@ export function buildAPI(
   });
   app.addHook("onRequest", async (req, reply) => {
     reply.header("X-Request-ID", req.id);
+    if (collections && req.url.split("?")[0] === collectionRoute) {
+      authenticateCollection(req.headers.authorization);
+      return;
+    }
     // Only the static shell is public; all data and mutations still require admin auth.
     if (
       req.method === "GET" &&
@@ -135,6 +156,12 @@ export function buildAPI(
     configurationStore,
     agentKey,
   };
+  if (collections)
+    app.post(collectionRoute, async (req, reply) => {
+      authenticateCollection(req.headers.authorization);
+      reply.header("Cache-Control", "no-store");
+      return collections.resolve(CollectionRequest.parse(req.body));
+    });
   registerConfigurationRoutes(context);
   registerAgentsRoutes(context);
   registerSkillsRoutes(context);

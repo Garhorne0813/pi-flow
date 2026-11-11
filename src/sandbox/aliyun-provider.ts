@@ -15,9 +15,15 @@ import {
   uploadedOssSkillBinding,
   storageOverlaps,
 } from "../skills/oss-storage.js";
+import {
+  collectionId,
+  collectionPath,
+  collectionLimits,
+  CollectionLocation,
+  type CollectionResolver,
+  type CollectionRequest,
+} from "../skills/collection.js";
 
-export const ALIYUN_MAX_OSS_MOUNTS = 5;
-const mountPathLimit = 64;
 const bucketPathLimit = 128;
 
 function matchesDomain(rule: string, host: string) {
@@ -76,6 +82,12 @@ export const AliyunConfigSchema = z
         "OSS upload prefix plus package identity must fit 128 characters",
       )
       .default("/pi-flow/skill-uploads"),
+    skillCollectionPrefix: directory
+      .refine(
+        (p) => p.length + 77 <= bucketPathLimit,
+        "Collection prefix plus selection/artifact identity must fit 128 characters",
+      )
+      .default("/pi-flow/skill-collections"),
     allowInternetAccess: z.boolean().default(false),
     network: z
       .object({
@@ -94,7 +106,7 @@ export const AliyunConfigSchema = z
             bundle: z.string().min(1),
             path: z
               .string()
-              .max(mountPathLimit + "/SKILL.md".length)
+              .max(2048)
               .regex(/^\/skills\/(?:[a-zA-Z0-9_-]+\/)+SKILL\.md$/),
             bucketPath: directory.refine(
               (p) => p.length <= bucketPathLimit,
@@ -152,6 +164,7 @@ export function aliyunConfig(
     roleArn: env.ALIYUN_OSS_ROLE_ARN,
     workspacePrefix: env.ALIYUN_OSS_WORKSPACE_PREFIX,
     skillUploadPrefix: env.ALIYUN_OSS_SKILL_UPLOAD_PREFIX,
+    skillCollectionPrefix: env.ALIYUN_OSS_SKILL_COLLECTION_PREFIX,
     allowInternetAccess:
       env.ALIYUN_ALLOW_INTERNET_ACCESS === undefined
         ? undefined
@@ -172,7 +185,11 @@ export class AliyunE2BProvider implements SandboxProvider {
   private readonly volumePrefix: string;
   private readonly config: AliyunConfig;
 
-  constructor(config: AliyunConfig) {
+  private prepared = new Map<string, CollectionLocation>();
+  constructor(
+    config: AliyunConfig,
+    private resolveCollection?: CollectionResolver,
+  ) {
     this.config = AliyunConfigSchema.parse(config);
     this.options = {
       apiKey: this.config.apiKey,
@@ -203,6 +220,19 @@ export class AliyunE2BProvider implements SandboxProvider {
         "OSS Skill uploads must be separate from workspace storage",
       );
     const sources: string[] = [];
+    if (
+      storageOverlaps(
+        this.config.skillCollectionPrefix,
+        this.config.workspacePrefix,
+      ) ||
+      storageOverlaps(
+        this.config.skillCollectionPrefix,
+        this.config.skillUploadPrefix,
+      )
+    )
+      throw new Error(
+        "Skill collections must be separate from workspace and upload storage",
+      );
     for (const binding of Object.values(this.config.skills)) {
       const a = binding.bucketPath,
         b = this.config.workspacePrefix;
@@ -213,6 +243,10 @@ export class AliyunE2BProvider implements SandboxProvider {
       if (storageOverlaps(a, this.config.skillUploadPrefix))
         throw new Error(
           "Manual Aliyun Skill sources must not overlap the upload namespace",
+        );
+      if (storageOverlaps(a, this.config.skillCollectionPrefix))
+        throw new Error(
+          "Manual Skill sources must not overlap collection storage",
         );
       if (sources.some((source) => storageOverlaps(source, a)))
         throw new Error("Aliyun Skill OSS sources must not overlap");
@@ -248,11 +282,11 @@ export class AliyunE2BProvider implements SandboxProvider {
     );
   }
   scope(bundle: string, skills: readonly Skill[]) {
-    if (skills.length + 1 > ALIYUN_MAX_OSS_MOUNTS)
+    if (skills.length > collectionLimits.maxSkills)
       throw new Fault(
         400,
-        "ALIYUN_OSS_MOUNT_LIMIT",
-        "Aliyun OSS supports at most 5 mounts: one workspace and up to 4 Skills",
+        "SKILL_COLLECTION_LIMIT",
+        "A Skill collection supports at most 64 selected versions",
       );
     const identity = skillScope(bundle, skills);
     const bindings = [...skills]
@@ -271,6 +305,8 @@ export class AliyunE2BProvider implements SandboxProvider {
       .update(
         JSON.stringify({
           provider: "aliyun",
+          mountProtocol: "selected-skills-v1",
+          collectionPrefix: this.config.skillCollectionPrefix,
           identity,
           bindings,
           storage: this.volumePrefix,
@@ -283,18 +319,55 @@ export class AliyunE2BProvider implements SandboxProvider {
       )
       .digest("hex");
   }
+  async prepare(
+    volume: string,
+    bundle: string,
+    skills: readonly Skill[],
+    operation?: string,
+    context?: { tenantId: string; workspaceId: string },
+  ) {
+    const scope = this.scope(bundle, skills);
+    if (!skills.length) return;
+    if (!this.resolveCollection)
+      throw new Fault(503, "SKILL_COLLECTION_PUBLISHER_REQUIRED");
+    const request: CollectionRequest = {
+      volume,
+      bundle,
+      scope,
+      operation,
+      context,
+      skills: skills.map(({ id, path, digest, versionDigest }) => ({
+        id,
+        path,
+        digest,
+        versionDigest,
+      })),
+    };
+    const location = CollectionLocation.parse(
+      await this.resolveCollection(request),
+    );
+    const id = collectionId(volume, scope);
+    if (location.selectionId !== id)
+      throw new Fault(409, "SKILL_COLLECTION_IDENTITY_MISMATCH");
+    if (this.prepared.size >= 128)
+      this.prepared.delete(this.prepared.keys().next().value!);
+    this.prepared.set(id, location);
+  }
   async create(
     volume: string,
     bundle: string,
     skills: readonly Skill[],
     snapshotId?: string,
     operation?: string,
+    context?: { tenantId: string; workspaceId: string },
   ) {
     let scope: string, bucketPath: string;
     try {
       if (snapshotId) throw new Fault(409, "SANDBOX_SNAPSHOT_UNSUPPORTED");
       scope = this.scope(bundle, skills);
       bucketPath = this.workspacePath(volume);
+      if (skills.length && !this.prepared.has(collectionId(volume, scope)))
+        await this.prepare(volume, bundle, skills, operation, context);
     } catch (error) {
       throw new SandboxCreationError(error, true);
     }
@@ -319,9 +392,18 @@ export class AliyunE2BProvider implements SandboxProvider {
         "fc.sandbox.storage.oss": JSON.stringify({
           mountPoints: [
             mount("/workspace", bucketPath, false),
-            ...skills.map((s) =>
-              mount(skillMountPath(s), this.binding(s)!.bucketPath, true),
-            ),
+            ...(skills.length
+              ? [
+                  mount(
+                    "/skills",
+                    collectionPath(
+                      this.config.skillCollectionPrefix,
+                      this.prepared.get(collectionId(volume, scope))!,
+                    ),
+                    true,
+                  ),
+                ]
+              : []),
           ],
         }),
         harnessWorkspaceVolume: volume,
@@ -336,7 +418,7 @@ export class AliyunE2BProvider implements SandboxProvider {
       await this.run(sb, "ls", {
         path: "/workspace",
         _requireWorkspaceMount: true,
-        _hostSkillMounts: skills.map(skillMountPath),
+        _hostSkillMounts: skills.length ? ["/skills"] : [],
         _skillManifests: skills.map((s) => ({
           path: s.path,
           digest: s.digest,
@@ -391,7 +473,7 @@ export class AliyunE2BProvider implements SandboxProvider {
     return this.run(await this.connected(sid), op, {
       ...args,
       _requireWorkspaceMount: true,
-      _hostSkillMounts: mounts,
+      _hostSkillMounts: mounts.length ? ["/skills"] : [],
     });
   }
   private run(sb: Sandbox, op: string, args: Record<string, unknown>) {
