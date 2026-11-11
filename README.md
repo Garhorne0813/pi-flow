@@ -136,7 +136,7 @@ See the [API reference](docs/api.md) for workspace sharing, history and Todos, f
 
 The Agent editor groups logical versions, separates configuration into keyboard-navigable panels, and shows a summary and diff before publication. Unsaved drafts are protected when navigating or changing connections. See the [delivery plan](docs/agent-console-roadmap.md) and [Studio isolation RFC](docs/agent-studio-rfc.md) for subsequent increments.
 
-Skills supports uploading a single-Skill ZIP into shared hostPath storage, automatically registering an immutable version. The API needs write access to the configured upload namespace; see [deployment](docs/deployment.md#skill-zip-uploads--技能-zip-上传).
+Skills supports uploading a single-Skill ZIP into shared hostPath storage (Cube) or OSS (Aliyun), automatically registering an immutable version. The API needs publication access to the configured upload storage; see [deployment](docs/deployment.md#skill-zip-uploads--技能-zip-上传).
 
 After starting the API, open **http://127.0.0.1:8080/admin/ui** (`/admin/agents/ui` remains supported). Demo accepts `DEV_TOKEN`; production uses a UCS JWT with the `harness-admin` role. No separate frontend build is needed.
 

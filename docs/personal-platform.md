@@ -50,7 +50,7 @@ npm run worker
 
 目录导入器可将 HOUSE.md、SYSTEM.md、AGENTS.md 和 subagents 文件合并为普通 AgentConfig；运行时只使用数据库中的结果。Demo 仅在清单为空时创建内建示例，重启不会覆盖已有配置。生产镜像不必携带配置目录；如要使用目录导入 CLI，需自行挂载并指定 CONFIG_DIR。
 
-`config/skills/<id>/SKILL.md` 及辅助文件按内容归档；拒绝符号链接，限制文件数和总大小；支持 `disable-model-invocation` 和 `agents/<name>.md`。`npm run skills:deliver` 将版本原子物化到 `SKILL_DELIVER_DIR`。Cube 支持通过 `SKILL_VOLUMES_JSON` 配置只读卷或受 `SKILL_HOST_ROOTS_JSON` 限制的 hostPath。ZIP 上传通过 `SKILL_UPLOAD_ROOT` 原子写入 hostPath，并由 Provider 只读挂载；目录物化本身不等于 Provider 已挂载。MCP 注册可放入 `config/mcp/servers.yaml`，格式为 `{id,endpointRef,allowedTools,enabled}` 数组；endpointRef 必须对应 Worker 的 `MCP_ENDPOINTS_JSON`。
+`config/skills/<id>/SKILL.md` 及辅助文件按内容归档；拒绝符号链接，限制文件数和总大小；支持 `disable-model-invocation` 和 `agents/<name>.md`。`npm run skills:deliver` 将版本原子物化到 `SKILL_DELIVER_DIR`。Cube 支持通过 `SKILL_VOLUMES_JSON` 配置只读卷或受 `SKILL_HOST_ROOTS_JSON` 限制的 hostPath。Cube ZIP 上传通过 `SKILL_UPLOAD_ROOT` 原子写入 hostPath；阿里云 ZIP 上传校验后自动发布到 OSS 并登记，Worker 从记录解析只读挂载，见 [阿里云接入](aliyun-sandbox.md)。目录物化本身不等于 Provider 已挂载。MCP 注册可放入 `config/mcp/servers.yaml`，格式为 `{id,endpointRef,allowedTools,enabled}` 数组；endpointRef 必须对应 Worker 的 `MCP_ENDPOINTS_JSON`。
 
 `/admin/ui` 管理控制台支持个人 Agent 的原地编辑、访问权限、禁用、Skill/MCP 登记和 ZIP 上传。保存 Agent 使用整份清单的 revision 防止并发覆盖，并保留编辑器尚未支持的配置字段；排队和审批续跑任务继续使用原快照。管理配置与 Skill/MCP 写入平台 registry，对所有个人身份一致生效。旧共享引擎保留逻辑版本和 ACL 行为，个人运行不创建或升级 AgentVersion。
 
@@ -66,7 +66,7 @@ npm run worker
 
 以下为明确未覆盖的目标，不应作为当前部署承诺：
 
-1. 工作区 hostPath 存储、多会话租约、按用户网络策略动态下发和模板全局覆盖。当前支持 Cube / aliyun / demo；阿里云使用 OSS 持久化，暂停、快照和本地 ZIP Skill 上传的云端发布尚不支持。阿里云可设置部署级出网规则，`SANDBOX_NETWORK_MODE` 仍只接受 `unmanaged`，不代表已实现用户级防火墙。不支持的 provider、网络模式和多会话设置会在启动时拒绝。
+1. 工作区 hostPath 存储、多会话租约、按用户网络策略动态下发和模板全局覆盖。当前支持 Cube / aliyun / demo；阿里云使用 OSS 持久化，暂停和快照尚不支持，控制台 ZIP Skill 自动发布到 OSS 已支持。阿里云可设置部署级出网规则，`SANDBOX_NETWORK_MODE` 仍只接受 `unmanaged`，不代表已实现用户级防火墙。不支持的 provider、网络模式和多会话设置会在启动时拒绝。
 2. 完整规范化的数据模型及横跨所有用户的原子平台预算。当前 Run/Session/Event/Skill/配置/定时任务已有独立表；工作区绑定、Todo/Interaction 和记忆计数仍使用用户状态文档，审计、Usage/资源记录和工作区运行投影已拆表。已有预算按用户分区执行，不能当作跨用户全局预算。
 3. 旧共享工作区配置的专门迁移工具、Skill 交付回滚与生产对账。Agent 草稿、发布历史与 Git 自动同步不属于当前设计。
 4. 调度的 jitter、misfire 策略、结束条件、全局交互容量预留；记忆的定期去重/归档/索引修复和完整删除/批量管理 API。

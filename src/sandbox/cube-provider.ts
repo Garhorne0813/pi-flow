@@ -53,7 +53,9 @@ export class CubeProvider implements SandboxProvider {
       throw e;
     }
   }
-  private binding(skill: Pick<Skill, "id" | "bundle" | "path" | "hostUpload">) {
+  private binding(
+    skill: Pick<Skill, "id" | "bundle" | "path" | "hostUpload" | "ossUpload">,
+  ) {
     return (
       uploadedSkillBinding(skill, this.uploadRoot) ??
       (Object.hasOwn(this.skillVolumes, skill.id)

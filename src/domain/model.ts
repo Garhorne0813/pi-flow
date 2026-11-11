@@ -224,6 +224,13 @@ export type Interaction = {
   continuationRunId?: string;
 };
 export type Skill = {
+  ossUpload?: {
+    key: string;
+    storageId: string;
+    archiveDigest: string;
+    files: number;
+    bytes: number;
+  };
   hostUpload?: {
     key: string;
     archiveDigest: string;

@@ -257,7 +257,7 @@ Run 查询、任务提交（含幂等重试）、交互续跑和取消响应统�
 
 ## 上传单 Skill ZIP
 
-`POST /api/v1/admin/skills/upload` 要求管理员身份和当前租户的 Bundle 授权。使用 `multipart/form-data`：`id`（如 `review@v1`）、`name`、`bundle`、可选 `description`，以及唯一文件字段 `archive`。不接受 `hostPath`、目标路径、Volume 或客户端摘要。成功返回 201 和已启用的 Skill，包含自动生成的 Sandbox 路径、SKILL.md SHA-256 及 `hostUpload` 包身份/文件数/字节数；不返回宿主机路径。
+`POST /api/v1/admin/skills/upload` 要求管理员身份和当前租户的 Bundle 授权。使用 `multipart/form-data`：`id`（如 `review@v1`）、`name`、`bundle`、可选 `description`，以及唯一文件字段 `archive`。不接受 `hostPath`、目标路径、Volume 或客户端摘要。成功返回 201 和已启用的 Skill，包含自动生成的 Sandbox 路径、SKILL.md SHA-256 及 `hostUpload`（Cube）或 `ossUpload`（阿里云）包身份/文件数/字节数；不返回宿主机路径、OSS 凭证或任意可写地址。
 
 ```bash
 curl -X POST http://127.0.0.1:8080/api/v1/admin/skills/upload \
@@ -268,6 +268,6 @@ curl -X POST http://127.0.0.1:8080/api/v1/admin/skills/upload \
 
 ZIP 内必须恰有一个 `SKILL.md`，位于 ZIP 根目录或唯一顶层 Skill 目录内；保留 scripts/references 等辅助文件和执行位，忽略常见 macOS 打包元数据。拒绝路径穿越、绝对路径、链接/特殊文件、加密、重复/冲突路径、损坏的 CRC、无效 UTF-8 清单和多个 Skill。限制为 ZIP 10 MiB、解压总量 32 MiB、单文件 8 MiB、SKILL.md 128 KiB、1000 个文件及 10000 个目录树条目；每个 API 进程最多同时处理两次上传。现有 JSON API 的 350000 字节限制不变。
 
-`GET /admin/configuration` 返回 `skillUploads` 的 enabled 与各项大小/数量限制。`SKILL_HOST_ROOTS_JSON=[]` 禁用上传；默认 `SKILL_UPLOAD_ROOT` 是第一个获批 Host 根目录。实际共享目录必须由部署端预先准备并允许 API 写入 `uploads/`，见[部署说明](deployment.md#skill-zip-uploads--技能-zip-上传)。新 Worker 根据租户持久化元数据和相同上传根目录解析只读挂载，不需要修改 `SKILL_VOLUMES_JSON` 或重启。
+`GET /admin/configuration` 返回 `skillUploads` 的 enabled 与各项大小/数量限制。Cube/demo 模式下 `SKILL_HOST_ROOTS_JSON=[]` 禁用上传；默认 `SKILL_UPLOAD_ROOT` 是第一个获批 Host 根目录。实际共享目录必须由部署端预先准备并允许 API 写入 `uploads/`，见[部署说明](deployment.md#skill-zip-uploads--技能-zip-上传)。新 Worker 根据租户持久化元数据和相同上传根目录解析只读挂载，不需要修改 `SKILL_VOLUMES_JSON` 或重启。阿里云模式配置 API 的 OSS 发布凭证后，上传直接发布到 OSS；Worker 从 `ossUpload` 元数据解析只读挂载，无需手动映射或重启，详见[阿里云发布配置](aliyun-sandbox.md)。
 
-失败返回 400（格式/授权 Bundle/ZIP 校验）、401/403（身份）、409（不可变版本/包已存在）、413（大小/数量超限）、415（非 multipart）、429（上传并发已满）、503（上传禁用或共享存储不可用）。上传审计记录文件数/字节数，不包含文件内容。重复 ID 不覆盖现有版本；不同租户的相同 ID 写入不同目录。确定未登记的失败会清理新目录；无法确认数据库提交结果时保留目录，避免删除可能已被引用的版本，需先刷新登记列表或由运维核对数据库后处理孤立目录。
+失败返回 400（格式/授权 Bundle/ZIP 校验）、401/403（身份）、409（不可变版本/包已存在）、413（大小/数量超限）、415（非 multipart）、429（上传并发已满）、503（上传禁用或共享存储不可用），阿里云另有 502 `SKILL_OSS_PUBLISH_FAILED`（发布失败）和 `SKILL_OSS_CLEANUP_UNCONFIRMED`（清理未确认）。上传审计记录文件数/字节数，不包含文件内容。重复 ID 不覆盖现有版本；不同租户的相同 ID 写入不同目录。确定未登记的失败会清理新目录；无法确认数据库提交结果时保留目录，避免删除可能已被引用的版本，需先刷新登记列表或由运维核对数据库后处理孤立目录。

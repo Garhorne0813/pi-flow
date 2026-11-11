@@ -10,7 +10,7 @@ import type { Auth } from "./auth.js";
 import type { HarnessService } from "../domain/service.js";
 import type { SandboxManager } from "../sandbox/manager.js";
 import type { MCPManager } from "../mcp/manager.js";
-import type { HostSkillPackages } from "../skills/packages.js";
+import type { SkillPackages } from "../skills/packages.js";
 import type { RouteContext } from "./context.js";
 import { registerConfigurationRoutes } from "./configuration.js";
 import { registerAgentsRoutes } from "./agents.js";
@@ -29,7 +29,7 @@ export function buildAPI(
   auth: Auth,
   sandbox: SandboxManager,
   mcp?: MCPManager,
-  skillPackages?: HostSkillPackages,
+  skillPackages?: SkillPackages,
 ) {
   const app = Fastify({
     logger: {

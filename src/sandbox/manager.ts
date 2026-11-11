@@ -666,48 +666,58 @@ export class SandboxManager {
     workspaceOnly = false,
   ) {
     signal?.throwIfAborted();
-    const { skills, hostUploads, trafficToken } = await this.store.readMetadata(
-      a.tenantId,
-      ["skills", "workspaces", ...(workspaceOnly ? ["policy" as const] : [])],
-      (s) => {
-        if (workspaceOnly) {
-          workspace(s, a, wid, true);
-          if (!this.canUseBundle(bundle, a.tenantId))
-            throw new Fault(403, "BUNDLE_NOT_GRANTED");
-          if (
-            !["read", "ls", "grep", "find"].includes(op) &&
-            s.policy?.disabledTools.some((t) =>
-              [
-                op,
-                "remote_" + op,
-                "write",
-                "remote_write",
-                "memory.write",
-              ].includes(t),
+    const { skills, hostUploads, ossUploads, trafficToken } =
+      await this.store.readMetadata(
+        a.tenantId,
+        ["skills", "workspaces", ...(workspaceOnly ? ["policy" as const] : [])],
+        (s) => {
+          if (workspaceOnly) {
+            workspace(s, a, wid, true);
+            if (!this.canUseBundle(bundle, a.tenantId))
+              throw new Fault(403, "BUNDLE_NOT_GRANTED");
+            if (
+              !["read", "ls", "grep", "find"].includes(op) &&
+              s.policy?.disabledTools.some((t) =>
+                [
+                  op,
+                  "remote_" + op,
+                  "write",
+                  "remote_write",
+                  "memory.write",
+                ].includes(t),
+              )
             )
-          )
-            throw new Fault(403, "TOOL_DISABLED");
-        }
-        return {
-          skills: skillIds.map((id) => {
-            const skill = s.skills[id];
-            if (!skill?.enabled || skill.bundle !== bundle)
-              throw new Fault(403, "SKILL_DENIED");
-            return { path: skill.path, digest: skill.digest };
-          }),
-          hostUploads: skillIds
-            .map((id) => s.skills[id]!)
-            .filter((skill) => skill.hostUpload)
-            .map(({ id, bundle, path, hostUpload }) => ({
-              id,
-              bundle,
-              path,
-              hostUpload,
-            })),
-          trafficToken: s.workspaces[wid]?.sandboxTrafficToken,
-        };
-      },
-    );
+              throw new Fault(403, "TOOL_DISABLED");
+          }
+          return {
+            skills: skillIds.map((id) => {
+              const skill = s.skills[id];
+              if (!skill?.enabled || skill.bundle !== bundle)
+                throw new Fault(403, "SKILL_DENIED");
+              return { path: skill.path, digest: skill.digest };
+            }),
+            hostUploads: skillIds
+              .map((id) => s.skills[id]!)
+              .filter((skill) => skill.hostUpload)
+              .map(({ id, bundle, path, hostUpload }) => ({
+                id,
+                bundle,
+                path,
+                hostUpload,
+              })),
+            trafficToken: s.workspaces[wid]?.sandboxTrafficToken,
+            ossUploads: skillIds
+              .map((id) => s.skills[id]!)
+              .filter((skill) => skill.ossUpload)
+              .map(({ id, bundle, path, ossUpload }) => ({
+                id,
+                bundle,
+                path,
+                ossUpload,
+              })),
+          };
+        },
+      );
     // Fresh Run and registry snapshot after preparation/metadata reads,
     // immediately before dispatch. No historical event scan on this path.
     if (authorize) await this.store.readRun(a.tenantId, owner, authorize);
@@ -721,6 +731,7 @@ export class SandboxManager {
         _skillIds: [...skillIds],
         _skillManifests: skills,
         _skillHostUploads: hostUploads,
+        _skillOssUploads: ossUploads,
       },
       trafficToken,
     );

@@ -241,9 +241,10 @@ export function skillUploadRoot(
   return configured;
 }
 export function uploadedSkillBinding(
-  skill: Pick<Skill, "path" | "bundle" | "hostUpload">,
+  skill: Pick<Skill, "path" | "bundle" | "hostUpload" | "ossUpload">,
   root?: string,
 ): SkillVolume | undefined {
+  if (skill.ossUpload) throw new Fault(403, "SKILL_STORAGE_PROVIDER_MISMATCH");
   if (!skill.hostUpload) return undefined;
   const key = skill.hostUpload.key;
   if (
@@ -259,7 +260,20 @@ export function uploadedSkillBinding(
   };
 }
 
-export class HostSkillPackages {
+export interface SkillPackages {
+  readonly configuration: { enabled: boolean } & typeof skillZipLimits;
+  withSlot<T>(fn: () => Promise<T>): Promise<T>;
+  prepare(
+    tenantId: string,
+    fields: SkillUploadFields,
+    archive: Buffer,
+  ): Promise<{
+    skill: Skill;
+    discard: () => Promise<void>;
+  }>;
+}
+
+export class SkillUploadSlots {
   private activeUploads = 0;
   async withSlot<T>(fn: () => Promise<T>): Promise<T> {
     if (this.activeUploads >= skillZipLimits.maxConcurrentUploads)
@@ -275,7 +289,15 @@ export class HostSkillPackages {
       this.activeUploads--;
     }
   }
-  constructor(readonly root: string | undefined) {}
+}
+
+export class HostSkillPackages
+  extends SkillUploadSlots
+  implements SkillPackages
+{
+  constructor(readonly root: string | undefined) {
+    super();
+  }
   get configuration() {
     return { enabled: !!this.root, ...skillZipLimits };
   }

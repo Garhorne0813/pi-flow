@@ -11,6 +11,10 @@ import { Fault, type Skill } from "../domain/model.js";
 import { skillMountPath, skillScope } from "./skill-mounts.js";
 import { SandboxCreationError, type SandboxProvider } from "./provider.js";
 import { runRemoteTool } from "./remote-tool.js";
+import {
+  uploadedOssSkillBinding,
+  storageOverlaps,
+} from "../skills/oss-storage.js";
 
 const directory = z
   .string()
@@ -49,6 +53,7 @@ export const AliyunConfigSchema = z
     endpoint: httpsUrl,
     roleArn: z.string().regex(/^acs:ram::[0-9]+:role\/[a-zA-Z0-9_/-]+$/),
     workspacePrefix: directory.default("/pi-flow/workspaces"),
+    skillUploadPrefix: directory.default("/pi-flow/skill-uploads"),
     allowInternetAccess: z.boolean().default(false),
     network: z
       .object({
@@ -94,6 +99,7 @@ export function aliyunConfig(
     endpoint: env.ALIYUN_OSS_ENDPOINT,
     roleArn: env.ALIYUN_OSS_ROLE_ARN,
     workspacePrefix: env.ALIYUN_OSS_WORKSPACE_PREFIX,
+    skillUploadPrefix: env.ALIYUN_OSS_SKILL_UPLOAD_PREFIX,
     allowInternetAccess:
       env.ALIYUN_ALLOW_INTERNET_ACCESS === undefined
         ? undefined
@@ -135,12 +141,25 @@ export class AliyunE2BProvider implements SandboxProvider {
       .digest("hex")
       .slice(0, 24);
     this.volumePrefix = `aliyun-oss:${namespace}:`;
+    if (
+      storageOverlaps(
+        this.config.skillUploadPrefix,
+        this.config.workspacePrefix,
+      )
+    )
+      throw new Error(
+        "OSS Skill uploads must be separate from workspace storage",
+      );
     for (const binding of Object.values(this.config.skills)) {
       const a = binding.bucketPath,
         b = this.config.workspacePrefix;
       if (a === b || a.startsWith(b + "/") || b.startsWith(a + "/"))
         throw new Error(
           "Aliyun skill storage must be separate from workspace storage",
+        );
+      if (storageOverlaps(a, this.config.skillUploadPrefix))
+        throw new Error(
+          "Manual Aliyun Skill sources must not overlap the upload namespace",
         );
     }
   }
@@ -159,16 +178,23 @@ export class AliyunE2BProvider implements SandboxProvider {
     // OSS creates the prefix on first write. No incompatible E2B Volume API.
     return volume;
   }
+  private binding(
+    skill: Pick<Skill, "id" | "bundle" | "path" | "hostUpload" | "ossUpload">,
+  ) {
+    return (
+      uploadedOssSkillBinding(skill, this.config) ??
+      (Object.hasOwn(this.config.skills, skill.id)
+        ? this.config.skills[skill.id]
+        : undefined)
+    );
+  }
   scope(bundle: string, skills: readonly Skill[]) {
     const identity = skillScope(bundle, skills);
     const bindings = [...skills]
       .sort((a, b) => a.id.localeCompare(b.id))
       .map((skill) => {
-        const binding = Object.hasOwn(this.config.skills, skill.id)
-          ? this.config.skills[skill.id]
-          : undefined;
+        const binding = this.binding(skill);
         if (
-          skill.hostUpload ||
           !binding ||
           binding.bundle !== bundle ||
           binding.path !== skill.path
@@ -229,11 +255,7 @@ export class AliyunE2BProvider implements SandboxProvider {
           mountPoints: [
             mount("/workspace", bucketPath, false),
             ...skills.map((s) =>
-              mount(
-                skillMountPath(s),
-                this.config.skills[s.id]!.bucketPath,
-                true,
-              ),
+              mount(skillMountPath(s), this.binding(s)!.bucketPath, true),
             ),
           ],
         }),
@@ -285,9 +307,18 @@ export class AliyunE2BProvider implements SandboxProvider {
       ? (args._skillIds as string[])
       : [];
     const mounts = ids.map((id) => {
-      const binding = Object.hasOwn(this.config.skills, id)
-        ? this.config.skills[id]
-        : undefined;
+      // Only SandboxManager may supply upload metadata from the authorized
+      // tenant's registry. Browser tool arguments are overwritten at dispatch.
+      const uploaded = (
+        Array.isArray(args._skillOssUploads) ? args._skillOssUploads : []
+      ).find((value: Pick<Skill, "id">) => value.id === id) as
+        | Pick<Skill, "id" | "bundle" | "path" | "hostUpload" | "ossUpload">
+        | undefined;
+      const binding = uploaded
+        ? this.binding(uploaded)
+        : Object.hasOwn(this.config.skills, id)
+          ? this.config.skills[id]
+          : undefined;
       if (!binding || !manifests.some((m) => m.path === binding.path))
         throw new Fault(403, "ALIYUN_SKILL_NOT_PUBLISHED");
       return binding.path.slice(0, -"/SKILL.md".length);

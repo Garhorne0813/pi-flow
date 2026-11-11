@@ -25,6 +25,7 @@ import { DemoRuntime, PiRuntime } from "../execution/runtime.js";
 import { Worker } from "../execution/worker.js";
 import { SandboxPolicySchema } from "../sandbox/policy.js";
 import { AliyunE2BProvider, aliyunConfig } from "../sandbox/aliyun-provider.js";
+import { OssSkillPackages, ossPackageWriter } from "../skills/oss-packages.js";
 export async function bootstrap() {
   const mode = process.env.HARNESS_MODE ?? "production";
   if (!["demo", "production"].includes(mode))
@@ -114,7 +115,9 @@ export async function bootstrap() {
     process.env.SKILL_UPLOAD_ROOT,
     skillVolumes,
   );
-  const skillPackages = new HostSkillPackages(uploadRoot);
+  const skillPackages = aliyun
+    ? new OssSkillPackages(aliyun, ossPackageWriter(aliyun))
+    : new HostSkillPackages(uploadRoot);
   const endpoints = z
     .record(
       z.string(),
