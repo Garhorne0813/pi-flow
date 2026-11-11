@@ -13,6 +13,7 @@ import type { AgentConfig, Skill } from "../domain/model.js";
 import type { ToolSpec } from "../mcp/manager.js";
 export interface RuntimeContext {
   gateway?: { baseUrl: string; apiKey: string };
+  temperature?: number;
   beforeModelRequest?: (
     inputEstimate: number,
   ) => Promise<{ id: string; maxOutputTokens: number }>;
@@ -246,6 +247,9 @@ export class PiRuntime implements Runtime {
         try {
           const stream = await original(model, context, {
             ...options,
+            ...(ctx.temperature !== undefined
+              ? { temperature: ctx.temperature }
+              : {}),
             maxTokens: ticket.maxOutputTokens,
           });
           const settled = stream
