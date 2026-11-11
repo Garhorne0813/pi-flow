@@ -59,8 +59,7 @@ public clients; it is not implemented in this change.
 ## Deployment
 
 Build with `cd web && npm run build`. Serve `web/dist` at the site root with SPA
-fallback for `/chat*`, `/workspace`, `/settings`, `/admin/settings`, `/auth/callback`. Keep `/admin/ui`
-on the existing backend. Proxy `/api/v1` to Fastify over the same HTTPS origin;
+fallback for `/chat*`, `/workspace`, `/settings`, `/admin/settings`, `/auth/callback`. Serve `/admin/*` management SPA routes from the same frontend; legacy `/admin/ui` and `/admin/agents/ui` redirect to `/admin/agents`. Proxy `/api/v1` to Fastify over the same HTTPS origin;
 disable buffering and response aggregation for Run SSE. Set HTML no-cache,
 immutable caching for hashed assets, `X-Content-Type-Options: nosniff`,
 `Referrer-Policy: no-referrer` and a CSP appropriate for the configured OIDC
@@ -108,7 +107,7 @@ security boundary for every read and write.
 `/admin/settings` edits the existing global model catalog (write-only secret
 rotation), global disabled-tool policy, and new-Agent defaults. Writes retain the
 server revision check; a conflict preserves edits and offers explicit reload.
-Deployment details are read-only. `/admin/ui` remains available independently.
+Deployment details are read-only. The old embedded console has been removed; `/admin/ui` redirects to the React Agent manager.
 There is no new role assignment capability in this change.
 
 `/settings` displays the current identity and saves theme, send shortcut and new
@@ -126,3 +125,31 @@ persisted ordinary-user preferences. The role test is part of chat-web CI.
 Chat drafts now also include the current user ID in the browser storage key;
 an unsent new-chat draft is not reused when a different user logs in to the
 same tab. Sending is disabled until the backend identity has been confirmed.
+
+
+## Embedded console migration
+
+All embedded-console source in `src/admin-ui/` is removed. React management
+covers Agent editing/creation and ACL/status, Skill ZIP/drop/upload/registration
+and status, MCP registration/status/discovery, delegation and global/default
+settings. Agent registry writes use the current revision and preserve unedited
+config fields. Personal-platform semantics apply; shared-engine versioned APIs
+remain available as APIs but are not a second UI. Fastify now serves the built
+SPA and hashed assets; Docker builds/copies web assets. Root quality CI builds
+the frontend before real-backend Chromium management acceptance.
+
+The obsolete embedded-controller/DOM tests retire with that implementation.
+Replacement coverage includes old URL redirects and API authorization plus real
+React + Fastify Agent edits preserving extra fields and queued snapshots, Skill
+ZIP publication, revision/ACL/API tests and the existing React role/settings
+browser matrix. Skills still have immutable versions; delete/edit-in-place
+operations are not invented by the new UI.
+
+Migration verification: 377 backend tests passed with PostgreSQL enabled (zero
+failures/skips), including real Fastify + Chromium Agent creation/editing,
+preserved extra configuration/AGENTS.md entries/queued snapshots, Skill ZIP
+upload and status, MCP registration/check failure feedback, legacy redirects,
+and static artifact/rollout-switch checks. Web tests and production build pass;
+ordinary-user direct navigation to each admin route is blocked without admin
+requests. Further real Docker image/container verification is omitted per the
+user's instruction; the image packaging change is not claimed as locally verified.

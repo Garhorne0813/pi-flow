@@ -1,6 +1,4 @@
-import { randomBytes } from "node:crypto";
 import { z } from "zod";
-import { agentAdminHTML, editableAgentAdminHTML } from "../admin-ui/page.js";
 import { AgentDefaults, Fault, audit } from "../domain/model.js";
 import { skillZipLimits } from "../skills/packages.js";
 import { PersonalService } from "../domain/personal-service.js";
@@ -22,27 +20,10 @@ export function registerConfigurationRoutes({
   | "skillPackages"
   | "configurationStore"
 >) {
-  app.get("/admin/ui", async (_req, reply) =>
-    reply.redirect("/admin/agents/ui"),
-  );
-  app.get("/admin/agents/ui", async (_req, reply) => {
-    const nonce = randomBytes(16).toString("base64");
-    return reply
-      .header("Cache-Control", "no-store")
-      .header("X-Content-Type-Options", "nosniff")
-      .header("Referrer-Policy", "no-referrer")
-      .header(
-        "Content-Security-Policy",
-        `default-src 'none'; script-src 'nonce-${nonce}'; style-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`,
-      )
-      .type("text/html; charset=utf-8")
-      .send(
-        (service instanceof PersonalService
-          ? editableAgentAdminHTML
-          : agentAdminHTML
-        ).replace("__AGENT_UI_NONCE__", nonce),
-      );
-  });
+  for (const path of ["/admin/ui", "/admin/agents/ui"])
+    app.get(path, async (_req, reply) =>
+      reply.header("Cache-Control", "no-store").redirect("/admin/agents"),
+    );
   app.get("/api/v1/admin/configuration", async (req, reply) => {
     const a = actor(req);
     const deployment = service.adminConfiguration(a);

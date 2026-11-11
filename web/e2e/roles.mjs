@@ -97,6 +97,16 @@ try {
     if (!admin) {
       await page.getByRole("heading", { name: "无权访问" }).waitFor();
       assert.equal(adminCalls, 0);
+      for (const path of [
+        "/admin/agents",
+        "/admin/skills",
+        "/admin/mcp",
+        "/admin/delegation",
+      ]) {
+        await page.goto("http://127.0.0.1:5173" + path);
+        await page.getByRole("heading", { name: "无权访问" }).waitFor();
+        assert.equal(adminCalls, 0);
+      }
     } else {
       await page.getByRole("heading", { name: "模型与工具策略" }).waitFor();
       await page.getByLabel("全局禁用工具（逗号分隔）").fill("bash, write");

@@ -1,23 +1,32 @@
-# 管理控制台
+# 新前端管理中心
 
-[English](admin-console.md) · [README](../README.zh-CN.md)
+旧的嵌入式 HTML 管理台已移除。`/admin/ui`、`/admin/agents/ui` 仅重定向到
+新前端 `/admin/agents`；不再输入或单独保存管理员 Token，统一使用前端登录态。
+管理入口、页面守卫和所有管理 API 均要求管理员身份。
 
-服务启动后访问 [管理控制台](http://127.0.0.1:8080/admin/ui)（兼容 `/admin/agents/ui`），输入管理员 Bearer Token 即可连接。
+| 页面 | 功能 |
+| --- | --- |
+| `/admin/agents` | 搜索、新建、编辑 Agent；System Prompt、多条 AGENTS.md 原样保存、模型、工具、Skills/MCP 绑定、子 Agent、预算、启停、用户访问范围；保存前预览和 revision 冲突保护 |
+| `/admin/skills` | ZIP 选择/拖拽上传、登记已部署版本、查看元数据、启停 |
+| `/admin/mcp` | 登记授权 Endpoint、工具白名单、启停、只读连接检查 |
+| `/admin/delegation` | 委派关系、工具开关和执行限制概览，进入对应 Agent 编辑 |
+| `/admin/settings` | 模型目录、只写密钥更新、全局工具策略、新建 Agent 默认配置、只读部署信息 |
 
-- **Agents**：创建、查看、复制与发布不可变版本，选择工具、Skills、MCP 和子 Agent，管理启停和用户访问范围。指定用户模式至少填写一个用户；扩大到全租户访问需要确认。拒绝所有用户访问请禁用版本。
-- **Skills**：上传单 Skill ZIP 并自动登记到共享 hostPath，或登记已有部署的不可变 Skill 版本、查看 Bundle / 路径 / 摘要，以及启用和禁用版本。更新内容需登记新版本 ID。
-- **MCP Servers**：从租户已获授权的 Endpoint 中登记服务，设置工具白名单、启停和检查连接。检查仅发现白名单工具，不执行工具；空白名单不授权任何工具。
-- **子 Agent 委派**：查看版本之间的委派关系、并发上限和最大深度，打开父 Agent 复制为新版本以调整委派配置。
-- **全局配置**：查看当前租户获批模型、可用 Bundles / Endpoints 和 Sandbox 策略；保存租户范围的新建 Agent 默认模型、工具和运行限制。默认值仅用于新草稿，不修改已发布版本或历史会话。未编辑的表单会随刷新更新为其他管理员的新值；未保存的草稿会保留，并在服务器值变化时提示冲突，支持明确放弃草稿并重新载入。保存时服务端在事务内校验预期修订号；过期写入返回 409，保留草稿供重新载入或明确确认后重试。
+当前 Personal Platform 的 Agent 原地编辑；保存使用完整清单和 revision 防止覆盖
+其他管理员的修改。尚未暴露在表单中的合法配置字段会保留。排队和审批续跑任务仍
+使用原有配置快照。扩大指定用户访问范围需额外确认；指定用户为空不会变成所有用户。
 
-页面与 API 同源，不需要独立前端构建；HTML 外壳无需认证，所有管理数据操作仍检查管理员权限。令牌仅在页面内存中使用，不保存到浏览器存储或 URL。断开连接会取消未完成请求并清除页面数据。生产使用具备 `harness-admin` 角色的 UCS JWT；本地 Demo 使用 `DEV_TOKEN`。
+Skills 的版本内容不可变，更新需新版本 ID；现有后端未提供删除和远程文本编辑接口，
+因此页面提供停用和新版本上传。ZIP 必须包含单个 Skill（根目录或唯一顶层目录下的
+SKILL.md），可包含 scripts/references。大小、路径、摘要及解压安全校验仍由后端负责。
+上传未配置时禁用上传控件，已有部署版本仍可登记。
 
-部署配置（模型凭证、Skill 卷、MCP Endpoint、租户授权与 Sandbox 策略）在控制台中只读，由服务端配置后重启相关 API / Worker 生效；控制台不返回凭证或 Endpoint URL。手动登记 Skill 前需部署文件；ZIP 上传会自动安装文件。MCP Endpoint 仍需先配置。租户默认值在生产中保存在数据库，Demo 中保存在内存，重启后重置。配置修改通过新 AgentVersion 发布，页面不是聊天前端。
+MCP Endpoint 和凭证在服务端部署配置中设置；连接检查只执行工具发现，不调用工具。
 
-完整接口见 [API 文档](api.md#管理控制台)。
+构建：`npm ci --prefix web && npm run build --prefix web`。Fastify 默认从 `web/dist`
+提供 SPA 和带哈希的静态资源；未构建返回 `WEB_UI_NOT_BUILT`。Docker 镜像构建包含
+前端阶段。生产通过公开的 VITE_OIDC_* 构建参数配置 OIDC，严禁将密钥作为构建参数。
+`CHAT_UI_ENABLED=false` 可禁用静态前端，API 保持原有授权；`CHAT_WEB_DIR` 可指定
+静态资源目录。外部反向代理部署时需为上述 SPA 地址配置 history fallback。
 
-### 上传 Skill ZIP
-
-打开 Skills，填写版本 ID（如 `review@v1`）、名称、可选描述与获授权 Bundle，将单个 ZIP 拖入上传区或点击选择文件，再点击“上传并登记版本”。ZIP 包含一个 `SKILL.md`，位于根目录或唯一顶层 Skill 目录内，并可附带 scripts / references。无需填写宿主路径或 SHA-256；上传后可立即在 Agent 的 Skills 中选择新版本并发布。
-
-ZIP 最大 10 MiB、解压后最大 32 MiB、最多 1000 个文件。拖入多个文件、非 ZIP 或超限文件会拒绝并保留此前选择；上传期间及未连接时不接受拖入。失败会保留表单和文件选择，成功后清空上传表单；保存成功但列表刷新失败会明确提示，可刷新数据查看。已有版本 ID 不可覆盖，更新请换新 ID。部署需要 API 对共享根目录下 `uploads/` 的写权限，详见[部署文档](deployment.md#skill-zip-uploads--技能-zip-上传)。上传入口被禁用时仍可展开“登记已有部署版本”。
+用户自己的主题、快捷键和默认 Agent 偏好位于 `/settings`，不会修改平台全局配置。

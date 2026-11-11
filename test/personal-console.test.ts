@@ -19,6 +19,11 @@ const chromium = [
   "/usr/bin/chromium",
   browserEngine.executablePath(),
 ].find((p): p is string => !!p && existsSync(p));
+if (
+  process.env.REQUIRE_POSTGRES_TESTS === "true" &&
+  !existsSync("web/dist/index.html")
+)
+  throw new Error("Build web before React management acceptance");
 if (process.env.REQUIRE_POSTGRES_TESTS === "true" && !chromium)
   throw new Error("Chromium required for personal console acceptance");
 
@@ -111,6 +116,11 @@ test(
     );
     await registry.tx((s) => {
       s.managedAgents!.assistant!.config.userTokenAccess = true;
+      s.managedAgents!.assistant!.config.agentsMd = [
+        "",
+        "  preserved whitespace\n\n",
+        "# Rules\n- Keep boundaries",
+      ];
     });
     const session = await service.createPersonalSession(actor, {
       agentId: "assistant",
@@ -135,23 +145,34 @@ test(
       const address = await app.listen({ host: "127.0.0.1", port: 0 });
       const page = await browser.newPage();
       page.on("dialog", (d) => d.accept());
-      await page.goto(address + "/admin/ui");
-      await page.locator("#token").fill("admin");
-      await page.locator("#connect").click();
-      await page.locator("#connection").filter({ hasText: "已连接" }).waitFor();
-      await page.locator(".agent-item").click();
-      await page.locator("#clone").click();
-      await page.locator("#prompt").fill("Edited from personal console");
-      await page.locator("#publish").click();
-      await page.locator("#confirm-publish").click();
+      page.on("pageerror", (e) =>
+        console.error("React management page error:", e.message),
+      );
+      await page.route("**/api/v1/**", (route) =>
+        route.continue({
+          headers: { ...route.request().headers(), authorization: "admin" },
+        }),
+      );
+      await page.goto(address + "/admin/agents");
+      await page.getByRole("button", { name: /Personal Assistant/ }).click();
       await page
-        .locator("#message")
-        .filter({ hasText: "配置已保存" })
-        .waitFor();
-      assert.equal(await page.locator(".agent-item").count(), 1);
+        .getByLabel("System Prompt", { exact: true })
+        .fill("Edited from personal console");
+      await page
+        .getByRole("button", { name: "检查并保存", exact: true })
+        .click();
+      await page
+        .getByRole("button", { name: "确认保存 Agent", exact: true })
+        .click();
+      await page.getByRole("status").filter({ hasText: "操作成功" }).waitFor();
       const current = await registry.read((s) => s.managedAgents!.assistant!);
       assert.equal(current.config.systemPrompt, "Edited from personal console");
       assert.equal(current.config.userTokenAccess, true);
+      assert.deepEqual(current.config.agentsMd, [
+        "",
+        "  preserved whitespace\n\n",
+        "# Rules\n- Keep boundaries",
+      ]);
       assert.equal(await registry.read((s) => Object.keys(s.agents).length), 0);
       assert.equal(
         await store.readRun(
@@ -161,22 +182,103 @@ test(
         ),
         queued.capabilities!.systemPrompt,
       );
-      await page.locator("#tab-skills").click();
-      await page.locator("#upload-skill-id").fill("personal-review@v1");
-      await page.locator("#upload-skill-name").fill("Personal review");
-      await page.locator("#skill-zip").setInputFiles({
+      await page
+        .getByRole("link", { name: "Skills 管理", exact: true })
+        .click();
+      const upload = page.locator("form").filter({
+        has: page.getByRole("heading", {
+          name: "上传 Skill ZIP",
+          exact: true,
+        }),
+      });
+      await upload
+        .getByLabel("版本 ID", { exact: true })
+        .fill("personal-review@v1");
+      await upload
+        .getByLabel("Skill 名称", { exact: true })
+        .fill("Personal review");
+      await upload.getByLabel("Skill ZIP 包", { exact: true }).setInputFiles({
         name: "skill.zip",
         mimeType: "application/zip",
         buffer: skillZip([{ path: "SKILL.md", content: skillMarkdown }]),
       });
-      await page.locator("#upload-skill").click();
-      await page
-        .locator("#skill-registry")
-        .filter({ hasText: "personal-review@v1" })
-        .waitFor();
+      await upload
+        .getByRole("button", { name: "上传并登记版本", exact: true })
+        .click();
+      await page.getByRole("heading", { name: /Personal review/ }).waitFor();
       assert.equal(
         await registry.read((s) => s.skills["personal-review@v1"]?.enabled),
         true,
+      );
+      const toggled = page.waitForResponse(
+        (r) =>
+          r.url().includes("/skills/personal-review%40v1/status") &&
+          r.request().method() === "PUT",
+      );
+      await page
+        .getByRole("button", { name: "禁用 personal-review@v1", exact: true })
+        .click();
+      assert.equal((await (await toggled).json()).enabled, false);
+      await page
+        .getByRole("button", { name: "启用 personal-review@v1", exact: true })
+        .waitFor();
+      await page
+        .getByRole("link", { name: "MCP Servers", exact: true })
+        .first()
+        .click();
+      const mcpForm = page.locator("form").filter({
+        has: page.getByRole("heading", {
+          name: "登记 MCP Server",
+          exact: true,
+        }),
+      });
+      await mcpForm.getByLabel("Server ID", { exact: true }).fill("docs");
+      await mcpForm
+        .getByLabel("Endpoint", { exact: true })
+        .selectOption("gateway");
+      await mcpForm.getByLabel("允许工具（逗号分隔）").fill("search");
+      await mcpForm
+        .getByRole("button", { name: "登记 MCP Server", exact: true })
+        .click();
+      await page
+        .getByRole("heading", { name: "docs · 启用", exact: true })
+        .waitFor();
+      assert.deepEqual(await registry.read((s) => s.mcp.docs!.allowedTools), [
+        "search",
+      ]);
+      await page
+        .getByRole("button", { name: "检查连接 docs", exact: true })
+        .click();
+      await page
+        .getByRole("alert")
+        .filter({ hasText: "MCP_CHECK_UNAVAILABLE" })
+        .waitFor();
+      await page
+        .getByRole("link", { name: "子 Agent 委派", exact: true })
+        .first()
+        .click();
+      await page
+        .getByRole("heading", { name: "委派关系", exact: true })
+        .waitFor();
+      await page.getByRole("link", { name: "Agent 管理", exact: true }).click();
+      await page
+        .getByRole("button", { name: "新建 Agent", exact: true })
+        .click();
+      await page
+        .getByLabel("Agent 名称", { exact: true })
+        .fill("New managed agent");
+      await page.getByLabel("Provider", { exact: true }).fill("demo");
+      await page.getByLabel("Model ID", { exact: true }).fill("demo");
+      await page
+        .getByRole("button", { name: "检查并保存", exact: true })
+        .click();
+      await page
+        .getByRole("button", { name: "确认保存 Agent", exact: true })
+        .click();
+      await page.getByRole("button", { name: /New managed agent/ }).waitFor();
+      assert.equal(
+        await registry.read((s) => Object.keys(s.managedAgents!).length),
+        2,
       );
     } finally {
       await browser.close();

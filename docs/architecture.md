@@ -1,3 +1,5 @@
+> 管理前端已迁移至 `web/src/admin/`；旧 `/admin/ui` 和 `/admin/agents/ui` 仅跳转到 `/admin/agents`。构建和当前功能见 [管理中心](admin-console.zh-CN.md)。
+
 # Pi-Flow architecture
 
 [简体中文](architecture.zh-CN.md) · [README](../README.md)
@@ -30,7 +32,7 @@ Production normally runs API and Worker as separate processes sharing one databa
 | Module | Responsibility |
 | --- | --- |
 | `src/api/server.ts`, `src/api/auth.ts` | REST/SSE, input validation, UCS OIDC, request audit |
-| `src/admin-ui/page.ts` | Same-origin management page, admin API client, drafts and conflict handling |
+| `web/src/admin/` | React management center, authenticated API client, drafts and conflict handling |
 | `src/domain/model.ts`, `src/domain/service.ts` | ACL, immutable agent versions, idempotency, interactions |
 | `src/storage/store.ts`, `src/storage/run-store.ts` | Metadata transactions, sessions, Runs, events, read projections |
 | `src/execution/worker.ts` | Tenant scheduling, claims, heartbeats, cancellation, tool policy, child tasks |
@@ -117,7 +119,7 @@ See the [version migration guide](agent-version-migration.md) for migration 005/
 
 ## Management console and configuration
 
-The same-origin management console opens at `/admin/ui`, which redirects to `/admin/agents/ui`. Its HTML shell is public; management APIs require an administrator and scope data to the authenticated Tenant. Production normally uses a UCS JWT with the `harness-admin` role; Demo uses `DEV_TOKEN`, and isolated deployments can explicitly configure a fixed-token identity. Tokens stay in page memory; disconnect aborts pending requests and clears page data.
+The same-origin React management center opens at `/admin/agents`. Legacy console URLs redirect there. The static shell contains no management data; management APIs require an administrator and scope data to the authenticated Tenant. Production normally uses a UCS JWT with the `harness-admin` role; Demo uses `DEV_TOKEN`, and isolated deployments can explicitly configure a fixed-token identity. Tokens stay in page memory; disconnect aborts pending requests and clears page data.
 
 Configuration has three layers:
 

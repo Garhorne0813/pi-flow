@@ -461,3 +461,86 @@ header select {
     padding: 12px;
   }
 }
+.admin-tabs {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  flex: 0;
+  overflow: visible;
+  margin: 20px 0;
+}
+.admin-tabs a {
+  padding: 10px 14px;
+  background: var(--panel);
+  border-radius: 8px;
+}
+.admin-tabs a[aria-current="page"] {
+  background: var(--accent);
+  color: white;
+}
+.agent-layout {
+  display: grid;
+  grid-template-columns: 220px minmax(0, 1fr);
+  gap: 20px;
+}
+.agent-layout > nav button {
+  display: block;
+  width: 100%;
+  text-align: left;
+  margin: 10px 0;
+}
+.agent-layout > nav small {
+  display: block;
+  font-size: 10px;
+  overflow-wrap: anywhere;
+}
+.agent-layout > div {
+  min-width: 0;
+}
+.admin-choices {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.admin-choices label {
+  margin: 4px !important;
+}
+.settings-card textarea {
+  width: 100%;
+  font: inherit;
+  background: var(--paper);
+  color: inherit;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 10px;
+}
+.zip-dropzone {
+  padding: 20px;
+  border: 2px dashed var(--line);
+  border-radius: 8px;
+}
+.admin-resource-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 16px;
+}
+.admin-resource-grid .settings-card {
+  margin: 0;
+}
+.review pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.review {
+  padding: 16px;
+  border: 1px solid var(--line);
+  margin: 20px 0;
+}
+@media (max-width: 760px) {
+  .agent-layout {
+    grid-template-columns: 1fr;
+  }
+  .agent-layout > nav {
+    max-height: 220px;
+  }
+}

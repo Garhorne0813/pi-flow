@@ -48,7 +48,7 @@ HARNESS_MODE=demo DEV_TOKEN=local-demo-token-2026 npm start
 
 The API listens at `http://127.0.0.1:8080`. Demo mode seeds a Demo Agent and runs its Worker inside the API process. It uses a simulated model and in-memory files; restarting clears in-memory state.
 
-Open **http://127.0.0.1:8080/admin/ui** and enter the `DEV_TOKEN` above to inspect the management console. Conversations use the API or your own chat client.
+Open **http://127.0.0.1:8080/chat** for the unified frontend. Administrators access `/admin/agents` from its navigation. Docker includes the frontend build. For development use the controlled Vite proxy; production requires OIDC sign-in configuration.
 
 In another terminal, create your first conversation:
 
@@ -134,11 +134,11 @@ See the [API reference](docs/api.md) for workspace sharing, history and Todos, f
 
 ## Management console
 
-The Agent editor groups logical versions, separates configuration into keyboard-navigable panels, and shows a summary and diff before publication. Unsaved drafts are protected when navigating or changing connections. See the [delivery plan](docs/agent-console-roadmap.md) and [Studio isolation RFC](docs/agent-studio-rfc.md) for subsequent increments.
+The personal Agent editor edits stable configurations with review, revision checks and unsaved-draft protection. See the [delivery plan](docs/agent-console-roadmap.md) and [Studio isolation RFC](docs/agent-studio-rfc.md) for subsequent increments.
 
 Skills supports uploading a single-Skill ZIP into shared hostPath storage (Cube) or OSS (Aliyun), automatically registering an immutable version. The API needs publication access to the configured upload storage; see [deployment](docs/deployment.md#skill-zip-uploads--技能-zip-上传).
 
-After starting the API, open **http://127.0.0.1:8080/admin/ui** (`/admin/agents/ui` remains supported). Demo accepts `DEV_TOKEN`; production uses a UCS JWT with the `harness-admin` role. No separate frontend build is needed.
+After starting the API, open **http://127.0.0.1:8080/admin/agents**. Legacy URLs redirect to this React frontend. Source deployments must run `npm ci --prefix web && npm run build --prefix web`; Docker includes this step. Management shares frontend authentication and server-side admin authorization.
 
 Manage agent versions and access, skills, MCP servers, and subagent delegation. Inspect deployment capabilities and save tenant defaults for new agent drafts. Deployment credentials, volumes, endpoints, and capability grants are configured server-side.
 

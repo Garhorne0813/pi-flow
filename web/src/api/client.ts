@@ -13,7 +13,9 @@ export async function request(path: string, init: RequestInit = {}) {
     ...init,
     credentials: "same-origin",
     headers: {
-      ...(init.body ? { "Content-Type": "application/json" } : {}),
+      ...(init.body && !(init.body instanceof FormData)
+        ? { "Content-Type": "application/json" }
+        : {}),
       ...(bearer ? { Authorization: `Bearer ${bearer}` } : {}),
       ...init.headers,
     },

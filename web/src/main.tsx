@@ -29,6 +29,9 @@ import { auth, login, logout } from "./api/auth";
 import { useChatSession } from "./chat/useChatSession";
 import type { Item } from "./chat/model";
 import "./style.css";
+const AdminConsole = React.lazy(() =>
+  import("./admin/AdminConsole").then((m) => ({ default: m.AdminConsole })),
+);
 const queryClient = new QueryClient({
   defaultOptions: {
     queries: {
@@ -162,7 +165,15 @@ function App() {
           navigate(
             target &&
               (/^\/chat(?:\/[^/]+)?$/.test(target) ||
-                ["/settings", "/workspace", "/admin/settings"].includes(target))
+                [
+                  "/settings",
+                  "/workspace",
+                  "/admin/settings",
+                  "/admin/agents",
+                  "/admin/skills",
+                  "/admin/mcp",
+                  "/admin/delegation",
+                ].includes(target))
               ? target
               : "/chat",
             {
@@ -349,7 +360,15 @@ function App() {
         <footer>
           <Link to="/workspace">工作区文件</Link>
           <Link to="/settings">个人设置</Link>
-          {me?.admin && <Link to="/admin/settings">全局配置</Link>}
+          {me?.admin && (
+            <>
+              <Link to="/admin/agents">Agent 管理</Link>
+              <Link to="/admin/skills">Skills 管理</Link>
+              <Link to="/admin/mcp">MCP Servers</Link>
+              <Link to="/admin/delegation">子 Agent 委派</Link>
+              <Link to="/admin/settings">全局配置</Link>
+            </>
+          )}
           {me && (
             <small className="identity-role">
               {me.admin ? "管理员" : "普通用户"}
@@ -422,6 +441,15 @@ function App() {
               <p role="status">无法确认当前用户身份，请重试或重新登录。</p>
             </section>
           )
+        ) : [
+            "/admin/agents",
+            "/admin/skills",
+            "/admin/mcp",
+            "/admin/delegation",
+          ].includes(location.pathname) ? (
+          <React.Suspense fallback={<p role="status">正在加载管理中心…</p>}>
+            <AdminConsole identity={me} path={location.pathname} />
+          </React.Suspense>
         ) : location.pathname === "/admin/settings" ? (
           <AdminSettings identity={me} />
         ) : (

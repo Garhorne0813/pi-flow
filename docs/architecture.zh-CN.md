@@ -1,3 +1,5 @@
+> 管理前端已迁移至 `web/src/admin/`；旧 `/admin/ui` 和 `/admin/agents/ui` 仅跳转到 `/admin/agents`。构建和当前功能见 [管理中心](admin-console.zh-CN.md)。
+
 # Pi-Flow 架构
 
 [English](architecture.md) · [README](../README.zh-CN.md)
@@ -30,7 +32,7 @@ flowchart LR
 | 模块 | 职责 |
 | --- | --- |
 | `src/api/server.ts`、`src/api/auth.ts` | REST/SSE、输入校验、UCS OIDC、请求审计 |
-| `src/admin-ui/page.ts` | 同源管理页面、管理员 API 客户端、草稿与冲突处理 |
+| `web/src/admin/` | React 管理中心、统一 API 客户端、草稿与冲突处理 |
 | `src/domain/model.ts`、`src/domain/service.ts` | ACL、不可变智能体版本、幂等、交互 |
 | `src/storage/store.ts`、`src/storage/run-store.ts` | 元数据事务、Session、Run、事件、读取投影 |
 | `src/execution/worker.ts` | 租户调度、领取、心跳、取消、工具策略、子任务 |
@@ -117,7 +119,7 @@ Workspace 的逻辑技能 scope 与 Provider 的物理挂载 scope 分别记录�
 
 ## 管理控制台与配置
 
-管理控制台通过同源路径 `/admin/ui` 进入，并重定向到 `/admin/agents/ui`。HTML 外壳无需认证；管理 API 要求管理员身份，数据限制在认证后的 Tenant 内。生产通常使用具有 `harness-admin` 角色的 UCS JWT；Demo 使用 `DEV_TOKEN`，隔离部署也可显式配置固定令牌身份。令牌仅在页面内存中使用；断开连接取消未完成请求并清除页面数据。
+管理控制台通过 `/admin/agents` 进入统一 React 前端；静态资源不含管理数据，管理 API 要求管理员身份，数据限制在认证后的 Tenant 内。生产通常使用具有 `harness-admin` 角色的 UCS JWT；Demo 使用 `DEV_TOKEN`，隔离部署也可显式配置固定令牌身份。令牌仅在页面内存中使用；断开连接取消未完成请求并清除页面数据。
 
 配置分为三层：
 
