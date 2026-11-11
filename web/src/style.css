@@ -383,3 +383,81 @@ header select {
     padding: 8px 18px;
   }
 }
+.settings-page {
+  max-width: 1100px;
+  width: 100%;
+  align-self: center;
+}
+.settings-page > p {
+  color: #78847c;
+  line-height: 1.7;
+}
+.settings-card {
+  display: block !important;
+  padding: 24px;
+  margin: 24px 0;
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+}
+.settings-card h2 {
+  font-size: 18px;
+  font-weight: 600;
+}
+.settings-card label {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 18px 0;
+  max-width: 640px;
+}
+.settings-card label.inline {
+  flex-direction: row;
+  align-items: center;
+}
+.settings-card input,
+.settings-card select {
+  margin: 0 !important;
+}
+.settings-card p {
+  font-size: 13px;
+  line-height: 1.7;
+}
+.settings-card fieldset {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  margin: 20px 0;
+  padding: 18px;
+  min-width: 0;
+}
+.settings-actions {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-top: 24px;
+}
+.settings-card dl {
+  overflow-wrap: anywhere;
+  line-height: 1.8;
+}
+.settings-card dt {
+  font-size: 12px;
+  color: #78847c;
+}
+.settings-card dd {
+  margin: 0 0 12px;
+}
+.identity-role {
+  color: #78847c;
+}
+@media (max-width: 760px) {
+  .settings-page {
+    padding: 16px;
+  }
+  .settings-card {
+    padding: 16px;
+  }
+  .settings-card fieldset {
+    padding: 12px;
+  }
+}

@@ -32,6 +32,16 @@ export function personalRoutes(
   sandbox: SandboxManager,
   actor: (req: object) => Actor,
 ) {
+  app.get("/api/v1/me", async (req, reply) => {
+    const a = actor(req);
+    reply.header("Cache-Control", "no-store");
+    return {
+      userId: a.userId,
+      role: a.admin ? "admin" : "user",
+      admin: a.admin,
+      ...(a.expiresAt === undefined ? {} : { expiresAt: a.expiresAt }),
+    };
+  });
   const memory = new MemoryManager(service.store, sandbox);
   const memoryConfig = AgentConfig.parse({
     name: "Memory",

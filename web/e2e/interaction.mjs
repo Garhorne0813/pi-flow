@@ -27,6 +27,8 @@ try {
       const url = new URL(route.request().url()),
         path = url.pathname;
       const json = (body) => route.fulfill({ json: body });
+      if (path.endsWith("/me"))
+        return json({ userId: "user", admin: false, role: "user" });
       if (path.endsWith("/agents"))
         return json({
           items: [{ id: "assistant", config: { name: "Assistant" } }],

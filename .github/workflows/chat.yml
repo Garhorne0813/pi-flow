@@ -37,3 +37,4 @@ jobs:
           node --input-type=module -e 'for(let n=0;n<100;n++){try{if((await fetch("http://127.0.0.1:5173/chat")).ok)process.exit(0);}catch{}await new Promise(r=>setTimeout(r,200));}process.exit(1)'
           node web/e2e/chat-flow.mjs
           node web/e2e/interaction.mjs
+          node web/e2e/roles.mjs

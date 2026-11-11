@@ -1,3 +1,14 @@
+import { AdminSettings } from "./settings/AdminSettings";
+import { UserSettings } from "./settings/UserSettings";
+import {
+  applyTheme,
+  defaults,
+  loadPreferences,
+  storePreferences,
+  shouldSend,
+  type Identity,
+  type Preferences,
+} from "./settings/preferences";
 import React, { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
@@ -148,9 +159,16 @@ function App() {
           setReady(true);
           const target = (user.state as { returnTo?: string } | undefined)
             ?.returnTo;
-          navigate(target?.startsWith("/chat/") ? target : "/chat", {
-            replace: true,
-          });
+          navigate(
+            target &&
+              (/^\/chat(?:\/[^/]+)?$/.test(target) ||
+                ["/settings", "/workspace", "/admin/settings"].includes(target))
+              ? target
+              : "/chat",
+            {
+              replace: true,
+            },
+          );
         })
         .catch((e) => setError(e.message));
     } else if (auth)
@@ -158,6 +176,30 @@ function App() {
         if (u && !u.expired) setReady(true);
       });
   }, []);
+  const identity = useQuery({
+    queryKey: ["identity"],
+    queryFn: () => api<Identity>("/me"),
+    enabled: ready,
+    retry: false,
+    refetchInterval: 15000,
+  });
+  const me = identity.error ? undefined : identity.data;
+  const [preferences, setPreferences] = useState<Preferences>(defaults);
+  useEffect(() => {
+    setPreferences(me ? loadPreferences(me.userId) : { ...defaults });
+  }, [me?.userId]);
+  useEffect(() => {
+    applyTheme(preferences.theme);
+    const media = matchMedia("(prefers-color-scheme: dark)");
+    const update = () => applyTheme(preferences.theme);
+    media.addEventListener("change", update);
+    return () => media.removeEventListener("change", update);
+  }, [preferences.theme]);
+  function changePreferences(value: Preferences) {
+    if (!me) return;
+    storePreferences(me.userId, value);
+    setPreferences(value);
+  }
   const agents = useQuery({
     queryKey: ["agents"],
     queryFn: () => api<{ items: Agent[] }>("/agents"),
@@ -172,14 +214,29 @@ function App() {
   });
   const selected = sessions.data?.items.find((s) => s.id === sid);
   useEffect(() => {
-    if (!agent && agents.data?.items[0])
-      setAgent(agents.data.items[0].key || agents.data.items[0].id || "");
-  }, [agents.data]);
+    if (!me?.admin) cache.removeQueries({ queryKey: ["admin"] });
+  }, [me?.admin, cache]);
   useEffect(() => {
-    setDraft(sessionStorage.getItem("pi-flow-draft:" + sid) || "");
+    if (agents.data?.items.length) {
+      const preferred = agents.data.items.find(
+        (a) => (a.key || a.id) === preferences.defaultAgent,
+      );
+      setAgent(
+        preferred?.key ||
+          preferred?.id ||
+          agents.data.items[0].key ||
+          agents.data.items[0].id ||
+          "",
+      );
+    }
+  }, [agents.data, preferences.defaultAgent]);
+  useEffect(() => {
+    setDraft(
+      sessionStorage.getItem("pi-flow-draft:" + me?.userId + ":" + sid) || "",
+    );
     setTitle("");
     setBottom(true);
-  }, [sid]);
+  }, [sid, me?.userId]);
   useEffect(() => {
     if (bottom && timeline.current)
       timeline.current.scrollTop = timeline.current.scrollHeight;
@@ -195,10 +252,10 @@ function App() {
   };
   const saveDraft = (v: string) => {
     setDraft(v);
-    sessionStorage.setItem("pi-flow-draft:" + sid, v);
+    sessionStorage.setItem("pi-flow-draft:" + me?.userId + ":" + sid, v);
   };
   async function submit() {
-    if (!draft.trim() || chat.busy || creating.current) return;
+    if (!me || !draft.trim() || chat.busy || creating.current) return;
     if (!sid) {
       creating.current = true;
       await act(async () => {
@@ -206,7 +263,10 @@ function App() {
           agentId: agent,
           title: draft.slice(0, 80),
         });
-        sessionStorage.setItem("pi-flow-draft:" + s.id, draft);
+        sessionStorage.setItem(
+          "pi-flow-draft:" + me?.userId + ":" + s.id,
+          draft,
+        );
         navigate("/chat/" + s.id);
         await api(
           `/sessions/${s.id}/runs`,
@@ -214,7 +274,7 @@ function App() {
           "POST",
           crypto.randomUUID(),
         );
-        sessionStorage.removeItem("pi-flow-draft:" + s.id);
+        sessionStorage.removeItem("pi-flow-draft:" + me?.userId + ":" + s.id);
         setDraft("");
       });
       creating.current = false;
@@ -225,6 +285,7 @@ function App() {
   const errors = [
     chat.error,
     error,
+    identity.error?.message,
     agents.error?.message,
     sessions.error?.message,
   ]
@@ -287,8 +348,22 @@ function App() {
         </div>
         <footer>
           <Link to="/workspace">工作区文件</Link>
-          <Link to="/settings">设置</Link>
-          <button onClick={() => void logout()}>退出登录</button>
+          <Link to="/settings">个人设置</Link>
+          {me?.admin && <Link to="/admin/settings">全局配置</Link>}
+          {me && (
+            <small className="identity-role">
+              {me.admin ? "管理员" : "普通用户"}
+            </small>
+          )}
+          <button
+            onClick={() => {
+              cache.clear();
+              setReady(false);
+              void logout();
+            }}
+          >
+            退出登录
+          </button>
         </footer>
       </aside>
       <main className="main">
@@ -301,7 +376,13 @@ function App() {
             ☰
           </button>
           <div>
-            <strong>{selected?.title || "新的对话"}</strong>
+            <strong>
+              {location.pathname === "/admin/settings"
+                ? "管理中心"
+                : location.pathname === "/settings"
+                  ? "个人设置"
+                  : selected?.title || "新的对话"}
+            </strong>
             <small>
               {selected?.cwd || "/workspace"} · {chat.run?.state || "就绪"}
             </small>
@@ -328,22 +409,21 @@ function App() {
         {location.pathname === "/workspace" ? (
           <Workspace />
         ) : location.pathname === "/settings" ? (
-          <section className="settings">
-            <h1>设置</h1>
-            <p>Enter 发送，Shift+Enter 换行。中文组词时不会发送。</p>
-            <p>任务按用户串行执行。支持文本对话与只读工作区。</p>
-            <label>
-              主题
-              <select
-                onChange={(e) =>
-                  (document.documentElement.dataset.theme = e.target.value)
-                }
-              >
-                <option value="light">浅色</option>
-                <option value="dark">深色</option>
-              </select>
-            </label>
-          </section>
+          me ? (
+            <UserSettings
+              identity={me}
+              preferences={preferences}
+              onChange={changePreferences}
+              agents={agents.data?.items || []}
+            />
+          ) : (
+            <section className="settings">
+              <h1>个人设置</h1>
+              <p role="status">无法确认当前用户身份，请重试或重新登录。</p>
+            </section>
+          )
+        ) : location.pathname === "/admin/settings" ? (
+          <AdminSettings identity={me} />
         ) : (
           <>
             {sid && (
@@ -451,10 +531,14 @@ function App() {
                   onChange={(e) => saveDraft(e.target.value)}
                   onKeyDown={(e) => {
                     if (
-                      e.key === "Enter" &&
-                      !e.shiftKey &&
-                      !e.nativeEvent.isComposing &&
-                      e.keyCode !== 229
+                      shouldSend(
+                        e.key,
+                        e.shiftKey,
+                        e.ctrlKey,
+                        e.metaKey,
+                        e.nativeEvent.isComposing || e.keyCode === 229,
+                        preferences.sendShortcut,
+                      )
                     ) {
                       e.preventDefault();
                       void submit();
@@ -475,7 +559,9 @@ function App() {
                       停止
                     </button>
                   ) : (
-                    <button disabled={chat.busy || !draft.trim() || !agent}>
+                    <button
+                      disabled={!me || chat.busy || !draft.trim() || !agent}
+                    >
                       {sid ? "发送 ↑" : "开始对话 →"}
                     </button>
                   )}

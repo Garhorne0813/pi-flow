@@ -59,7 +59,7 @@ public clients; it is not implemented in this change.
 ## Deployment
 
 Build with `cd web && npm run build`. Serve `web/dist` at the site root with SPA
-fallback for `/chat*`, `/workspace`, `/settings`, `/auth/callback`. Keep `/admin/ui`
+fallback for `/chat*`, `/workspace`, `/settings`, `/admin/settings`, `/auth/callback`. Keep `/admin/ui`
 on the existing backend. Proxy `/api/v1` to Fastify over the same HTTPS origin;
 disable buffering and response aggregation for Run SSE. Set HTML no-cache,
 immutable caching for hashed assets, `X-Content-Type-Options: nosniff`,
@@ -94,3 +94,35 @@ acceptance passed against both MemoryStore and PostgreSQL DemoRuntime. Browser
 interaction fixture passed for approval, question, continuation and unsafe HTML /
 URL rejection. Web unit tests: 5 passed. Frontend production build and dependency
 audit passed (0 advisories). Real OIDC and real sandbox providers were not tested.
+
+## Role-specific settings
+
+`GET /api/v1/me` returns only the authenticated personal user ID, server-derived
+admin/user role, and optional credential expiry (`Cache-Control: no-store`).
+The browser does not infer privileges from JWT decoding or local preferences.
+It refreshes identity every 15 seconds and on focus. Administrative data is
+requested only after the identity check succeeds; `/admin/settings` denies a
+non-admin direct navigation. Existing API admin authorization remains the
+security boundary for every read and write.
+
+`/admin/settings` edits the existing global model catalog (write-only secret
+rotation), global disabled-tool policy, and new-Agent defaults. Writes retain the
+server revision check; a conflict preserves edits and offers explicit reload.
+Deployment details are read-only. `/admin/ui` remains available independently.
+There is no new role assignment capability in this change.
+
+`/settings` displays the current identity and saves theme, send shortcut and new
+chat default Agent in browser localStorage under a user-scoped key. These are
+browser-local preferences, not cloud-synchronized user profile data. Invalid
+stored preferences fall back to safe defaults. Model keys and Bearer tokens are
+never persisted with these preferences. System theme changes apply immediately;
+IME composition and Shift+Enter cannot trigger a send with either shortcut.
+
+Role/settings validation: backend role authorization and revision-conflict test
+passes; browser acceptance covers hidden admin navigation, direct route denial,
+admin model/secret and defaults submission, conflict edit preservation, and
+persisted ordinary-user preferences. The role test is part of chat-web CI.
+
+Chat drafts now also include the current user ID in the browser storage key;
+an unsent new-chat draft is not reused when a different user logs in to the
+same tab. Sending is disabled until the backend identity has been confirmed.
