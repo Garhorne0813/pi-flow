@@ -27,7 +27,9 @@ resumedFrom 链、从 Root 或末端 Child 取消整条链、快照保持、迁�
 mkdir/find/读取各笔记/写主题/写 MEMORY.md 在同一个 withWorkspaceLease 中执行，
 只准备、获取和释放一次沙箱租约。原自动执行时的 Memory 配额/审批路径保持原状。
 文件 API 也复用此工作区管理器；其只读检查通过 readMetadata 读取 Workspace、
-Skill 和策略，不再映射为 workspaceTx。租约获取、续期和状态变更仍使用写事务。
+Skill 和策略。后续发现构造函数二次代理覆盖该优化，已在
+[第九轮](pr60-round9.md) 修复并增加无 BEGIN/行锁断言；租约获取、续期和状态变更
+仍使用写事务。
 
 批处理中每个远程步骤前检查账号 enabled/JWT 到期、租约所有权、工作区权限、
 当前 Bundle 授权和 Skill；写入前读取当前 kill-switch。AbortSignal 贯穿整次操作，

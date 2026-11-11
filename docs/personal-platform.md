@@ -36,7 +36,7 @@ npm run worker
 - 原有 Run、审批/提问续跑、取消、SSE 契约保留。根 Run 提交时保存有效配置、模型、cwd、taskId/rootRunId；下一根 Run 读取当前 Agent 配置，续跑继承原快照。Session 不再保存或升级 Agent 版本。
 - `GET /me/files?path=...&operation=ls|read`、`PUT /me/files {path,content}`、`DELETE /me/files?path=...`。文件操作复用个人沙箱；Run 执行期间返回冲突。已有工作区先读元数据；初始化及文件沙箱租约使用原子工作区事务，仅读取工作区与 RUNNING Run，不读取历史 Run/Session/Event。
 - `GET /me/sandbox`；`POST /me/sandbox/resume`、`/release`。release 不删除卷。
-- `GET /me/memory`、`GET/PUT /me/memory/:name`，支持 `scope=user|project&cwd=...`。模型启用 memory 后只注入索引，主题写入重建索引并受配额限制。每 Run 写入配额仅计主题和索引都返回成功的写入；并发尝试原子占位，失败释放，旧 Worker 租约的占位不阻塞接管。memory.write.attempt/failed 区分尝试与失败，memory.write 仅表示成功；远程文件变更与数据库结算并非分布式事务，失败可能已留下部分文件。
+- `GET /me/memory`、`GET/PUT /me/memory/:name`，支持 `scope=user|project&cwd=...`。模型启用 memory 后只注入索引，主题写入重建索引并受配额限制。每 Run 写入配额仅计主题和索引都返回成功的写入；并发尝试原子占位，失败释放，旧 Worker 租约的占位不阻塞接管。memory.write.attempt/failed 区分尝试与失败，memory.write 仅表示成功；远程文件变更与数据库结算并非分布式事务，失败可能已留下部分文件。手动 Memory 整批操作（读取笔记、写主题及索引）共享 130 秒执行预算；`maxFiles` 是容量上限，较慢或较大的合法集合仍可能超时并返回 `SANDBOX_REMOTE_TIMEOUT`。详见 [超时与清理语义](pr60-round9.md)。
 - `SCHEDULES_ENABLED=true` 开启 `/schedules` 的创建、列表、查询、更新、删除、手动触发、运行历史及 cron 预览。严格五段 cron；触发与 Run 创建同事务；无人值守不产生交互；Run 入场失败时移除本次新建 Session 并恢复先前 Session 绑定。触发前置失败和已提交 Run 的失败统一累计 `maxConsecutiveFailures`，达到阈值自动禁用；成功完成清零，SESSION_BUSY 跳过既不累计也不清零。
 - 工具增加 `web_search` / `web_fetch`。Web 请求在控制面执行，拒绝私网地址，DNS 结果固定到连接并逐次验证重定向；搜索需配置 `WEB_SEARCH_URL`（通过 `q` 参数调用搜索服务）。
 

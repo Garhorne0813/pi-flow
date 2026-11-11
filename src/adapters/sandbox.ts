@@ -57,8 +57,10 @@ export class SandboxManager {
       cleanupTimeoutMs: number;
       leaseWaitTimeoutMs?: number;
     } = { remoteTimeoutMs: 30000, cleanupTimeoutMs: 1000 },
+    storeScope: "default" | "workspace" = "default",
   ) {
-    if (store.workspaceTx) {
+    // workspaceManager already scopes writes and supplies a metadata-only read.
+    if (store.workspaceTx && storeScope !== "workspace") {
       this.store = new Proxy(store, {
         get: (target, key) => {
           if (key === "read" || key === "tx")
@@ -574,6 +576,11 @@ export class SandboxManager {
       await assertOwned();
       return result;
     } catch (e) {
+      // A timeout abandons fn's promise; it does not stop an SDK response.
+      // Fence the callback before cleanup awaits so it cannot dispatch another
+      // operation while we still own the durable lease and deletion is pending.
+      if (e instanceof Fault && e.code === "SANDBOX_REMOTE_TIMEOUT")
+        failed = true;
       if (reserved && !activated && e instanceof SandboxCreationError) {
         await this.creationFailure(a, wid, owner, e);
         reserved = false;
@@ -781,6 +788,7 @@ export class SandboxManager {
         this.policy,
         this.canUseBundle,
         this.limits,
+        "workspace",
       );
     }
     return this.fileManager;

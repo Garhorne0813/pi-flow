@@ -3929,3 +3929,96 @@ test(
     }
   },
 );
+
+test(
+  "workspace lease observation and assertOwned dispatch checks stay read-only through nested SandboxManagers",
+  { skip: !url },
+  async () => {
+    const { sqlMetrics } = await import("./personal-sql-metrics.js");
+    const f = await reviewDatabase(),
+      provider = new DemoSandbox(),
+      first = new SandboxManager(f.sa, provider),
+      second = new SandboxManager(f.sb, provider);
+    let release!: () => void, entered!: () => void, observed!: () => void;
+    const gate = new Promise<void>((r) => (release = r)),
+      ready = new Promise<void>((r) => (entered = r)),
+      observations = new Promise<void>((r) => (observed = r));
+    let active: Promise<unknown> | undefined,
+      waiting: Promise<unknown> | undefined;
+    try {
+      await f.service.ensureWorkspace(f.actor);
+      active = first.withWorkspaceLease(
+        f.actor,
+        f.actor.userId,
+        "holder",
+        "default",
+        async () => {
+          entered();
+          await gate;
+        },
+      );
+      await ready;
+      const m = await sqlMetrics(f.b.pool),
+        read = f.b.readMetadata.bind(f.b);
+      let probes = 0;
+      f.b.readMetadata = async (user, keys, fn) => {
+        const result = await read(user, keys, fn);
+        if (
+          keys.length === 2 &&
+          keys.includes("workspaces") &&
+          keys.includes("skills") &&
+          ++probes === 3
+        )
+          observed();
+        return result;
+      };
+      const assertReadOnly = (rows: { sql: string }[]) => {
+        assert.ok(rows.length > 0);
+        assert.ok(
+          !rows.some((r) =>
+            /^(BEGIN|INSERT|UPDATE|DELETE)|FOR (NO KEY UPDATE|UPDATE|SHARE)/.test(
+              r.sql,
+            ),
+          ),
+          JSON.stringify(rows.map((r) => r.sql)),
+        );
+      };
+      m.start();
+      let checks: ReturnType<typeof m.stop> = [];
+      waiting = second.withWorkspaceLease(
+        f.actor,
+        f.actor.userId,
+        "waiter",
+        "default",
+        async (execute) => {
+          m.start();
+          await execute("find", { path: "/workspace/memory" });
+          checks = m.stop();
+          assertReadOnly(checks);
+        },
+      );
+      await observations;
+      const observing = m.stop();
+      assertReadOnly(observing);
+      assert.ok(probes >= 3);
+      release();
+      await Promise.all([active, waiting]);
+      assert.ok(checks.some((r) => r.sql.includes("personal_user_state")));
+      assert.ok(checks.some((r) => r.sql.includes("personal_users")));
+      console.log(
+        JSON.stringify({
+          round9ReadOnly: {
+            observationSQL: observing.length,
+            dispatchSQL: checks.length,
+            begin: 0,
+            lockingReads: 0,
+          },
+        }),
+      );
+    } finally {
+      release?.();
+      await Promise.allSettled([active, waiting].filter(Boolean));
+      await f.close();
+    }
+  },
+);

@@ -87,3 +87,7 @@
 ## 第八轮旧链兼容、Memory 批处理与统计
 
 015 按旧 taskIdentity 的 parentRunId/resumedFrom 语义回填稳定身份，保留定向取消兼容性；循环链拒绝迁移。手动 Memory 的整次读改写使用单一租约，逐步重查权限；只读工作区检查不再开启写事务。管理统计改为 SQL 聚合及失败事件部分索引，个人 schema v13。详见 [第八轮说明](pr60-round8.md)。
+
+## 第九轮只读作用域与批处理超时
+
+工作区子管理器显式保留已限定的 Store，避免构造函数将元数据只读检查重新覆盖为 workspaceTx。真实 PostgreSQL 验证租约观察、assertOwned/dispatch 无 BEGIN 或行锁。保持 130 秒整批执行预算，通过虚拟时钟验证 120 秒完成、慢步骤累计超时和部分写入；超时先使旧回调失效，再等待清理，防止迟到响应继续 dispatch。无新迁移，个人 schema 仍为 v13。详见 [第九轮说明](pr60-round9.md)。
