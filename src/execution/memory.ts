@@ -8,10 +8,10 @@ import {
   type Actor,
   type Run,
   type State,
-} from "../domain.js";
-import type { SandboxManager } from "../adapters/sandbox.js";
-import type { Store } from "../store.js";
-import { workspacePath } from "../security-path.js";
+} from "../domain/model.js";
+import type { SandboxManager } from "../sandbox/manager.js";
+import type { Store } from "../storage/store.js";
+import { workspacePath } from "../security/paths.js";
 export class MemoryManager {
   constructor(
     private store: Store,

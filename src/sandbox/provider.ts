@@ -1,5 +1,5 @@
-import { Fault } from "../domain.js";
-import type { Skill } from "../domain.js";
+import { Fault } from "../domain/model.js";
+import type { Skill } from "../domain/model.js";
 export type CreatedSandbox = {
   sandboxId: string;
   // Cube returns this only from create. Callers must persist it and pass it

@@ -2,12 +2,12 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { MemoryStore } from "../src/store.js";
-import { MCPManager } from "../src/adapters/mcp.js";
-import { AgentConfig, Fault, id } from "../src/domain.js";
-import { HarnessService } from "../src/service.js";
-import { Worker } from "../src/worker.js";
-import { DemoSandbox, SandboxManager } from "../src/adapters/sandbox.js";
+import { MemoryStore } from "../src/storage/store.js";
+import { MCPManager } from "../src/mcp/manager.js";
+import { AgentConfig, Fault, id } from "../src/domain/model.js";
+import { HarnessService } from "../src/domain/service.js";
+import { Worker } from "../src/execution/worker.js";
+import { DemoSandbox, SandboxManager } from "../src/sandbox/manager.js";
 
 const actor = { tenantId: "mcp-abort", userId: "user", admin: true };
 async function fixture() {

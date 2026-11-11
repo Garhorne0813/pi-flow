@@ -9,12 +9,18 @@ import { MemoryManager } from "../execution/memory.js";
 import { ScheduleService, nextFire } from "../schedules/service.js";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
-import { admin, agentAllowed, Fault, audit, type Actor } from "../domain.js";
-import type { PersonalService } from "../personal-service.js";
-import type { SandboxManager } from "../adapters/sandbox.js";
+import {
+  admin,
+  agentAllowed,
+  Fault,
+  audit,
+  type Actor,
+} from "../domain/model.js";
+import type { PersonalService } from "../domain/personal-service.js";
+import type { SandboxManager } from "../sandbox/manager.js";
 import { replaceAgents } from "../config/agents.js";
-import { AgentConfig } from "../domain.js";
-import { workspacePath } from "../security-path.js";
+import { AgentConfig } from "../domain/model.js";
+import { workspacePath } from "../security/paths.js";
 const sid = (p: unknown) => z.object({ id: z.string().uuid() }).parse(p).id;
 const pagination = z.object({
   offset: z.coerce.number().int().min(0).default(0),

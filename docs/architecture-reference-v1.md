@@ -75,14 +75,14 @@ pi-flow 是一个**面向多用户的个人 AI Agent 后端**，只交付 HTTP/S
 | `src/execution/` | `HarnessService`（领域操作 + 事务）、`Worker`（认领与执行循环）、`Runtime`（Pi SDK / Demo）、`DeltaBatcher`、记忆读写/整理 |
 | `src/sandbox/` | `UserSandboxManager`（生命周期/租约/围栏/对账）、Provider 适配器、网络策略、远端 Python 脚本 |
 | `src/storage/` | 工作区后端：OSS / volume / hostpath / memory |
-| `src/store/` | `Store` 接口与 `MemoryStore` / `PostgresStore`；`ScheduleStore`；Run/Session/平台配置读写 |
+| `src/storage/` | `Store` 接口与 `MemoryStore` / `PostgresStore`；`ScheduleStore`；Run/Session/平台配置读写 |
 | `src/config/` | Git 配置加载/校验/发布、管理端配置文档、Skill 交付 |
 | `src/skills/` | Skill 版本、归档、原子物化、管理上下文 |
 | `src/security/` | 认证（OIDC/DEV_TOKEN）、Principal、策略网关、工具风险、Token 保险箱、路径策略 |
 | `src/tools/` | 内置工具 schema、MCP 管理、Web 工具、结构化提问 |
 | `src/schedules/` | cron 解析、用户侧服务、Worker 侧触发器 |
 | `src/observability/` | 健康探针、Worker 心跳、指标、告警 |
-| `src/usage.ts` | 用量账本、预算准入与结算 |
+| `src/domain/usage.ts` | 用量账本、预算准入与结算 |
 | `migrations/` | 顺序 SQL（`harness_*` 旧表 + `personal_*` 现表 + `platform_*`） |
 
 ---

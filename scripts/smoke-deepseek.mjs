@@ -2,14 +2,14 @@ import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import { createInterface } from "node:readline";
-import { PiRuntime } from "../dist/runtime.js";
-import { AgentConfig } from "../dist/domain.js";
-import { MemoryStore } from "../dist/store.js";
-import { HarnessService } from "../dist/service.js";
-import { SandboxManager, DemoSandbox } from "../dist/adapters/sandbox.js";
-import { MCPManager } from "../dist/adapters/mcp.js";
-import { Worker } from "../dist/worker.js";
-import { buildAPI } from "../dist/api.js";
+import { PiRuntime } from "../dist/execution/runtime.js";
+import { AgentConfig } from "../dist/domain/model.js";
+import { MemoryStore } from "../dist/storage/store.js";
+import { HarnessService } from "../dist/domain/service.js";
+import { SandboxManager, DemoSandbox } from "../dist/sandbox/manager.js";
+import { MCPManager } from "../dist/mcp/manager.js";
+import { Worker } from "../dist/execution/worker.js";
+import { buildAPI } from "../dist/api/server.js";
 // DeepSeek by default; these settings also support other OpenAI-compatible
 // gateways for the same live smoke flow.
 const provider = process.env.SMOKE_PROVIDER ?? "deepseek";

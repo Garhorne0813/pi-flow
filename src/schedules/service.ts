@@ -8,10 +8,10 @@ import {
   type Actor,
   type State,
   agentAllowed,
-} from "../domain.js";
-import { createRun } from "../service.js";
-import type { PersonalService } from "../personal-service.js";
-import { workspacePath } from "../security-path.js";
+} from "../domain/model.js";
+import { createRun } from "../domain/service.js";
+import type { PersonalService } from "../domain/personal-service.js";
+import { workspacePath } from "../security/paths.js";
 export const ScheduleInput = z
   .object({
     agentId: z.string().min(1),

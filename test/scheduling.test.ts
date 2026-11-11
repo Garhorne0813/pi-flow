@@ -1,11 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { MemoryStore } from "../src/store.js";
-import { HarnessService } from "../src/service.js";
-import { AgentConfig } from "../src/domain.js";
-import { Worker } from "../src/worker.js";
-import { SandboxManager, DemoSandbox } from "../src/adapters/sandbox.js";
-import { MCPManager } from "../src/adapters/mcp.js";
+import { MemoryStore } from "../src/storage/store.js";
+import { HarnessService } from "../src/domain/service.js";
+import { AgentConfig } from "../src/domain/model.js";
+import { Worker } from "../src/execution/worker.js";
+import { SandboxManager, DemoSandbox } from "../src/sandbox/manager.js";
+import { MCPManager } from "../src/mcp/manager.js";
 
 async function until(fn: () => Promise<boolean> | boolean) {
   for (let i = 0; i < 100; i++) {

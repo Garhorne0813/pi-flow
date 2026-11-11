@@ -180,6 +180,8 @@ npm run build
 npm run smoke
 ```
 
+See [Code structure and module boundaries (中文)](docs/code-structure.md) for the source tree and route module responsibilities.
+
 The smoke check starts and stops its own demo on port `18081`, covering a conversation, SSE, idempotency, and file upload/download. Some tests require `openssl`, Python 3, and Bash. PostgreSQL checks use `TEST_DATABASE_URL`; see [CI checks](docs/ci.md).
 
 Native form-validation regression tests run when Chromium is installed at `/usr/bin/chromium` or `/usr/bin/chromium-browser`, or when `CHROMIUM_PATH` is set. They use the development-only `playwright-core` dependency and do not download a browser; without Chromium, only the native-browser test is skipped.

@@ -1,6 +1,6 @@
-import { PostgresStore } from "../dist/store.js";
-import { HarnessService } from "../dist/service.js";
-import { AgentConfig } from "../dist/domain.js";
+import { PostgresStore } from "../dist/storage/store.js";
+import { HarnessService } from "../dist/domain/service.js";
+import { AgentConfig } from "../dist/domain/model.js";
 import { performance } from "node:perf_hooks";
 import { mkdirSync, writeFileSync } from "node:fs";
 if (!process.env.TEST_DATABASE_URL)

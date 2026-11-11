@@ -1,4 +1,9 @@
-import { Fault, terminal, type Workspace, type State } from "../domain.js";
+import {
+  Fault,
+  terminal,
+  type Workspace,
+  type State,
+} from "../domain/model.js";
 export function assertLifecycleAvailable(
   s: State,
   w: Workspace,

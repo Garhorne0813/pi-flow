@@ -1,14 +1,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { id } from "../src/domain.js";
+import { id } from "../src/domain/model.js";
 import { readFile, readdir } from "node:fs/promises";
-import { buildAPI } from "../src/api.js";
-import { MemoryStore, PostgresStore } from "../src/store.js";
-import { HarnessService } from "../src/service.js";
-import { DemoSandbox, SandboxManager } from "../src/adapters/sandbox.js";
-import { MCPManager } from "../src/adapters/mcp.js";
-import { Worker } from "../src/worker.js";
-import { DemoRuntime } from "../src/runtime.js";
+import { buildAPI } from "../src/api/server.js";
+import { MemoryStore, PostgresStore } from "../src/storage/store.js";
+import { HarnessService } from "../src/domain/service.js";
+import { DemoSandbox, SandboxManager } from "../src/sandbox/manager.js";
+import { MCPManager } from "../src/mcp/manager.js";
+import { Worker } from "../src/execution/worker.js";
+import { DemoRuntime } from "../src/execution/runtime.js";
 const admin = { tenantId: "health", userId: "admin", admin: true };
 function api(store: MemoryStore | PostgresStore) {
   const service = new HarnessService(store, [], ["default"]);

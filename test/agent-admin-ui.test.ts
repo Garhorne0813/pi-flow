@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import { Script } from "node:vm";
 import { test } from "node:test";
-import { buildAPI } from "../src/api.js";
-import { agentAdminHTML } from "../src/agent-admin-ui.js";
-import { Fault } from "../src/domain.js";
-import type { Auth } from "../src/auth.js";
-import type { HarnessService } from "../src/service.js";
-import type { SandboxManager } from "../src/adapters/sandbox.js";
+import { buildAPI } from "../src/api/server.js";
+import { agentAdminHTML } from "../src/admin-ui/page.js";
+import { Fault } from "../src/domain/model.js";
+import type { Auth } from "../src/api/auth.js";
+import type { HarnessService } from "../src/domain/service.js";
+import type { SandboxManager } from "../src/sandbox/manager.js";
 
 test("Agent console includes editable configuration and valid browser script", () => {
   for (const id of [

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
-import { buildAPI } from "../../src/api.js";
-import { event, Fault } from "../../src/domain.js";
-import { DemoSandbox, SandboxManager } from "../../src/adapters/sandbox.js";
+import { buildAPI } from "../../src/api/server.js";
+import { event, Fault } from "../../src/domain/model.js";
+import { DemoSandbox, SandboxManager } from "../../src/sandbox/manager.js";
 import { fixture } from "./fixture.js";
 process.env.LOG_LEVEL = "silent";
 const concurrency = Number(process.env.SSE_CLIENTS ?? 10);

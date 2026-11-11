@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { createHash } from "node:crypto";
-import { Fault, type State } from "../domain.js";
+import { Fault, type State } from "../domain/model.js";
 export const ModelEntry = z
   .object({
     provider: z.string().min(1),

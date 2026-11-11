@@ -10,12 +10,12 @@ import {
   ListToolsRequestSchema,
   CallToolRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
-import { buildAPI } from "../src/api.js";
-import { HarnessService } from "../src/service.js";
-import { DemoSandbox, SandboxManager } from "../src/adapters/sandbox.js";
-import { MemoryStore } from "../src/store.js";
-import { MCPManager } from "../src/adapters/mcp.js";
-import { AgentConfig, type Actor } from "../src/domain.js";
+import { buildAPI } from "../src/api/server.js";
+import { HarnessService } from "../src/domain/service.js";
+import { DemoSandbox, SandboxManager } from "../src/sandbox/manager.js";
+import { MemoryStore } from "../src/storage/store.js";
+import { MCPManager } from "../src/mcp/manager.js";
+import { AgentConfig, type Actor } from "../src/domain/model.js";
 test("real Streamable HTTP MCP uses trusted HTTPS endpoint, filters tools and checks revocation", async () => {
   await mkdir("work/mcp-tls", { recursive: true });
   execFileSync(

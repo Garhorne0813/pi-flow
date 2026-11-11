@@ -10,9 +10,9 @@ import {
   type State,
   type Skill,
   type McpRegistration,
-} from "../domain.js";
+} from "../domain/model.js";
 import { replaceAgents } from "./agents.js";
-import type { Registry } from "../store/registry.js";
+import type { Registry } from "../storage/registry.js";
 const keySchema = z.string().regex(/^[a-z][a-z0-9_-]{0,63}$/);
 export const DirectoryAgent = AgentConfig.omit({
   systemPrompt: true,

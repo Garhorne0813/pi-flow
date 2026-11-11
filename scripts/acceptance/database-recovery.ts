@@ -2,11 +2,11 @@ import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import pg from "pg";
-import { PostgresStore } from "../../src/store.js";
-import { buildAPI } from "../../src/api.js";
-import { DemoSandbox, SandboxManager } from "../../src/adapters/sandbox.js";
-import { UsageLedger, UsagePolicy } from "../../src/usage.js";
-import { event, id } from "../../src/domain.js";
+import { PostgresStore } from "../../src/storage/store.js";
+import { buildAPI } from "../../src/api/server.js";
+import { DemoSandbox, SandboxManager } from "../../src/sandbox/manager.js";
+import { UsageLedger, UsagePolicy } from "../../src/domain/usage.js";
+import { event, id } from "../../src/domain/model.js";
 import { fixture } from "./fixture.js";
 
 // This scenario owns the CI PostgreSQL service container. Never accept a

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { MemoryStore } from "../src/store.js";
+import { MemoryStore } from "../src/storage/store.js";
 
 test("Memory reads are detached snapshots, do not create tenants, and callbacks can overlap", async () => {
   const store = new MemoryStore();

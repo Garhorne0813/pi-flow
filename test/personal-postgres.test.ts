@@ -2,12 +2,12 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile, readdir } from "node:fs/promises";
 import pg from "pg";
-import { PersonalPostgresStore } from "../src/personal-postgres-store.js";
-import { PostgresRegistry, principal } from "../src/store/registry.js";
-import { personalStore } from "../src/store/personal.js";
-import { PersonalService } from "../src/personal-service.js";
+import { PersonalPostgresStore } from "../src/storage/personal-postgres-store.js";
+import { PostgresRegistry, principal } from "../src/storage/registry.js";
+import { personalStore } from "../src/storage/personal.js";
+import { PersonalService } from "../src/domain/personal-service.js";
 import { replaceAgents } from "../src/config/agents.js";
-import type { State, Actor } from "../src/domain.js";
+import type { State, Actor } from "../src/domain/model.js";
 function configure(
   s: State,
   input: { agents: unknown[]; policy: { disabledTools: string[] } },
@@ -16,11 +16,11 @@ function configure(
   s.policy = input.policy;
   return replaceAgents(s, input.agents, a);
 }
-import { AgentConfig, id, event, emptyState } from "../src/domain.js";
-import { Worker } from "../src/worker.js";
-import { DemoSandbox, SandboxManager } from "../src/adapters/sandbox.js";
-import { DemoRuntime } from "../src/runtime.js";
-import { MCPManager } from "../src/adapters/mcp.js";
+import { AgentConfig, id, event, emptyState } from "../src/domain/model.js";
+import { Worker } from "../src/execution/worker.js";
+import { DemoSandbox, SandboxManager } from "../src/sandbox/manager.js";
+import { DemoRuntime } from "../src/execution/runtime.js";
+import { MCPManager } from "../src/mcp/manager.js";
 const url = process.env.TEST_DATABASE_URL;
 test(
   "personal PostgreSQL persists isolated identities, catalog, claims, checkpoints and event cursors across clients",
@@ -272,7 +272,7 @@ test(
             "INSERT INTO personal_sessions(user_id,session_id,workspace_id,data) VALUES($1,$2,$3,$4)",
             [user, v.id, v.workspaceId, JSON.stringify(v)],
           );
-        const { saveRun } = await import("../src/personal-run-store.js");
+        const { saveRun } = await import("../src/storage/personal-run-store.js");
         const c = await backing.pool.connect();
         try {
           for (const r of Object.values(runs)) await saveRun(c, user, r);
@@ -893,7 +893,7 @@ test(
   { skip: !url },
   async () => {
     const { ScheduleService } = await import("../src/schedules/service.js"),
-      { buildAPI } = await import("../src/api.js");
+      { buildAPI } = await import("../src/api/server.js");
     const f = await reviewDatabase(false),
       scheduler = new ScheduleService(f.service);
     const app = buildAPI(
@@ -1058,7 +1058,7 @@ for (const paused of [false, true])
     `personal SSE revokes a disabled database account on an existing ${paused ? "backpressured" : "idle"} connection`,
     { skip: !url },
     async () => {
-      const { buildAPI } = await import("../src/api.js"),
+      const { buildAPI } = await import("../src/api/server.js"),
         { get } = await import("node:http");
       const f = await reviewDatabase();
       const session = await f.service.createPersonalSession(f.actor, {
@@ -1148,7 +1148,7 @@ test(
   "workspace initialization and file leases preserve unrelated metadata and reject active Runs across clients",
   { skip: !url },
   async () => {
-    const { buildAPI } = await import("../src/api.js");
+    const { buildAPI } = await import("../src/api/server.js");
     const f = await reviewDatabase();
     const app = buildAPI(
       f.other,
@@ -1254,7 +1254,7 @@ test(
   "concurrent personal SSE identity checks perform SELECT only, preserve row versions, and revoke every connection",
   { skip: !url },
   async () => {
-    const { buildAPI } = await import("../src/api.js");
+    const { buildAPI } = await import("../src/api/server.js");
     const f = await reviewDatabase();
     const ses = await f.service.createPersonalSession(f.actor, {
         agentId: "a",
@@ -1349,7 +1349,7 @@ test(
   "personal Session HTTP pagination excludes transcripts, deleted Sessions and other users with stable timestamp ties",
   { skip: !url },
   async () => {
-    const { buildAPI } = await import("../src/api.js");
+    const { buildAPI } = await import("../src/api/server.js");
     const f = await reviewDatabase(),
       ids = Array.from({ length: 6 }, () => id())
         .sort()
@@ -1439,7 +1439,7 @@ test(
   { skip: !url },
   async () => {
     const { MemoryManager } = await import("../src/execution/memory.js"),
-      { Fault } = await import("../src/domain.js");
+      { Fault } = await import("../src/domain/model.js");
     const f = await reviewDatabase(),
       provider = new DemoSandbox();
     const m1 = new MemoryManager(f.sa, new SandboxManager(f.sa, provider)),
@@ -1575,7 +1575,7 @@ test(
   "normalized model budgets include other tasks, reserve atomically and settle idempotently across clients",
   { skip: !url },
   async () => {
-    const { UsageLedger, UsagePolicy } = await import("../src/usage.js");
+    const { UsageLedger, UsagePolicy } = await import("../src/domain/usage.js");
     const f = await reviewDatabase();
     try {
       const ses = await f.service.createPersonalSession(f.actor, {
@@ -2152,7 +2152,7 @@ test(
   { skip: !url },
   async () => {
     const { ScheduleService } = await import("../src/schedules/service.js"),
-      { buildAPI } = await import("../src/api.js");
+      { buildAPI } = await import("../src/api/server.js");
     const f = await reviewDatabase(),
       scheduler = new ScheduleService(f.service),
       other = await principal(f.ar, {
@@ -2424,7 +2424,7 @@ test(
       for (let i = 0; i < 10; i++) await Promise.all(idle.map((w) => w.tick()));
       const reads = [...m1.stop(), ...m2.stop()];
       assert.equal(claims, 0);
-      const { runWorkQuery } = await import("../src/personal-work-queries.js");
+      const { runWorkQuery } = await import("../src/storage/personal-work-queries.js");
       assert.equal(reads.filter((r) => r.sql === runWorkQuery).length, 20);
       assert.equal(
         reads.filter((r) => r.sql === "BEGIN").length,
@@ -2539,7 +2539,7 @@ test(
   "Session create/update/delete/fork HTTP writes avoid unrelated execution, audit, usage and schedule history",
   { skip: !url },
   async () => {
-    const { buildAPI } = await import("../src/api.js"),
+    const { buildAPI } = await import("../src/api/server.js"),
       { sqlMetrics } = await import("./personal-sql-metrics.js");
     const f = await reviewDatabase();
     const app = buildAPI(
@@ -2717,7 +2717,7 @@ test(
   "manual Schedule HTTP uses bounded scheduleTx and retains same-timestamp deduplication under large history",
   { skip: !url },
   async () => {
-    const { buildAPI } = await import("../src/api.js"),
+    const { buildAPI } = await import("../src/api/server.js"),
       { ScheduleService } = await import("../src/schedules/service.js"),
       { sqlMetrics } = await import("./personal-sql-metrics.js");
     const f = await reviewDatabase();
@@ -2929,7 +2929,7 @@ test(
   "cancel HTTP reads only its task chain at 5k Runs/50k Events and serializes concurrent cancellation",
   { skip: !url },
   async () => {
-    const { buildAPI } = await import("../src/api.js"),
+    const { buildAPI } = await import("../src/api/server.js"),
       { sqlMetrics } = await import("./personal-sql-metrics.js");
     const f = await reviewDatabase(),
       app = buildAPI(
@@ -3029,7 +3029,7 @@ test(
   "Interaction HTTP resumes with bounded history reads, fresh sealed credentials and concurrent response idempotency",
   { skip: !url },
   async () => {
-    const { buildAPI } = await import("../src/api.js"),
+    const { buildAPI } = await import("../src/api/server.js"),
       { sqlMetrics } = await import("./personal-sql-metrics.js"),
       { openToken } = await import("../src/security/token-vault.js");
     const oldKey = process.env.RUN_TOKEN_KEY;
@@ -3214,7 +3214,7 @@ test(
   "Audit HTTP pages use indexed tenant-local SQL, stable timestamp cursors and compatible offsets under large history",
   { skip: !url },
   async () => {
-    const { buildAPI } = await import("../src/api.js"),
+    const { buildAPI } = await import("../src/api/server.js"),
       { sqlMetrics } = await import("./personal-sql-metrics.js");
     const f = await reviewDatabase(),
       app = buildAPI(
@@ -3323,9 +3323,9 @@ test(
   "manual Memory HTTP appends attempt/success/failure audits and scopes sandbox lifecycle without historical reads",
   { skip: !url },
   async () => {
-    const { buildAPI } = await import("../src/api.js"),
+    const { buildAPI } = await import("../src/api/server.js"),
       { sqlMetrics } = await import("./personal-sql-metrics.js"),
-      { Fault } = await import("../src/domain.js");
+      { Fault } = await import("../src/domain/model.js");
     const f = await reviewDatabase(),
       provider = new DemoSandbox(),
       sandbox = new SandboxManager(f.sa, provider),
@@ -3396,7 +3396,7 @@ test(
   "015 backfills parent/resumedFrom-only task identities atomically and cancels whole legacy chains from root or child",
   { skip: !url },
   async () => {
-    const { taskIdentity } = await import("../src/service.js");
+    const { taskIdentity } = await import("../src/domain/service.js");
     const f = await reviewDatabase();
     try {
       const rootSession = await f.service.createPersonalSession(f.actor, {
@@ -3583,7 +3583,7 @@ test(
   "manual Memory batches file steps under one lease and serializes concurrent note/index updates",
   { skip: !url },
   async () => {
-    const { buildAPI } = await import("../src/api.js"),
+    const { buildAPI } = await import("../src/api/server.js"),
       { sqlMetrics } = await import("./personal-sql-metrics.js");
     const f = await reviewDatabase(),
       provider = new DemoSandbox(),
@@ -3789,7 +3789,7 @@ test(
   "admin stats aggregate in SQL with an indexed failure count and bounded HTTP payload under 50k historical Events",
   { skip: !url },
   async () => {
-    const { buildAPI } = await import("../src/api.js"),
+    const { buildAPI } = await import("../src/api/server.js"),
       { sqlMetrics } = await import("./personal-sql-metrics.js");
     const f = await reviewDatabase(),
       app = buildAPI(

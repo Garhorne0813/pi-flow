@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { Fault } from "../domain.js";
+import { Fault } from "../domain/model.js";
 import type { Fire } from "./service.js";
 export const HistoryQuery = z.object({
   limit: z.coerce.number().int().min(1).max(100).default(50),

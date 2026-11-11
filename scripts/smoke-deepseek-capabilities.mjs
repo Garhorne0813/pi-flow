@@ -11,14 +11,14 @@ import {
   ListToolsRequestSchema,
   CallToolRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
-import { PiRuntime } from "../dist/runtime.js";
-import { AgentConfig, Fault } from "../dist/domain.js";
-import { MemoryStore } from "../dist/store.js";
-import { HarnessService } from "../dist/service.js";
-import { SandboxManager, DemoSandbox } from "../dist/adapters/sandbox.js";
-import { MCPManager } from "../dist/adapters/mcp.js";
-import { Worker } from "../dist/worker.js";
-import { buildAPI } from "../dist/api.js";
+import { PiRuntime } from "../dist/execution/runtime.js";
+import { AgentConfig, Fault } from "../dist/domain/model.js";
+import { MemoryStore } from "../dist/storage/store.js";
+import { HarnessService } from "../dist/domain/service.js";
+import { SandboxManager, DemoSandbox } from "../dist/sandbox/manager.js";
+import { MCPManager } from "../dist/mcp/manager.js";
+import { Worker } from "../dist/execution/worker.js";
+import { buildAPI } from "../dist/api/server.js";
 
 // Real Pi model request and HTTPS MCP transport; all file contents are test
 // fixtures. DeepSeek is the default; OpenAI-compatible gateways can be selected

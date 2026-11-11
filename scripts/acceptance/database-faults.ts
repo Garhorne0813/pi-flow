@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import pg from "pg";
-import { PostgresStore } from "../../src/store.js";
-import { HarnessService } from "../../src/service.js";
-import { buildAPI } from "../../src/api.js";
-import { DemoSandbox, SandboxManager } from "../../src/adapters/sandbox.js";
-import { event, id } from "../../src/domain.js";
+import { PostgresStore } from "../../src/storage/store.js";
+import { HarnessService } from "../../src/domain/service.js";
+import { buildAPI } from "../../src/api/server.js";
+import { DemoSandbox, SandboxManager } from "../../src/sandbox/manager.js";
+import { event, id } from "../../src/domain/model.js";
 import { fixture } from "./fixture.js";
 
 // Dedicated disposable PG only. All backend termination targets belong to this
@@ -89,7 +89,7 @@ try {
   for (const kind of ["tx", "runTx"] as const) {
     const before = await store.read(f.actor.tenantId, (s) => s);
     let callbacks = 0;
-    const mutate = async (s: import("../../src/domain.js").State) => {
+    const mutate = async (s: import("../../src/domain/model.js").State) => {
       callbacks++;
       s.runs[f.run.id]!.state = "COMPLETED";
       event(s, s.runs[f.run.id]!, "run.completed");

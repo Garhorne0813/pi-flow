@@ -3,9 +3,9 @@
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
 import { performance } from "node:perf_hooks";
-import { PostgresStore } from "../dist/store.js";
-import { HarnessService, authorizedRun } from "../dist/service.js";
-import { AgentConfig, event, id, run } from "../dist/domain.js";
+import { PostgresStore } from "../dist/storage/store.js";
+import { HarnessService, authorizedRun } from "../dist/domain/service.js";
+import { AgentConfig, event, id, run } from "../dist/domain/model.js";
 
 const url = process.env.TEST_DATABASE_URL;
 if (!url)

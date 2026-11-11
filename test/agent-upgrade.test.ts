@@ -1,13 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { MemoryStore } from "../src/store.js";
-import { HarnessService, authorizedRun } from "../src/service.js";
-import { AgentConfig, id, type Actor } from "../src/domain.js";
-import { DemoSandbox, SandboxManager } from "../src/adapters/sandbox.js";
-import { Worker } from "../src/worker.js";
-import { MCPManager } from "../src/adapters/mcp.js";
-import { DemoRuntime } from "../src/runtime.js";
-import { buildAPI } from "../src/api.js";
+import { MemoryStore } from "../src/storage/store.js";
+import { HarnessService, authorizedRun } from "../src/domain/service.js";
+import { AgentConfig, id, type Actor } from "../src/domain/model.js";
+import { DemoSandbox, SandboxManager } from "../src/sandbox/manager.js";
+import { Worker } from "../src/execution/worker.js";
+import { MCPManager } from "../src/mcp/manager.js";
+import { DemoRuntime } from "../src/execution/runtime.js";
+import { buildAPI } from "../src/api/server.js";
 const actor: Actor = { tenantId: "upgrade", userId: "u", admin: true };
 const config = (extra = {}) =>
   AgentConfig.parse({
@@ -554,8 +554,8 @@ for (const backend of ["volume", "host"] as const) {
   for (const legacy of [false, true]) {
     test(`Cube ${backend} scope permits compatible submission during a tool lease (${legacy ? "legacy" : "recorded"} logical scope)`, async (t) => {
       const f = await fixture();
-      const { CubeProvider } = await import("../src/adapters/sandbox.js");
-      const { skillScope } = await import("../src/adapters/skill-mounts.js");
+      const { CubeProvider } = await import("../src/sandbox/manager.js");
+      const { skillScope } = await import("../src/sandbox/skill-mounts.js");
       const sk = {
         id: "s@1",
         name: "s",
@@ -859,7 +859,7 @@ test("JWT expiry alone preserves a waiting task; static history identity does no
     f.v1.id,
   );
   const { skillScope, skillIdentityScope } = await import(
-    "../src/adapters/skill-mounts.js"
+    "../src/sandbox/skill-mounts.js"
   );
   const sk = {
     id: "a@1",

@@ -11,7 +11,7 @@ import { join } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { parseDocument } from "yaml";
 import { z } from "zod";
-import type { Skill } from "../domain.js";
+import type { Skill } from "../domain/model.js";
 export function frontmatter(source: string): {
   metadata: Record<string, unknown>;
   body: string;

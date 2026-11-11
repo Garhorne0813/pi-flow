@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
-import { buildAPI } from "../../src/api.js";
-import { event, Fault } from "../../src/domain.js";
-import { SandboxManager, DemoSandbox } from "../../src/adapters/sandbox.js";
+import { buildAPI } from "../../src/api/server.js";
+import { event, Fault } from "../../src/domain/model.js";
+import { SandboxManager, DemoSandbox } from "../../src/sandbox/manager.js";
 import { fixture } from "./fixture.js";
 
 export async function sseHistoryReplay() {

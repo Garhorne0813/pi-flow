@@ -1,9 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { MemoryStore, PostgresStore, type Store } from "../src/store.js";
-import { HarnessService } from "../src/service.js";
-import { AgentConfig, id } from "../src/domain.js";
-import { UsageLedger, UsagePolicy, usageReport } from "../src/usage.js";
+import { MemoryStore, PostgresStore, type Store } from "../src/storage/store.js";
+import { HarnessService } from "../src/domain/service.js";
+import { AgentConfig, id } from "../src/domain/model.js";
+import { UsageLedger, UsagePolicy, usageReport } from "../src/domain/usage.js";
 import { readFile } from "node:fs/promises";
 async function setup(store: Store) {
   const actor = { tenantId: "usage-" + id(), userId: "owner", admin: true },

@@ -1,14 +1,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
-import { PostgresStore } from "../src/store.js";
-import { HarnessService } from "../src/service.js";
-import { AgentConfig, id, type Actor } from "../src/domain.js";
+import { PostgresStore } from "../src/storage/store.js";
+import { HarnessService } from "../src/domain/service.js";
+import { AgentConfig, id, type Actor } from "../src/domain/model.js";
 import {
   SandboxCapacity,
   SandboxPolicySchema,
-} from "../src/adapters/sandbox-policy.js";
-import { DemoSandbox, SandboxManager } from "../src/adapters/sandbox.js";
+} from "../src/sandbox/policy.js";
+import { DemoSandbox, SandboxManager } from "../src/sandbox/manager.js";
 const url = process.env.TEST_DATABASE_URL;
 test(
   "PostgreSQL workspace tool waiters serialize across independent Store clients",
@@ -401,11 +401,11 @@ test(
   "PostgreSQL independent workers never claim the same Run twice",
   { skip: !url },
   async () => {
-    const { Worker } = await import("../src/worker.js");
+    const { Worker } = await import("../src/execution/worker.js");
     const { SandboxManager, DemoSandbox } = await import(
-      "../src/adapters/sandbox.js"
+      "../src/sandbox/manager.js"
     );
-    const { MCPManager } = await import("../src/adapters/mcp.js");
+    const { MCPManager } = await import("../src/mcp/manager.js");
     const stores = [new PostgresStore(url!), new PostgresStore(url!)];
     const actor = { tenantId: "worker-" + id(), userId: "user", admin: true };
     let release!: () => void;
@@ -664,7 +664,7 @@ test(
       await store.pool.query(
         await readFile("migrations/001_initial.sql", "utf8"),
       );
-      const { emptyState, event } = await import("../src/domain.js");
+      const { emptyState, event } = await import("../src/domain/model.js");
       const state = emptyState();
       const actor = { tenantId: "old", userId: "u", admin: true };
       state.sessions.s = {
@@ -823,7 +823,7 @@ test(
         w = await service.createWorkspace(actor, "stream"),
         ses = await service.createSession(actor, w.id, av.id),
         r = await service.submit(actor, ses.id, "stream");
-      const { event } = await import("../src/domain.js");
+      const { event } = await import("../src/domain/model.js");
       const waiting = store.waitForEvents(actor.tenantId, r.id, 1000);
       await new Promise((resolve) => setTimeout(resolve, 30));
       await other.runTx(actor.tenantId, r.id, (s) => {

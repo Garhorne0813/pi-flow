@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { DeltaBatcher } from "../src/delta-batcher.js";
+import { DeltaBatcher } from "../src/execution/delta-batcher.js";
 test("delta batches preserve text and flush before completion with bounded chunk sizes", async () => {
   const records: { type: string; data: any }[] = [];
   const batcher = new DeltaBatcher(

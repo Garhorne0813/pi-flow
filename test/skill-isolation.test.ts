@@ -10,13 +10,13 @@ import {
   CubeProvider,
   DemoSandbox,
   SandboxManager,
-} from "../src/adapters/sandbox.js";
-import { skillScope } from "../src/adapters/skill-mounts.js";
-import { MemoryStore } from "../src/store.js";
-import { HarnessService } from "../src/service.js";
-import { AgentConfig, Fault, type Skill } from "../src/domain.js";
-import { Worker } from "../src/worker.js";
-import { MCPManager } from "../src/adapters/mcp.js";
+} from "../src/sandbox/manager.js";
+import { skillScope } from "../src/sandbox/skill-mounts.js";
+import { MemoryStore } from "../src/storage/store.js";
+import { HarnessService } from "../src/domain/service.js";
+import { AgentConfig, Fault, type Skill } from "../src/domain/model.js";
+import { Worker } from "../src/execution/worker.js";
+import { MCPManager } from "../src/mcp/manager.js";
 
 const actor = { tenantId: "isolation", userId: "tester", admin: true };
 const skill = (name: string): Skill => ({
@@ -449,7 +449,7 @@ test("viewer file APIs run alongside a skilled Agent without changing its instan
     }
     return execute(sid, op, args);
   };
-  const { buildAPI } = await import("../src/api.js");
+  const { buildAPI } = await import("../src/api/server.js");
   const app = buildAPI(
     f.service,
     async (h) => (h === "Bearer viewer" ? viewer : actor),

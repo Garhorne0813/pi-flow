@@ -20,8 +20,8 @@ import {
   validateSkillBindings,
   validateHostSkillSource,
   type SkillVolume,
-} from "../src/adapters/skill-mounts.js";
-import type { Skill } from "../src/domain.js";
+} from "../src/sandbox/skill-mounts.js";
+import type { Skill } from "../src/domain/model.js";
 
 const skill = (name: string): Skill => ({
   id: name + "@v1",
@@ -302,9 +302,9 @@ test("failed or unsupported host mount and digest preflights kill the new/restor
 });
 
 test("host scope changes rebuild existing instances and prevent stale snapshot restore", async (t) => {
-  const { MemoryStore } = await import("../src/store.js");
-  const { HarnessService } = await import("../src/service.js");
-  const { SandboxManager } = await import("../src/adapters/sandbox.js");
+  const { MemoryStore } = await import("../src/storage/store.js");
+  const { HarnessService } = await import("../src/domain/service.js");
+  const { SandboxManager } = await import("../src/sandbox/manager.js");
   const root = source(t),
     store = new MemoryStore();
   const actor = { tenantId: "host", userId: "owner", admin: true };
@@ -404,9 +404,9 @@ test("vendored SDK sends host-mount string metadata alongside readonly volumeMou
 });
 
 async function lifecycle(t: import("node:test").TestContext, timeout = 30000) {
-  const { MemoryStore } = await import("../src/store.js");
-  const { HarnessService } = await import("../src/service.js");
-  const { SandboxManager } = await import("../src/adapters/sandbox.js");
+  const { MemoryStore } = await import("../src/storage/store.js");
+  const { HarnessService } = await import("../src/domain/service.js");
+  const { SandboxManager } = await import("../src/sandbox/manager.js");
   const root = source(t),
     store = new MemoryStore();
   const actor = { tenantId: "cleanup", userId: "owner", admin: true };

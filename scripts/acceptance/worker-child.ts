@@ -1,8 +1,8 @@
-import { PostgresStore } from "../../src/store.js";
-import { HarnessService } from "../../src/service.js";
-import { Worker } from "../../src/worker.js";
-import { DemoSandbox, SandboxManager } from "../../src/adapters/sandbox.js";
-import { MCPManager } from "../../src/adapters/mcp.js";
+import { PostgresStore } from "../../src/storage/store.js";
+import { HarnessService } from "../../src/domain/service.js";
+import { Worker } from "../../src/execution/worker.js";
+import { DemoSandbox, SandboxManager } from "../../src/sandbox/manager.js";
+import { MCPManager } from "../../src/mcp/manager.js";
 const store = new PostgresStore(process.env.TEST_DATABASE_URL!);
 const worker = new Worker(
   new HarnessService(store, [], ["default"]),

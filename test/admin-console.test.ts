@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildAPI } from "../src/api.js";
-import { AgentDefaults, Fault, type Actor } from "../src/domain.js";
-import { HarnessService } from "../src/service.js";
-import { MemoryStore, PostgresStore, type Store } from "../src/store.js";
-import { metadata, snapshotState } from "../src/run-store.js";
-import { DemoSandbox, SandboxManager } from "../src/adapters/sandbox.js";
-import type { MCPManager } from "../src/adapters/mcp.js";
+import { buildAPI } from "../src/api/server.js";
+import { AgentDefaults, Fault, type Actor } from "../src/domain/model.js";
+import { HarnessService } from "../src/domain/service.js";
+import { MemoryStore, PostgresStore, type Store } from "../src/storage/store.js";
+import { metadata, snapshotState } from "../src/storage/run-store.js";
+import { DemoSandbox, SandboxManager } from "../src/sandbox/manager.js";
+import type { MCPManager } from "../src/mcp/manager.js";
 
 function fixture(mcp?: MCPManager, store: Store = new MemoryStore()) {
   const service = new HarnessService(
