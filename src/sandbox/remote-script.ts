@@ -1,4 +1,4 @@
-// Trusted code runs only in CubeSandbox, never in the Worker. Parameters are base64 JSON.
+// Trusted code runs only in the remote Sandbox, never in the Worker. Parameters are base64 JSON.
 export const remoteScript = String.raw`
 import os,sys,json,base64,hashlib,tempfile,subprocess,signal,uuid
 p=json.loads(base64.b64decode(sys.argv[1])); op=p['op']; a=p['args']; limit=262144
@@ -49,11 +49,13 @@ def write(v,content):
 # Fail closed when an older Cube ignores host-mount metadata or restores it rw.
 # Check the exact target, not merely the enclosing root filesystem.
 host_mounts=a.get('_hostSkillMounts',[])
-if host_mounts:
+if host_mounts or a.get('_requireWorkspaceMount',False):
  mounts={}
  with open('/proc/self/mountinfo') as f:
   for line in f:
    fields=line.split(); mounts[fields[4]]=fields[5].split(',')
+ if a.get('_requireWorkspaceMount',False) and (os.path.realpath(root)!=root or 'rw' not in mounts.get(root,[])):
+  raise SkillIntegrityError('WORKSPACE_MOUNT_UNCONFIRMED')
  for mount in host_mounts:
   if os.path.realpath(mount)!=mount or 'ro' not in mounts.get(mount,[]):
    raise SkillIntegrityError('SKILL_HOST_MOUNT_UNCONFIRMED')

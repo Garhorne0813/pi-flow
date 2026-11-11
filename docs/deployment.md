@@ -4,9 +4,9 @@
 
 ## Production startup / 生产启动
 
-Copy `.env.example` to `.env` and configure PostgreSQL, the model gateway, CubeSandbox, and authentication. Production validates required configuration and refuses startup rather than falling back to Demo. API and every Worker must share database, tenant grants, model settings, skill mappings, MCP endpoints, capacity policy, and usage pricing.
+Copy `.env.example` to `.env` and configure PostgreSQL, the model gateway, CubeSandbox or Aliyun Agent Sandbox 极速版, and authentication. Select `SANDBOX_PROVIDER=cube|aliyun`; [Aliyun configuration](aliyun-sandbox.md) uses E2B + OSS and does not require Cube variables. Production validates required configuration and refuses startup rather than falling back to Demo. API and every Worker must share database, tenant grants, model settings, skill mappings, MCP endpoints, capacity policy, and usage pricing.
 
-复制 `.env.example` 为 `.env`，配置 PostgreSQL、模型网关、CubeSandbox 和认证。生产配置缺失时拒绝启动，不回退到 Demo。API 与全部 Worker 必须使用相同数据库、租户授权、模型、技能映射、MCP Endpoint、容量策略与用量价格。
+复制 `.env.example` 为 `.env`，配置 PostgreSQL、模型网关、CubeSandbox 或阿里云极速版和认证。通过 `SANDBOX_PROVIDER=cube|aliyun` 选择；[阿里云接入](aliyun-sandbox.md)使用 E2B + OSS，无需 Cube 配置。生产配置缺失时拒绝启动，不回退到 Demo。API 与全部 Worker 必须使用相同数据库、租户授权、模型、技能映射、MCP Endpoint、容量策略与用量价格。
 
 ```bash
 cp .env.example .env
@@ -37,6 +37,10 @@ Isolated integration environments may explicitly set a `DEV_TOKEN` of at least 1
 `LLM_PROVIDER` / `LLM_MODEL_ID` 定义获批网关模型，使用 OpenAI Chat Completions 兼容协议。单次输出上限 4096 tokens，并受预算进一步约束。`USAGE_POLICY_JSON` 定义共享 Token/费用预算和版本化价格；估算不等于供应商账单。详见 [用量预算](usage-budgets.md)。
 
 ## Sandbox, skills, and MCP / 执行环境、技能与 MCP
+
+The Cube mount instructions below apply to `SANDBOX_PROVIDER=cube`. Aliyun requires separate OSS Skill publication; pause/snapshots and hostPath uploads are not supported by that adapter. See [Aliyun limits and live smoke test](aliyun-sandbox.md).
+
+以下 Cube 挂载说明适用于 `SANDBOX_PROVIDER=cube`。阿里云需单独发布 OSS Skill，当前适配器不支持暂停、快照和 hostPath 上传发布；详见[阿里云能力边界与真实账号冒烟](aliyun-sandbox.md)。
 
 Cube templates need Python 3, Bash, a non-root execution user without passwordless sudo, and workspace write access. Keep `/skills` empty without preinstalled/shared skills or extra skill mounts. Cube infrastructure must enforce storage durability, resource limits, and outbound network policy. `allowPublicTraffic=false` limits inbound access and does not establish outbound isolation. Validate these properties in the target cluster; see [integration findings](local-deployment.md).
 

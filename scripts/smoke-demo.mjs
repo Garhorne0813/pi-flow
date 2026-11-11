@@ -6,6 +6,7 @@ const child = spawn(process.execPath, ["dist/main.js"], {
   env: {
     ...process.env,
     HARNESS_MODE: "demo",
+    SANDBOX_PROVIDER: "demo",
     DEV_TOKEN: token,
     PORT: "18081",
     HOST: "127.0.0.1",

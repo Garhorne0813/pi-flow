@@ -15,7 +15,7 @@ HARNESS_MODE=demo DEV_TOKEN=replace-with-a-long-random-token npm start
 
 Demo 不需要数据库、模型服务或本地 shell 执行权限。Agent 使用内建示例，启动不读取 `config/`。文件保存在内存中。释放沙箱保留文件，重启 demo 进程则丢失内存数据。
 
-生产运行当前支持 Cube 持久卷；配置见 `.env.example`。先停止旧 API/Worker 并执行数据库迁移，再分别启动新 API 和 Worker；Agent 可直接通过管理 API 创建：
+生产运行支持 Cube 持久卷和阿里云极速版 E2B + OSS 动态挂载；通过 `SANDBOX_PROVIDER=cube|aliyun` 选择，配置见 `.env.example` 和 [阿里云接入说明](aliyun-sandbox.md)。先停止旧 API/Worker 并执行数据库迁移，再分别启动新 API 和 Worker；Agent 可直接通过管理 API 创建：
 
 ```sh
 npm run migrate:prod
@@ -66,7 +66,7 @@ npm run worker
 
 以下为明确未覆盖的目标，不应作为当前部署承诺：
 
-1. 阿里云 E2B / OSS、工作区 hostPath 存储、多会话租约、Provider 网络防火墙和模板全局覆盖。当前只支持 Cube / demo、持久卷 / memory；不支持的 provider、网络模式和多会话设置会在启动时拒绝。
+1. 工作区 hostPath 存储、多会话租约、按用户网络策略动态下发和模板全局覆盖。当前支持 Cube / aliyun / demo；阿里云使用 OSS 持久化，暂停、快照和本地 ZIP Skill 上传的云端发布尚不支持。阿里云可设置部署级出网规则，`SANDBOX_NETWORK_MODE` 仍只接受 `unmanaged`，不代表已实现用户级防火墙。不支持的 provider、网络模式和多会话设置会在启动时拒绝。
 2. 完整规范化的数据模型及横跨所有用户的原子平台预算。当前 Run/Session/Event/Skill/配置/定时任务已有独立表；工作区绑定、Todo/Interaction 和记忆计数仍使用用户状态文档，审计、Usage/资源记录和工作区运行投影已拆表。已有预算按用户分区执行，不能当作跨用户全局预算。
 3. 旧共享工作区配置的专门迁移工具、Skill 交付回滚与生产对账。Agent 草稿、发布历史与 Git 自动同步不属于当前设计。
 4. 调度的 jitter、misfire 策略、结束条件、全局交互容量预留；记忆的定期去重/归档/索引修复和完整删除/批量管理 API。

@@ -25,6 +25,7 @@ import { remote } from "./remote.js";
 import { assertLifecycleAvailable, assertLease } from "./lease-manager.js";
 export type { SandboxProvider } from "./provider.js";
 export { CubeProvider } from "./cube-provider.js";
+export { AliyunE2BProvider } from "./aliyun-provider.js";
 export { DemoSandbox } from "./demo-provider.js";
 // The recorded instance is gone; its traffic token must not follow a successor.
 function clearInstance(w: Workspace) {
@@ -1185,6 +1186,8 @@ export class SandboxManager {
     }
   }
   async pause(a: Actor, wid: string) {
+    if (this.provider.supportsPause === false)
+      throw new Fault(409, "SANDBOX_PAUSE_UNSUPPORTED");
     return this.managed(a, wid, "sandbox.pause", (w, owner) =>
       this.pauseInstance(a, w, owner),
     );
@@ -1259,7 +1262,10 @@ export class SandboxManager {
           continue;
         }
         const idle = now - w.sandboxLastUsedAt;
-        const release = idle >= this.policy.idleReleaseSeconds * 1000;
+        const release =
+          idle >= this.policy.idleReleaseSeconds * 1000 ||
+          (this.provider.supportsPause === false &&
+            idle >= this.policy.idlePauseSeconds * 1000);
         if (
           !release &&
           (idle < this.policy.idlePauseSeconds * 1000 ||
@@ -1271,7 +1277,7 @@ export class SandboxManager {
         try {
           const cutoff =
             now -
-            (release
+            (release && this.provider.supportsPause !== false
               ? this.policy.idleReleaseSeconds
               : this.policy.idlePauseSeconds) *
               1000;
@@ -1336,6 +1342,8 @@ export class SandboxManager {
     return r;
   }
   async createSnapshot(a: Actor, wid: string, name?: string) {
+    if (this.provider.supportsSnapshots === false)
+      throw new Fault(409, "SANDBOX_SNAPSHOT_UNSUPPORTED");
     return this.managed(
       a,
       wid,
@@ -1386,6 +1394,8 @@ export class SandboxManager {
     );
   }
   async deleteSnapshot(a: Actor, wid: string, snapshotId: string) {
+    if (this.provider.supportsSnapshots === false)
+      throw new Fault(409, "SANDBOX_SNAPSHOT_UNSUPPORTED");
     return this.managed(
       a,
       wid,
@@ -1464,6 +1474,8 @@ export class SandboxManager {
     }
   }
   async restoreSnapshot(a: Actor, wid: string, snapshotId: string) {
+    if (this.provider.supportsSnapshots === false)
+      throw new Fault(409, "SANDBOX_SNAPSHOT_UNSUPPORTED");
     return this.managed(
       a,
       wid,

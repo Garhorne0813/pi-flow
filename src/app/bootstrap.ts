@@ -24,15 +24,24 @@ import { MCPManager } from "../mcp/manager.js";
 import { DemoRuntime, PiRuntime } from "../execution/runtime.js";
 import { Worker } from "../execution/worker.js";
 import { SandboxPolicySchema } from "../sandbox/policy.js";
+import { AliyunE2BProvider, aliyunConfig } from "../sandbox/aliyun-provider.js";
 export async function bootstrap() {
   const mode = process.env.HARNESS_MODE ?? "production";
   if (!["demo", "production"].includes(mode))
     throw new Error("Invalid HARNESS_MODE");
   const demo = mode === "demo";
+  const selectedProvider =
+    process.env.SANDBOX_PROVIDER ?? (demo ? "demo" : "cube");
+  if (
+    !["demo", "cube", "aliyun"].includes(selectedProvider) ||
+    (demo ? selectedProvider !== "demo" : selectedProvider === "demo")
+  )
+    throw new Error(`Unsupported SANDBOX_PROVIDER: ${selectedProvider}`);
+  const aliyun = selectedProvider === "aliyun" ? aliyunConfig() : undefined;
   if (!demo && !process.env.DATABASE_URL)
     throw new Error("DATABASE_URL required");
   if (
-    !demo &&
+    selectedProvider === "cube" &&
     (!process.env.CUBE_API_URL ||
       !process.env.CUBE_TEMPLATE_ID ||
       !process.env.CUBE_API_KEY ||
@@ -87,6 +96,13 @@ export async function bootstrap() {
   const skillVolumes = z
     .record(z.string(), SkillVolumeSchema)
     .parse(JSON.parse(process.env.SKILL_VOLUMES_JSON ?? "{}"));
+  if (aliyun && Object.keys(skillVolumes).length)
+    throw new Error(
+      "Aliyun uses ALIYUN_SKILLS_JSON; remove Cube SKILL_VOLUMES_JSON bindings",
+    );
+  for (const skill of Object.values(aliyun?.skills ?? {}))
+    if (!Object.hasOwn(bundles, skill.bundle))
+      throw new Error("Unknown Aliyun skill bundle");
   validateSkillBindings(skillVolumes, hostSkillRoots);
   for (const binding of Object.values(skillVolumes))
     if ("hostPath" in binding) await validateHostSkillSource(binding.hostPath);
@@ -107,22 +123,17 @@ export async function bootstrap() {
     .parse(JSON.parse(process.env.MCP_ENDPOINTS_JSON ?? "{}"));
 
   const grants = undefined;
-  const selectedProvider =
-    process.env.SANDBOX_PROVIDER ?? (demo ? "demo" : "cube");
-  if (
-    !["demo", "cube"].includes(selectedProvider) ||
-    (!demo && selectedProvider === "demo")
-  )
-    throw new Error(`Unsupported SANDBOX_PROVIDER: ${selectedProvider}`);
   const provider = demo
     ? new DemoSandbox()
-    : new CubeProvider(
-        skillVolumes,
-        process.env.CUBE_EXEC_USER!,
-        process.env.CUBE_VOLUME_DRIVER!,
-        hostSkillRoots,
-        uploadRoot,
-      );
+    : aliyun
+      ? new AliyunE2BProvider(aliyun)
+      : new CubeProvider(
+          skillVolumes,
+          process.env.CUBE_EXEC_USER!,
+          process.env.CUBE_VOLUME_DRIVER!,
+          hostSkillRoots,
+          uploadRoot,
+        );
   const service = new PersonalService(
     store,
     registry,

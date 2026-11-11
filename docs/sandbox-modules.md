@@ -1,10 +1,12 @@
 # Sandbox 模块边界
 
 `src/sandbox/manager.ts` 保留 SandboxManager 公共 API 和跨 Store/Provider 的编排，
-并继续 re-export CubeProvider、DemoSandbox 与 SandboxProvider。内部导入已统一迁移到该路径。
+并继续 re-export CubeProvider、AliyunE2BProvider、DemoSandbox 与 SandboxProvider。内部导入已统一迁移到该路径。
 
 - sandbox/provider.ts：Provider 契约；不访问 Store，不承担容量或租约决策。
 - sandbox/cube-provider.ts：Cube SDK、挂载和受控远程工具适配。
+- sandbox/aliyun-provider.ts：E2B SDK 接入阿里云极速版、OSS 工作区及只读 Skill 挂载，显式拒绝未实现的暂停/快照。
+- sandbox/remote-tool.ts：两家 Provider 共用的远程命令编码和工具结果/错误解析。
 - sandbox/demo-provider.ts：内存 Fake；不执行本地命令，测试可确定性替换 Provider。
 - sandbox/remote.ts：有界等待、取消、迟到结果回调；不自动重试远端操作。
 - sandbox/lease-manager.ts：纯租约/生命周期资格判断；不发起 SDK 请求。

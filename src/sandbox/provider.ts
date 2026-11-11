@@ -9,6 +9,8 @@ export type CreatedSandbox = {
 export interface SandboxProvider {
   readonly requiresTrafficToken?: boolean;
   readonly supportsSnapshotClone?: boolean;
+  readonly supportsPause?: boolean;
+  readonly supportsSnapshots?: boolean;
   scope(bundle: string, skills: readonly Skill[]): string;
   createVolume(name: string): Promise<string>;
   create(
