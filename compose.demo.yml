@@ -22,6 +22,7 @@ services:
       - ./migrations/013_personal_dispatchable_sessions.sql:/docker-entrypoint-initdb.d/013.sql:ro
       - ./migrations/014_personal_control_paths.sql:/docker-entrypoint-initdb.d/014.sql:ro
       - ./migrations/015_personal_legacy_tasks_stats.sql:/docker-entrypoint-initdb.d/015.sql:ro
+      - ./migrations/016_personal_evaluations.sql:/docker-entrypoint-initdb.d/016.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U harness -d harness"]
       interval: 2s
