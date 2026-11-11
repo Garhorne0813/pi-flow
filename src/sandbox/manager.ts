@@ -25,6 +25,7 @@ import { remote } from "./remote.js";
 import { assertLifecycleAvailable, assertLease } from "./lease-manager.js";
 export type { SandboxProvider } from "./provider.js";
 export { CubeProvider } from "./cube-provider.js";
+export { AliyunE2BProvider } from "./aliyun-provider.js";
 export { DemoSandbox } from "./demo-provider.js";
 // The recorded instance is gone; its traffic token must not follow a successor.
 function clearInstance(w: Workspace) {
@@ -81,6 +82,7 @@ export class SandboxManager {
             "connect",
             "kill",
             "execute",
+            "prepare",
           ].includes(String(key))
         )
           return value.bind(target);
@@ -515,6 +517,23 @@ export class SandboxManager {
       }
       if (!sid) {
         await assertOwned();
+        if (this.provider.prepare) {
+          try {
+            await this.remote(
+              () =>
+                this.provider.prepare!(vid!, bundle, skills, owner, {
+                  tenantId: a.tenantId,
+                  workspaceId: wid,
+                }),
+              signal,
+              undefined,
+              125000,
+            );
+          } catch (error) {
+            throw new SandboxCreationError(error, true);
+          }
+          await assertOwned();
+        }
         await this.store.tx(a.tenantId, (s) =>
           audit(
             s,
@@ -528,7 +547,14 @@ export class SandboxManager {
           () => {
             instanceTouched = true;
             creationStarted = true;
-            return this.provider.create(vid!, bundle, skills, undefined, owner);
+            return this.provider.create(
+              vid!,
+              bundle,
+              skills,
+              undefined,
+              owner,
+              { tenantId: a.tenantId, workspaceId: wid },
+            );
           },
           signal,
           (created) => this.lateSandbox(a, wid, owner, created.sandboxId),
@@ -665,48 +691,58 @@ export class SandboxManager {
     workspaceOnly = false,
   ) {
     signal?.throwIfAborted();
-    const { skills, hostUploads, trafficToken } = await this.store.readMetadata(
-      a.tenantId,
-      ["skills", "workspaces", ...(workspaceOnly ? ["policy" as const] : [])],
-      (s) => {
-        if (workspaceOnly) {
-          workspace(s, a, wid, true);
-          if (!this.canUseBundle(bundle, a.tenantId))
-            throw new Fault(403, "BUNDLE_NOT_GRANTED");
-          if (
-            !["read", "ls", "grep", "find"].includes(op) &&
-            s.policy?.disabledTools.some((t) =>
-              [
-                op,
-                "remote_" + op,
-                "write",
-                "remote_write",
-                "memory.write",
-              ].includes(t),
+    const { skills, hostUploads, ossUploads, trafficToken } =
+      await this.store.readMetadata(
+        a.tenantId,
+        ["skills", "workspaces", ...(workspaceOnly ? ["policy" as const] : [])],
+        (s) => {
+          if (workspaceOnly) {
+            workspace(s, a, wid, true);
+            if (!this.canUseBundle(bundle, a.tenantId))
+              throw new Fault(403, "BUNDLE_NOT_GRANTED");
+            if (
+              !["read", "ls", "grep", "find"].includes(op) &&
+              s.policy?.disabledTools.some((t) =>
+                [
+                  op,
+                  "remote_" + op,
+                  "write",
+                  "remote_write",
+                  "memory.write",
+                ].includes(t),
+              )
             )
-          )
-            throw new Fault(403, "TOOL_DISABLED");
-        }
-        return {
-          skills: skillIds.map((id) => {
-            const skill = s.skills[id];
-            if (!skill?.enabled || skill.bundle !== bundle)
-              throw new Fault(403, "SKILL_DENIED");
-            return { path: skill.path, digest: skill.digest };
-          }),
-          hostUploads: skillIds
-            .map((id) => s.skills[id]!)
-            .filter((skill) => skill.hostUpload)
-            .map(({ id, bundle, path, hostUpload }) => ({
-              id,
-              bundle,
-              path,
-              hostUpload,
-            })),
-          trafficToken: s.workspaces[wid]?.sandboxTrafficToken,
-        };
-      },
-    );
+              throw new Fault(403, "TOOL_DISABLED");
+          }
+          return {
+            skills: skillIds.map((id) => {
+              const skill = s.skills[id];
+              if (!skill?.enabled || skill.bundle !== bundle)
+                throw new Fault(403, "SKILL_DENIED");
+              return { path: skill.path, digest: skill.digest };
+            }),
+            hostUploads: skillIds
+              .map((id) => s.skills[id]!)
+              .filter((skill) => skill.hostUpload)
+              .map(({ id, bundle, path, hostUpload }) => ({
+                id,
+                bundle,
+                path,
+                hostUpload,
+              })),
+            trafficToken: s.workspaces[wid]?.sandboxTrafficToken,
+            ossUploads: skillIds
+              .map((id) => s.skills[id]!)
+              .filter((skill) => skill.ossUpload)
+              .map(({ id, bundle, path, ossUpload }) => ({
+                id,
+                bundle,
+                path,
+                ossUpload,
+              })),
+          };
+        },
+      );
     // Fresh Run and registry snapshot after preparation/metadata reads,
     // immediately before dispatch. No historical event scan on this path.
     if (authorize) await this.store.readRun(a.tenantId, owner, authorize);
@@ -720,6 +756,7 @@ export class SandboxManager {
         _skillIds: [...skillIds],
         _skillManifests: skills,
         _skillHostUploads: hostUploads,
+        _skillOssUploads: ossUploads,
       },
       trafficToken,
     );
@@ -1185,6 +1222,8 @@ export class SandboxManager {
     }
   }
   async pause(a: Actor, wid: string) {
+    if (this.provider.supportsPause === false)
+      throw new Fault(409, "SANDBOX_PAUSE_UNSUPPORTED");
     return this.managed(a, wid, "sandbox.pause", (w, owner) =>
       this.pauseInstance(a, w, owner),
     );
@@ -1259,7 +1298,10 @@ export class SandboxManager {
           continue;
         }
         const idle = now - w.sandboxLastUsedAt;
-        const release = idle >= this.policy.idleReleaseSeconds * 1000;
+        const release =
+          idle >= this.policy.idleReleaseSeconds * 1000 ||
+          (this.provider.supportsPause === false &&
+            idle >= this.policy.idlePauseSeconds * 1000);
         if (
           !release &&
           (idle < this.policy.idlePauseSeconds * 1000 ||
@@ -1271,7 +1313,7 @@ export class SandboxManager {
         try {
           const cutoff =
             now -
-            (release
+            (release && this.provider.supportsPause !== false
               ? this.policy.idleReleaseSeconds
               : this.policy.idlePauseSeconds) *
               1000;
@@ -1336,6 +1378,8 @@ export class SandboxManager {
     return r;
   }
   async createSnapshot(a: Actor, wid: string, name?: string) {
+    if (this.provider.supportsSnapshots === false)
+      throw new Fault(409, "SANDBOX_SNAPSHOT_UNSUPPORTED");
     return this.managed(
       a,
       wid,
@@ -1386,6 +1430,8 @@ export class SandboxManager {
     );
   }
   async deleteSnapshot(a: Actor, wid: string, snapshotId: string) {
+    if (this.provider.supportsSnapshots === false)
+      throw new Fault(409, "SANDBOX_SNAPSHOT_UNSUPPORTED");
     return this.managed(
       a,
       wid,
@@ -1464,6 +1510,8 @@ export class SandboxManager {
     }
   }
   async restoreSnapshot(a: Actor, wid: string, snapshotId: string) {
+    if (this.provider.supportsSnapshots === false)
+      throw new Fault(409, "SANDBOX_SNAPSHOT_UNSUPPORTED");
     return this.managed(
       a,
       wid,

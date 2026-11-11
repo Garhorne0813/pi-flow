@@ -1,0 +1,90 @@
+import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
+import {
+  AliyunE2BProvider,
+  aliyunConfig,
+} from "../src/sandbox/aliyun-provider.js";
+import { WorkspaceSmokeInstances } from "./lib/aliyun-workspace-smoke.js";
+import { interruptionProbe, assertSigkill } from "./lib/aliyun-interruption.js";
+
+// Explicit opt-in: creates three billable instances, at most two concurrently.
+// Uses a unique OSS workspace and the real tool protocol, including fsync.
+const provider = new AliyunE2BProvider(aliyunConfig());
+const probe = randomUUID();
+const workspace = `ws-smoke-${probe}`;
+const volume = await provider.createVolume(workspace);
+const instances = new WorkspaceSmokeInstances(provider, {
+  operation: `smoke-${probe}`,
+  workspace,
+  volumeId: volume,
+});
+const start = () => instances.start();
+const stop = (sid: string) => instances.stop(sid);
+const read = async (sid: string) =>
+  (await provider.execute(sid, "read", { path: "probe.txt" })) as {
+    text: string;
+    sha256: string;
+  };
+const interrupt = async (sid: string, replace: boolean) => {
+  const outcome = (await provider.execute(sid, "bash", {
+    command: interruptionProbe(replace).command,
+    timeoutSeconds: 10,
+  })) as { exitCode: number; timedOut: boolean; stdout: string };
+  assertSigkill(outcome, replace);
+};
+try {
+  const first = await start();
+  const content = `persistence-${probe}`;
+  await provider.execute(first, "write", { path: "probe.txt", content });
+  const second = await start();
+  assert.equal(
+    (await read(second)).text,
+    content,
+    "second instance must see the write",
+  );
+  const initial = await read(first);
+  await provider.execute(first, "edit", {
+    path: "probe.txt",
+    expectedHash: initial.sha256,
+    oldText: content,
+    newText: "edited",
+  });
+  assert.equal(
+    (await read(second)).text,
+    "edited",
+    "second instance must see replacement",
+  );
+  await provider.execute(first, "delete", { path: "probe.txt" });
+  await assert.rejects(read(second), { code: "FILE_NOT_FOUND" });
+  await provider.execute(first, "write", {
+    path: "probe.txt",
+    content: "stable-before-interruption",
+  });
+  await interrupt(first, false);
+  assert.equal(
+    (await read(first)).text,
+    "stable-before-interruption",
+    "kill before rename must preserve old target",
+  );
+  await interrupt(first, true);
+  assert.equal(
+    (await read(second)).text,
+    "committed-after-interruption",
+    "other instance must see the replaced target after writer SIGKILL",
+  );
+  await stop(first);
+  await stop(second);
+  const recreated = await start();
+  assert.equal(
+    (await read(recreated)).text,
+    "committed-after-interruption",
+    "data must survive releasing all instances",
+  );
+  await provider.execute(recreated, "delete", { path: "probe.txt" });
+} finally {
+  await instances.cleanup();
+  await provider.destroyVolume(volume);
+}
+console.log(
+  "Aliyun OSS write/edit/delete / cross-instance visibility / writer SIGKILL before-after rename / release-recreate persistence: passed",
+);

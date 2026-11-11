@@ -18,7 +18,7 @@
 
 ---
 
-Pi-Flow runs agents on Pi and executes remote tools through CubeSandbox. Connect your own chat client, while administrators manage versioned agents, skills, and MCP services through the built-in console.
+Pi-Flow runs agents on Pi and executes remote tools through CubeSandbox or Aliyun Agent Sandbox 极速版. Connect your own chat client, while administrators manage versioned agents, skills, and MCP services through the built-in console.
 
 The current release is a **0.1 backend integration baseline**. Demo uses a simulated model so you can try the API without external services; real models and remote execution require the corresponding services. Enterprise production acceptance is still pending.
 
@@ -29,7 +29,7 @@ The current release is a **0.1 backend integration baseline**. Demo uses a simul
 | Streaming conversations | Persistent sessions, message and tool events, Todos, SSE replay, idempotent submissions, and cancellation |
 | Human interaction | Approval before writes, edits, shell commands, and MCP calls; questions and resumable answers |
 | Shared workspaces | Owner/editor/viewer access, independent persistent volumes, and a workspace file API |
-| Remote execution | CubeSandbox file and Bash tools, capacity controls, pause/resume, and idle reclamation |
+| Remote execution | CubeSandbox or Aliyun file and Bash tools, capacity controls and idle reclamation; Cube pause/resume and snapshots |
 | Versioned agents | Immutable configurations, logical agent activation, and pinned versions for task chains |
 | Extensibility | Read-only versioned skills, allowlisted Streamable HTTP MCP tools, and subagent delegation |
 | Administration and operations | UCS OIDC tenant isolation, budgets and usage, audit records, metrics, and Worker health |
@@ -136,7 +136,7 @@ See the [API reference](docs/api.md) for workspace sharing, history and Todos, f
 
 The Agent editor groups logical versions, separates configuration into keyboard-navigable panels, and shows a summary and diff before publication. Unsaved drafts are protected when navigating or changing connections. See the [delivery plan](docs/agent-console-roadmap.md) and [Studio isolation RFC](docs/agent-studio-rfc.md) for subsequent increments.
 
-Skills supports uploading a single-Skill ZIP into shared hostPath storage, automatically registering an immutable version. The API needs write access to the configured upload namespace; see [deployment](docs/deployment.md#skill-zip-uploads--技能-zip-上传).
+Skills supports uploading a single-Skill ZIP into shared hostPath storage (Cube) or OSS (Aliyun), automatically registering an immutable version. The API needs publication access to the configured upload storage; see [deployment](docs/deployment.md#skill-zip-uploads--技能-zip-上传).
 
 After starting the API, open **http://127.0.0.1:8080/admin/ui** (`/admin/agents/ui` remains supported). Demo accepts `DEV_TOKEN`; production uses a UCS JWT with the `harness-admin` role. No separate frontend build is needed.
 
@@ -146,7 +146,7 @@ See the [management console guide](docs/admin-console.md) for operations, token 
 
 ## Connect real services
 
-Production requires PostgreSQL, a model gateway, CubeSandbox, and UCS OIDC or an explicitly configured isolated development identity. Copy [.env.example](.env.example), fill in your deployment settings, then run:
+Production requires PostgreSQL, a model gateway, CubeSandbox or Aliyun Agent Sandbox 极速版, and UCS OIDC or an explicitly configured isolated development identity. Select `SANDBOX_PROVIDER=cube|aliyun`; Aliyun uses E2B + OSS and has separate [configuration and capability limits](docs/aliyun-sandbox.md). Copy [.env.example](.env.example), fill in your deployment settings, then run:
 
 ```bash
 cp .env.example .env

@@ -1,6 +1,6 @@
 import { bootstrap } from "./app/bootstrap.js";
 import { telemetry } from "./observability/telemetry.js";
-const c = await bootstrap();
+const c = await bootstrap("worker");
 process.once("SIGTERM", () => {
   void c.worker.stop().catch((e) => {
     telemetry.error("worker_shutdown", e, { workerId: c.worker.owner });

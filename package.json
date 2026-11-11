@@ -15,6 +15,9 @@
     "check": "tsc --noEmit",
     "migrate": "tsx src/migrate.ts",
     "smoke": "node scripts/smoke-demo.mjs",
+    "smoke:aliyun": "tsx scripts/smoke-aliyun.ts",
+    "smoke:aliyun:skill": "tsx scripts/smoke-aliyun-skill.ts",
+    "inspect:aliyun:collections": "tsx scripts/inspect-aliyun-collections.ts",
     "format": "prettier --write src test scripts",
     "test:deepseek": "node scripts/smoke-deepseek.mjs",
     "test:deepseek:capabilities": "node scripts/smoke-deepseek-capabilities.mjs",
@@ -33,7 +36,9 @@
     "@earendil-works/pi-coding-agent": "file:vendor/pi-coding-agent-0.99.2-harness-security.tgz",
     "@fastify/multipart": "10.1.3",
     "@modelcontextprotocol/sdk": "1.32.1",
+    "ali-oss": "6.23.0",
     "cron-parser": "5.4.0",
+    "e2b": "2.31.0",
     "fastify": "5.12.8",
     "jose": "6.1.0",
     "pg": "8.16.3",
@@ -43,6 +48,7 @@
     "zod": "4.6.7"
   },
   "devDependencies": {
+    "@types/ali-oss": "6.23.4",
     "@types/node": "24.7.2",
     "@types/pg": "8.15.5",
     "@types/yauzl": "3.4.0",

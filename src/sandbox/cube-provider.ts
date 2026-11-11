@@ -18,7 +18,7 @@ import {
   DEFAULT_HOST_SKILL_ROOTS,
   type SkillVolume,
 } from "./skill-mounts.js";
-import { remoteScript } from "./remote-script.js";
+import { runRemoteTool } from "./remote-tool.js";
 import { SandboxCreationError, type SandboxProvider } from "./provider.js";
 export class CubeProvider implements SandboxProvider {
   readonly requiresTrafficToken = true;
@@ -53,7 +53,9 @@ export class CubeProvider implements SandboxProvider {
       throw e;
     }
   }
-  private binding(skill: Pick<Skill, "id" | "bundle" | "path" | "hostUpload">) {
+  private binding(
+    skill: Pick<Skill, "id" | "bundle" | "path" | "hostUpload" | "ossUpload">,
+  ) {
     return (
       uploadedSkillBinding(skill, this.uploadRoot) ??
       (Object.hasOwn(this.skillVolumes, skill.id)
@@ -238,35 +240,16 @@ export class CubeProvider implements SandboxProvider {
     op: string,
     args: Record<string, unknown>,
   ) {
-    const script = Buffer.from(remoteScript).toString("base64");
-    const params = Buffer.from(JSON.stringify({ op, args })).toString("base64");
-    const cmd = `python3 -c "import base64;exec(base64.b64decode('${script}'))" '${params}'`;
-    const result = await sb.commands.run(cmd, {
-      user: this.user,
-      cwd: "/workspace",
-      timeoutMs: 130000,
-    });
-    if (result.exitCode !== 0) {
-      for (const code of [
-        "SKILL_HOST_MOUNT_UNCONFIRMED",
-        "SKILL_HOST_SOURCE_UNSAFE",
-        "SKILL_DIGEST_MISMATCH",
-        "SKILL_IDENTITY_UNCONFIRMED",
-      ])
-        if (result.stderr.includes(code)) throw new Fault(409, code);
-      if (result.stderr.includes("FileNotFoundError:"))
-        throw new Fault(404, "FILE_NOT_FOUND");
-      for (const code of ["EDIT_CONFLICT", "EDIT_NOT_UNIQUE"])
-        if (result.stderr.includes(code)) throw new Fault(409, code);
-      if (result.stderr.includes("PATH_DENIED"))
-        throw new Fault(403, "PATH_DENIED");
-      throw new Fault(502, "REMOTE_TOOL_FAILED");
-    }
-    try {
-      return JSON.parse(result.stdout);
-    } catch {
-      throw new Fault(502, "INVALID_SANDBOX_RESULT");
-    }
+    return runRemoteTool(
+      (command) =>
+        sb.commands.run(command, {
+          user: this.user,
+          cwd: "/workspace",
+          timeoutMs: 130000,
+        }),
+      op,
+      args,
+    );
   }
   async kill(sid: string) {
     try {

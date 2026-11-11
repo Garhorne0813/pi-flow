@@ -4,9 +4,9 @@
 
 ## Production startup / 生产启动
 
-Copy `.env.example` to `.env` and configure PostgreSQL, the model gateway, CubeSandbox, and authentication. Production validates required configuration and refuses startup rather than falling back to Demo. API and every Worker must share database, tenant grants, model settings, skill mappings, MCP endpoints, capacity policy, and usage pricing.
+Copy `.env.example` to `.env` and configure PostgreSQL, the model gateway, CubeSandbox or Aliyun Agent Sandbox 极速版, and authentication. Select `SANDBOX_PROVIDER=cube|aliyun`; [Aliyun configuration](aliyun-sandbox.md) uses E2B + OSS and does not require Cube variables. Production validates required configuration and refuses startup rather than falling back to Demo. API and every Worker must share database, tenant grants, model settings, skill mappings, MCP endpoints, capacity policy, and usage pricing.
 
-复制 `.env.example` 为 `.env`，配置 PostgreSQL、模型网关、CubeSandbox 和认证。生产配置缺失时拒绝启动，不回退到 Demo。API 与全部 Worker 必须使用相同数据库、租户授权、模型、技能映射、MCP Endpoint、容量策略与用量价格。
+复制 `.env.example` 为 `.env`，配置 PostgreSQL、模型网关、CubeSandbox 或阿里云极速版和认证。通过 `SANDBOX_PROVIDER=cube|aliyun` 选择；[阿里云接入](aliyun-sandbox.md)使用 E2B + OSS，无需 Cube 配置。生产配置缺失时拒绝启动，不回退到 Demo。API 与全部 Worker 必须使用相同数据库、租户授权、模型、技能映射、MCP Endpoint、容量策略与用量价格。
 
 ```bash
 cp .env.example .env
@@ -37,6 +37,10 @@ Isolated integration environments may explicitly set a `DEV_TOKEN` of at least 1
 `LLM_PROVIDER` / `LLM_MODEL_ID` 定义获批网关模型，使用 OpenAI Chat Completions 兼容协议。单次输出上限 4096 tokens，并受预算进一步约束。`USAGE_POLICY_JSON` 定义共享 Token/费用预算和版本化价格；估算不等于供应商账单。详见 [用量预算](usage-budgets.md)。
 
 ## Sandbox, skills, and MCP / 执行环境、技能与 MCP
+
+The Cube mount instructions below apply to `SANDBOX_PROVIDER=cube`. Aliyun publishes console ZIP uploads directly to OSS when API publication credentials are configured; pause/snapshots and existing Cube hostPath packages are not supported by that adapter. See [Aliyun limits and live smoke test](aliyun-sandbox.md).
+
+以下 Cube 挂载说明适用于 `SANDBOX_PROVIDER=cube`。阿里云在 API 配置发布凭证后可将控制台 ZIP 自动发布到 OSS；当前适配器不支持暂停、快照或直接复用旧 Cube hostPath 包；详见[阿里云能力边界与真实账号冒烟](aliyun-sandbox.md)。
 
 Cube templates need Python 3, Bash, a non-root execution user without passwordless sudo, and workspace write access. Keep `/skills` empty without preinstalled/shared skills or extra skill mounts. Cube infrastructure must enforce storage durability, resource limits, and outbound network policy. `allowPublicTraffic=false` limits inbound access and does not establish outbound isolation. Validate these properties in the target cluster; see [integration findings](local-deployment.md).
 
@@ -179,6 +183,10 @@ For restricted proxy environments, configure Node proxy/CA settings such as `NOD
 受限代理环境可配置 `NODE_USE_ENV_PROXY=1`、`NODE_EXTRA_CA_CERTS`；Docker 构建可传入 `--secret id=proxy_ca,src=...`，保持 TLS 校验。SDK 来源和可复现打包见 [vendor/README.md](../vendor/README.md)。CI、基准与剩余验收见 [ci.md](ci.md)、[read-benchmark.md](read-benchmark.md) 和 [acceptance.md](acceptance.md)。
 
 ## Skill ZIP uploads / 技能 ZIP 上传
+
+For `SANDBOX_PROVIDER=aliyun`, configure OSS publication credentials on the API; ZIP uploads go directly to OSS and require no host directory or per-upload mapping. See [OSS publication configuration and failure cleanup](aliyun-sandbox.md). The shared-host instructions below apply to Cube/demo.
+
+`SANDBOX_PROVIDER=aliyun` 时在 API 配置 OSS 发布凭证，ZIP 将直接发布到 OSS，无需宿主目录或逐包映射；见[发布配置与失败清理](aliyun-sandbox.md)。以下共享宿主目录配置适用于 Cube/demo。
 
 The console can upload a ZIP containing one Skill and register it immediately. `SKILL_UPLOAD_ROOT` defaults to the first entry of `SKILL_HOST_ROOTS_JSON` (`/data/agent-skills` by default); an override must be equal to or inside an approved root. `[]` disables uploading. Configure the same root in every API and Worker, and expose the **same shared filesystem at the same canonical path** to the API, Workers and eligible Cubelets. This feature does not upload to an opaque remote node-local directory.
 

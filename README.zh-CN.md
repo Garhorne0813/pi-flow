@@ -18,7 +18,7 @@
 
 ---
 
-Pi-Flow 基于 Pi 运行智能体，使用 CubeSandbox 执行远程工具。开发者可接入自己的聊天客户端，管理员通过内置控制台管理版本化智能体、Skills 与 MCP 服务。
+Pi-Flow 基于 Pi 运行智能体，使用 CubeSandbox 或阿里云 Agent Sandbox 极速版执行远程工具。开发者可接入自己的聊天客户端，管理员通过内置控制台管理版本化智能体、Skills 与 MCP 服务。
 
 当前为 **0.1 后端集成基线**。Demo 使用模拟模型，无需外部服务即可体验接口流程；真实模型和远程执行需要部署相应服务。企业生产验收仍待完成。
 
@@ -29,7 +29,7 @@ Pi-Flow 基于 Pi 运行智能体，使用 CubeSandbox 执行远程工具。开�
 | 流式对话 | 持久化会话、消息和工具事件、Todo、SSE 回放、幂等提交与任务取消 |
 | 人工参与 | 写入、编辑、Shell 和 MCP 调用前审批，提问与回答后续跑 |
 | 共享工作区 | owner / editor / viewer 权限，独立持久卷与工作区文件接口 |
-| 远程执行 | CubeSandbox 文件与 Bash 工具，容量控制、暂停、恢复及空闲回收 |
+| 远程执行 | CubeSandbox 或阿里云文件与 Bash 工具、容量控制及空闲回收；Cube 支持暂停、恢复和快照 |
 | 版本化智能体 | 不可变版本、逻辑 Agent 生效版本切换，任务链固定执行版本 |
 | 扩展能力 | 只读挂载的版本化 Skills、Streamable HTTP MCP 白名单与子智能体委派 |
 | 管理与运维 | UCS OIDC 租户隔离、预算与用量、审计、指标和 Worker 健康状态 |
@@ -138,13 +138,13 @@ Agent 编辑器按逻辑 Agent 分组版本，使用支持键盘操作的配置�
 
 服务启动后访问 **http://127.0.0.1:8080/admin/ui**（兼容 `/admin/agents/ui`）。Demo 使用 `DEV_TOKEN`；生产使用具备 `harness-admin` 角色的 UCS JWT。控制台无需独立前端构建。
 
-可管理 Agent 版本与访问范围、Skills、MCP 服务和子 Agent 委派，查看部署能力并保存新 Agent 草稿的租户默认值。部署凭证、卷、Endpoint 与权限上限仍由服务端配置。 Skills 支持上传单 Skill ZIP，自动安装到共享 hostPath 并登记不可变版本；部署需为 API 配置上传目录写权限。
+可管理 Agent 版本与访问范围、Skills、MCP 服务和子 Agent 委派，查看部署能力并保存新 Agent 草稿的租户默认值。部署凭证、卷、Endpoint 与权限上限仍由服务端配置。 Skills 支持上传单 Skill ZIP，自动发布到 Cube 共享 hostPath 或阿里云 OSS 并登记不可变版本；部署需为 API 配置上传存储权限。
 
 操作细节、令牌处理与配置冲突规则见 [管理控制台文档](docs/admin-console.zh-CN.md)。
 
 ## 接入真实服务
 
-生产模式需要 PostgreSQL、模型网关、CubeSandbox，以及 UCS OIDC 或显式配置的隔离开发身份。复制 [.env.example](.env.example)，填写部署配置后运行：
+生产模式需要 PostgreSQL、模型网关、CubeSandbox 或阿里云 Agent Sandbox 极速版，以及 UCS OIDC 或显式配置的隔离开发身份。通过 `SANDBOX_PROVIDER=cube|aliyun` 选择；阿里云使用 E2B + OSS，详见[配置与能力边界](docs/aliyun-sandbox.md)。复制 [.env.example](.env.example)，填写部署配置后运行：
 
 ```bash
 cp .env.example .env

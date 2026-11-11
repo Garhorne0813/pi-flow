@@ -7,8 +7,17 @@ export type CreatedSandbox = {
   trafficToken?: string;
 };
 export interface SandboxProvider {
+  prepare?(
+    volume: string,
+    bundle: string,
+    skills: readonly Skill[],
+    operation?: string,
+    context?: { tenantId: string; workspaceId: string },
+  ): Promise<void>;
   readonly requiresTrafficToken?: boolean;
   readonly supportsSnapshotClone?: boolean;
+  readonly supportsPause?: boolean;
+  readonly supportsSnapshots?: boolean;
   scope(bundle: string, skills: readonly Skill[]): string;
   createVolume(name: string): Promise<string>;
   create(
@@ -17,6 +26,7 @@ export interface SandboxProvider {
     skills: readonly Skill[],
     snapshotId?: string,
     operation?: string,
+    context?: { tenantId: string; workspaceId: string },
   ): Promise<CreatedSandbox>;
   connect(sandboxId: string): Promise<void>;
   execute(

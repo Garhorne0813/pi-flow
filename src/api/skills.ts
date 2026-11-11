@@ -32,7 +32,7 @@ export function registerSkillsRoutes({
         throw new Fault(
           503,
           "SKILL_UPLOAD_DISABLED",
-          "Host Skill uploads are not configured",
+          "Skill upload storage is not configured",
         );
       return skillPackages.withSlot(async () => {
         if (!req.isMultipart())
@@ -106,8 +106,10 @@ export function registerSkillsRoutes({
               "skill.upload",
               input.id,
               JSON.stringify({
-                files: prepared.skill.hostUpload!.files,
-                bytes: prepared.skill.hostUpload!.bytes,
+                files: (prepared.skill.hostUpload ?? prepared.skill.ossUpload)!
+                  .files,
+                bytes: (prepared.skill.hostUpload ?? prepared.skill.ossUpload)!
+                  .bytes,
               }),
             );
             metadataMayHaveCommitted = true;

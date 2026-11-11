@@ -24,15 +24,35 @@ import { MCPManager } from "../mcp/manager.js";
 import { DemoRuntime, PiRuntime } from "../execution/runtime.js";
 import { Worker } from "../execution/worker.js";
 import { SandboxPolicySchema } from "../sandbox/policy.js";
-export async function bootstrap() {
+import { AliyunE2BProvider, aliyunConfig } from "../sandbox/aliyun-provider.js";
+import { OssSkillPackages, ossPackageWriter } from "../skills/oss-packages.js";
+import { ossClient } from "../skills/oss-packages.js";
+import {
+  collectionIO,
+  OssSkillCollections,
+} from "../skills/oss-collections.js";
+import { collectionService } from "../skills/collection-service.js";
+import {
+  remoteCollectionResolver,
+  type CollectionResolver,
+} from "../skills/collection.js";
+export async function bootstrap(role: "api" | "worker" = "api") {
   const mode = process.env.HARNESS_MODE ?? "production";
   if (!["demo", "production"].includes(mode))
     throw new Error("Invalid HARNESS_MODE");
   const demo = mode === "demo";
+  const selectedProvider =
+    process.env.SANDBOX_PROVIDER ?? (demo ? "demo" : "cube");
+  if (
+    !["demo", "cube", "aliyun"].includes(selectedProvider) ||
+    (demo ? selectedProvider !== "demo" : selectedProvider === "demo")
+  )
+    throw new Error(`Unsupported SANDBOX_PROVIDER: ${selectedProvider}`);
+  const aliyun = selectedProvider === "aliyun" ? aliyunConfig() : undefined;
   if (!demo && !process.env.DATABASE_URL)
     throw new Error("DATABASE_URL required");
   if (
-    !demo &&
+    selectedProvider === "cube" &&
     (!process.env.CUBE_API_URL ||
       !process.env.CUBE_TEMPLATE_ID ||
       !process.env.CUBE_API_KEY ||
@@ -87,6 +107,13 @@ export async function bootstrap() {
   const skillVolumes = z
     .record(z.string(), SkillVolumeSchema)
     .parse(JSON.parse(process.env.SKILL_VOLUMES_JSON ?? "{}"));
+  if (aliyun && Object.keys(skillVolumes).length)
+    throw new Error(
+      "Aliyun uses ALIYUN_SKILLS_JSON; remove Cube SKILL_VOLUMES_JSON bindings",
+    );
+  for (const skill of Object.values(aliyun?.skills ?? {}))
+    if (!Object.hasOwn(bundles, skill.bundle))
+      throw new Error("Unknown Aliyun skill bundle");
   validateSkillBindings(skillVolumes, hostSkillRoots);
   for (const binding of Object.values(skillVolumes))
     if ("hostPath" in binding) await validateHostSkillSource(binding.hostPath);
@@ -98,7 +125,12 @@ export async function bootstrap() {
     process.env.SKILL_UPLOAD_ROOT,
     skillVolumes,
   );
-  const skillPackages = new HostSkillPackages(uploadRoot);
+  const skillPackages = aliyun
+    ? new OssSkillPackages(
+        aliyun,
+        role === "api" ? ossPackageWriter(aliyun) : undefined,
+      )
+    : new HostSkillPackages(uploadRoot);
   const endpoints = z
     .record(
       z.string(),
@@ -107,22 +139,48 @@ export async function bootstrap() {
     .parse(JSON.parse(process.env.MCP_ENDPOINTS_JSON ?? "{}"));
 
   const grants = undefined;
-  const selectedProvider =
-    process.env.SANDBOX_PROVIDER ?? (demo ? "demo" : "cube");
-  if (
-    !["demo", "cube"].includes(selectedProvider) ||
-    (!demo && selectedProvider === "demo")
-  )
-    throw new Error(`Unsupported SANDBOX_PROVIDER: ${selectedProvider}`);
+  const client = aliyun && role === "api" ? ossClient(aliyun) : undefined;
+  const collectionPublisher =
+    aliyun && client
+      ? new OssSkillCollections(
+          aliyun.skillCollectionPrefix,
+          collectionIO(client),
+        )
+      : undefined;
+  const localResolver =
+    aliyun && collectionPublisher
+      ? collectionService(
+          store,
+          aliyun,
+          collectionPublisher,
+          (bundle, tenant) => service.hasBundle(bundle, tenant),
+        )
+      : undefined;
+  let resolver: CollectionResolver | undefined = localResolver;
+  if (!resolver && process.env.ALIYUN_SKILL_COLLECTION_API_URL) {
+    resolver = remoteCollectionResolver(
+      process.env.ALIYUN_SKILL_COLLECTION_API_URL,
+      process.env.ALIYUN_SKILL_COLLECTION_TOKEN ?? "",
+    );
+  }
+  const skillCollections =
+    localResolver && process.env.ALIYUN_SKILL_COLLECTION_TOKEN
+      ? {
+          token: process.env.ALIYUN_SKILL_COLLECTION_TOKEN,
+          resolve: localResolver,
+        }
+      : undefined;
   const provider = demo
     ? new DemoSandbox()
-    : new CubeProvider(
-        skillVolumes,
-        process.env.CUBE_EXEC_USER!,
-        process.env.CUBE_VOLUME_DRIVER!,
-        hostSkillRoots,
-        uploadRoot,
-      );
+    : aliyun
+      ? new AliyunE2BProvider(aliyun, resolver)
+      : new CubeProvider(
+          skillVolumes,
+          process.env.CUBE_EXEC_USER!,
+          process.env.CUBE_VOLUME_DRIVER!,
+          hostSkillRoots,
+          uploadRoot,
+        );
   const service = new PersonalService(
     store,
     registry,
@@ -176,5 +234,13 @@ export async function bootstrap() {
       : undefined,
   );
   if (demo) await registry.tx(seedDemo);
-  return { store, service, sandbox, worker, mcp, skillPackages };
+  return {
+    store,
+    service,
+    sandbox,
+    worker,
+    mcp,
+    skillPackages,
+    skillCollections,
+  };
 }
