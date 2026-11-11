@@ -1,5 +1,5 @@
 import type pg from "pg";
-import { Fault } from "../domain/model.js";
+import { Fault, emptyState } from "../domain/model.js";
 import { freezeDataset } from "./dataset.js";
 import type { EvalStore, Suite, SuiteVersion, Page } from "./store.js";
 export class PostgresEvalStore implements EvalStore {
@@ -37,8 +37,8 @@ export class PostgresEvalStore implements EvalStore {
   async createSuite(s: Suite) {
     await this.transaction(async (c) => {
       await c.query(
-        "INSERT INTO personal_user_state(user_id,state) VALUES($1,'{}') ON CONFLICT DO NOTHING",
-        [s.userId],
+        "INSERT INTO personal_user_state(user_id,state) VALUES($1,$2) ON CONFLICT DO NOTHING",
+        [s.userId, JSON.stringify(emptyState())],
       );
       await c.query(
         "INSERT INTO personal_eval_suites(user_id,suite_id,data) VALUES($1,$2,$3)",
