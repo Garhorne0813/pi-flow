@@ -5,6 +5,7 @@ import {
   aliyunConfig,
 } from "../src/sandbox/aliyun-provider.js";
 import { SandboxCreationError } from "../src/sandbox/provider.js";
+import { interruptionProbe, assertSigkill } from "./lib/aliyun-interruption.js";
 
 // Explicit opt-in: creates three billable instances, at most two concurrently.
 // Uses a unique OSS workspace and the real tool protocol, including fsync.
@@ -43,18 +44,11 @@ const read = async (sid: string) =>
     sha256: string;
   };
 const interrupt = async (sid: string, replace: boolean) => {
-  const python = `import os,signal
-with open('.interrupted.tmp','w') as f:
- f.write('committed-after-interruption'); f.flush(); os.fsync(f.fileno())
-${replace ? "os.replace('.interrupted.tmp','probe.txt')" : ""}
-os.kill(os.getpid(),signal.SIGKILL)`;
-  const payload = Buffer.from(python).toString("base64");
   const outcome = (await provider.execute(sid, "bash", {
-    command: `python3 -c "import base64;exec(base64.b64decode('${payload}'))"`,
+    command: interruptionProbe(replace).command,
     timeoutSeconds: 10,
-  })) as { exitCode: number; timedOut: boolean };
-  assert.notEqual(outcome.exitCode, 0);
-  assert.equal(outcome.timedOut, false);
+  })) as { exitCode: number; timedOut: boolean; stdout: string };
+  assertSigkill(outcome, replace);
 };
 try {
   const first = await start();

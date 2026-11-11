@@ -32,3 +32,20 @@ test("new faults and unknown capacity alert conservatively without replay or rep
     "counter reset is not new failures",
   );
 });
+
+test("collection commit and cleanup uncertainty alert on new events without replaying historical counters", () => {
+  const counters = {
+    skill_collections_commit_unconfirmed_total: 1,
+    skill_collections_cleanup_unconfirmed_total: 2,
+  };
+  const active = alerts(counters);
+  assert.equal(
+    active.find((a) => a.rule === "skill_collection_commit_unknown")?.severity,
+    "critical",
+  );
+  assert.equal(
+    active.find((a) => a.rule === "skill_collection_cleanup_unknown")?.value,
+    2,
+  );
+  assert.deepEqual(alerts(counters, counters), []);
+});

@@ -114,15 +114,29 @@ export class OssSkillCollections {
     scope: string,
     sources: { skill: Skill; bucketPath: string }[],
   ): Promise<CollectionLocation> {
-    if (this.active >= 2) throw new Fault(429, "SKILL_COLLECTION_BUSY");
+    if (this.active >= 2) {
+      telemetry.count("skill_collections_busy_total");
+      throw new Fault(429, "SKILL_COLLECTION_BUSY");
+    }
+    const started = performance.now();
     this.active++;
     try {
       return await this.publish(volume, scope, sources);
     } catch (error) {
+      telemetry.count("skill_collections_resolve_failed_total");
+      if (
+        error instanceof Fault &&
+        error.code === "SKILL_COLLECTION_COMMIT_UNCONFIRMED"
+      )
+        telemetry.count("skill_collections_commit_unconfirmed_total");
       if (error instanceof Fault) throw error;
       throw new Fault(502, "SKILL_COLLECTION_PUBLISH_FAILED");
     } finally {
       this.active--;
+      telemetry.duration(
+        "skill_collections_prepare",
+        performance.now() - started,
+      );
     }
   }
   private async publish(
@@ -151,7 +165,11 @@ export class OssSkillCollections {
       return location;
     };
     const existing = await ready();
-    if (existing) return existing;
+    if (existing) {
+      telemetry.count("skill_collections_cache_hits_total");
+      return existing;
+    }
+    telemetry.count("skill_collections_builds_started_total");
     const location = {
       selectionId,
       artifact: randomUUID().replaceAll("-", ""),
@@ -164,7 +182,12 @@ export class OssSkillCollections {
     const discard = async () => {
       try {
         await this.io.remove(attempted);
+        telemetry.count(
+          "skill_collections_private_objects_removed_total",
+          attempted.length,
+        );
       } catch {
+        telemetry.count("skill_collections_cleanup_unconfirmed_total");
         telemetry.error(
           "skill_collection_cleanup",
           new Fault(502, "SKILL_COLLECTION_CLEANUP_UNCONFIRMED"),
@@ -265,6 +288,9 @@ export class OssSkillCollections {
         if (winner.artifact !== location.artifact) await discard();
         return winner;
       }
+      telemetry.count("skill_collections_published_total");
+      telemetry.count("skill_collections_published_files_total", files);
+      telemetry.count("skill_collections_published_bytes_total", bytes);
       return location;
     } catch (error) {
       // A timed-out marker write may have published this artifact. Never delete

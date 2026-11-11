@@ -17,6 +17,7 @@
     "smoke": "node scripts/smoke-demo.mjs",
     "smoke:aliyun": "tsx scripts/smoke-aliyun.ts",
     "smoke:aliyun:skill": "tsx scripts/smoke-aliyun-skill.ts",
+    "inspect:aliyun:collections": "tsx scripts/inspect-aliyun-collections.ts",
     "format": "prettier --write src test scripts",
     "test:deepseek": "node scripts/smoke-deepseek.mjs",
     "test:deepseek:capabilities": "node scripts/smoke-deepseek-capabilities.mjs",

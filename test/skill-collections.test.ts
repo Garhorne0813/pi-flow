@@ -27,6 +27,7 @@ import {
 import { OssSkillPackages } from "../src/skills/oss-packages.js";
 import { uploadedOssSkillBinding } from "../src/skills/oss-storage.js";
 import { skillZip } from "./helpers/skill-zip.js";
+import { telemetry } from "../src/observability/telemetry.js";
 
 const hash = (b: Buffer | string) =>
   createHash("sha256").update(b).digest("hex");
@@ -129,6 +130,7 @@ function fixture(count = 20) {
 }
 
 test("twenty selected Skills share one isolated immutable collection; cache and workspace scopes remain exact", async () => {
+  const beforeMetrics = telemetry.snapshot();
   const f = fixture();
   const location = await f.publisher.resolve("volume-one", f.scope, f.sources);
   const root =
@@ -173,6 +175,21 @@ test("twenty selected Skills share one isolated immutable collection; cache and 
       { ...f.skills[0]!, digest: "a".repeat(64) },
       ...f.skills.slice(1),
     ]),
+  );
+  const metrics = telemetry.snapshot();
+  assert.equal(
+    (metrics.skill_collections_published_total ?? 0) -
+      (beforeMetrics.skill_collections_published_total ?? 0),
+    3,
+  );
+  assert.equal(
+    (metrics.skill_collections_cache_hits_total ?? 0) -
+      (beforeMetrics.skill_collections_cache_hits_total ?? 0),
+    1,
+  );
+  assert.ok(
+    (metrics.skill_collections_published_bytes_total ?? 0) >
+      (beforeMetrics.skill_collections_published_bytes_total ?? 0),
   );
 });
 

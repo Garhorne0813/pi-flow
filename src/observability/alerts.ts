@@ -38,6 +38,18 @@ export function alerts(
       "warning",
       "inspect_provider_and_retry_cleanup",
     ],
+    [
+      "skill_collection_commit_unknown",
+      "skill_collections_commit_unconfirmed_total",
+      "critical",
+      "inspect_ready_pointer_do_not_delete",
+    ],
+    [
+      "skill_collection_cleanup_unknown",
+      "skill_collections_cleanup_unconfirmed_total",
+      "warning",
+      "inventory_private_artifacts_before_reclamation",
+    ],
   ] as const;
   const result: Alert[] = rules.flatMap(([rule, metric, severity, action]) => {
     const value = Math.max(
