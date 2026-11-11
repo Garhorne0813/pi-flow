@@ -24,7 +24,9 @@ jobs:
       - run: npm audit --audit-level=high
         working-directory: web
       - name: Reject foreign protocol dependencies
-        run: node scripts/check-chat-dependencies.mjs
+        run: |
+          node scripts/check-chat-dependencies.mjs
+          node scripts/chat-ui-notices.mjs --check
       - name: Install backend and browser for chat smoke tests
         run: |
           npm ci
@@ -38,3 +40,10 @@ jobs:
           node web/e2e/chat-flow.mjs
           node web/e2e/interaction.mjs
           node web/e2e/roles.mjs
+          node web/e2e/presentation.mjs
+      - name: Upload interface previews
+        uses: actions/upload-artifact@v4
+        with:
+          name: chat-ui-previews
+          path: work/previews/dsh-*.png
+          retention-days: 14

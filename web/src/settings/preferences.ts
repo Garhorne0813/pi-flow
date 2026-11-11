@@ -22,12 +22,14 @@ export function storePreferences(userId: string, value: Preferences) {
   );
 }
 export function applyTheme(theme: Preferences["theme"]) {
-  document.documentElement.dataset.theme =
+  const resolved =
     theme === "system"
       ? matchMedia("(prefers-color-scheme: dark)").matches
         ? "dark"
         : "light"
       : theme;
+  document.documentElement.dataset.theme = resolved;
+  document.body.toggleAttribute("data-ds-dark-theme", resolved === "dark");
 }
 export function shouldSend(
   key: string,

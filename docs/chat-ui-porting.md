@@ -8,8 +8,8 @@ Design: supplied Pi-Flow Web Chat RFC v1.0 (2026-11-11).
 Independent React 19/Vite application in `web/`. React Router supplies browser
 navigation; TanStack Query caches REST data; the local reducer owns per-Run SSE
 cursors and assistant segments. No PiRuntime, Cordis, ZCode RPC or session
-controller is bundled. UI primitives are original React components and the MIT
-react-markdown renderer. See `web/third-party/README.md` for provenance.
+controller is bundled. The presentation layer now directly vendors MIT-licensed DeepSeek Harness theme tokens,
+controls and surface styles, with Pi-Flow adapters and the react-markdown renderer. See `web/third-party/README.md` for provenance.
 
 Implemented: Agent selection, session creation/list pagination/rename/delete,
 text submission, streaming Markdown/code copy, IME-safe input, session drafts,
@@ -83,8 +83,7 @@ full subagent/Todo/usage views, virtualized large histories, command completion,
 message search; richer server-redacted tool summaries; durable uncertain-send
 recovery across reload; full fault-injection and Firefox/Safari accessibility
 matrix. Fork UI is deliberately deferred until inherited history has a supported
-read model. Source primitives were not copied from upstream; the isolated native
-renderer is the first import-closure spike.
+read model. The initial native renderer spike is superseded by the documented DSH presentation port.
 
 Observed local results (2026-11-11): backend regression 334 passed / 0 failed /
 63 PostgreSQL-gated skips before provisioning a database; dedicated real-PG chat
@@ -157,3 +156,29 @@ user's instruction; the image packaging change is not claimed as locally verifie
 The default quality workflow no longer runs the real Docker Compose smoke test,
 per the user request. The standalone script is retained for operator use but is
 not executed by this implementation or the default CI pipeline.
+
+
+## DeepSeek Harness presentation port
+
+Directly copied from upstream `e8f7b93a344964de3dca1ace9e72b6e4d6de87cb`:
+light/dark design tokens, typography/elevation/scrollbar/syntax palettes,
+Button/Pill/UserMessageBubble React components, and the sidebar, hero, composer,
+Markdown and code-card CSS modules. Source copies remain byte-identical;
+`web/third-party/dsh/provenance.json` records paths and SHA-256 values. The
+license is retained and aggregated with runtime dependency licenses in the
+built `third-party-notices.txt`. CI verifies provenance and license aggregation.
+No upstream logo, wordmark, font or brand illustration is copied.
+
+Pi-Flow host markup uses the imported modules for its centered empty-state
+composer, neutral sidebar, blue send control, user bubbles and code cards.
+Markdown/GFM and code highlighting are lazy loaded. Highlighter output escapes
+source before rendering; raw Markdown HTML/images remain disabled and dangerous
+links remain rejected. Safe-source tests cover script/image/iframe injection.
+All Pi-Flow API clients, reducers, role guards, approvals and admin actions stay
+local; no DSH state model or runtime package is introduced.
+
+`node web/e2e/presentation.mjs` captures desktop, dark, mobile, conversation and
+admin previews under `work/previews/`; conversation screenshots use synthetic
+fixtures, separately from real-backend business acceptance. The same script
+checks palette application, code highlighting/wrapping, GFM tables and mobile
+navigation/overflow, and CI uploads the previews for review. No Docker validation.
