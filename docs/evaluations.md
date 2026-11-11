@@ -81,4 +81,4 @@ npm run smoke:eval
 
 Before enabling PR-07, supply and test provider-enforced network/workspace/credential isolation, fixture ownership, temporary resource capacity reservations, late-callback fencing, unknown-resource reconciliation, live revocation and timeout/cleanup behavior. V2 CLI/JSONL/multi-turn work is outside this release.
 
-The review stack is #63 → #64 → #65 → #66 → #67 → PR-06; merge in that order and enable flags only after the complete accepted stack is deployed.
+The review stack is #63 → #64 → #65 → #66 → #67 → #68; merge in that order and enable flags only after the complete accepted stack is deployed.
