@@ -1,3 +1,4 @@
+import { registerChatRoutes } from "./chat-timeline.js";
 import Fastify from "fastify";
 import multipart from "@fastify/multipart";
 import { timingSafeEqual, createHash } from "node:crypto";
@@ -173,7 +174,9 @@ export function buildAPI(
   registerRunsRoutes(context);
   registerEventsRoutes(context);
   registerFilesRoutes(context);
-  if (service instanceof PersonalService)
+  if (service instanceof PersonalService) {
     personalRoutes(app, service, sandbox, actor);
+    registerChatRoutes(context);
+  }
   return app;
 }

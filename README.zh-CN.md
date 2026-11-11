@@ -204,3 +204,8 @@ Smoke 自动在 `18081` 端口启动并关闭 Demo，验证对话、SSE、幂等
 ## 许可证
 
 [Apache-2.0](LICENSE)。随工程打包的 SDK 来源与许可证见 [vendor/README.md](vendor/README.md)。
+
+### Pi-Flow Chat（独立 Web 前端）
+
+`web/` 提供普通用户对话界面；开发、OIDC PKCE 配置、历史 API、验证和部署要求见
+[Chat 实施说明](docs/chat-ui-porting.md)。此版本是 RFC 首个可评审实现，完整生产验收项见该说明。

@@ -1,3 +1,4 @@
+import { chatSources, activeChatTask } from "./personal-chat-query.js";
 import pg from "pg";
 import {
   runWorkQuery,
@@ -589,6 +590,12 @@ export class PersonalPostgresStore implements Store {
     } finally {
       c.release();
     }
+  }
+  chatSources(user: string, sid: string, limit: number, before?: string[]) {
+    return chatSources(this.pool, user, sid, limit, before);
+  }
+  activeChatTask(user: string, sid: string) {
+    return activeChatTask(this.pool, user, sid);
   }
   async readSession<T>(
     user: string,

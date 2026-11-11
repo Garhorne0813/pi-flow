@@ -25,6 +25,24 @@ export type AdminStats = {
   toolFailures: number;
 };
 export interface Store {
+  chatSources?(
+    user: string,
+    sid: string,
+    limit: number,
+    before?: string[],
+  ): Promise<{
+    rows: { at: string; id: string; item: unknown }[];
+    next: string[] | null;
+  }>;
+  activeChatTask?(
+    user: string,
+    sid: string,
+  ): Promise<{
+    id: string;
+    state: string;
+    taskId: string;
+    createdAt: string;
+  } | null>;
   adminStats?(user: string): Promise<AdminStats>;
   verifyActor?(actor: import("../domain/model.js").Actor): Promise<void>;
   cancelTaskTx?<T>(
