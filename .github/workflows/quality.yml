@@ -51,8 +51,7 @@ jobs:
         run: node scripts/ci-tests.mjs
       - run: npm run build
       - run: npm run smoke
-      - name: Compose empty-volume integration
-        run: npm run smoke:compose
+      # Real Docker image/container checks are omitted per project owner request.
       - name: Upload test reports
         uses: actions/upload-artifact@v4
         if: always()

@@ -153,3 +153,7 @@ and static artifact/rollout-switch checks. Web tests and production build pass;
 ordinary-user direct navigation to each admin route is blocked without admin
 requests. Further real Docker image/container verification is omitted per the
 user's instruction; the image packaging change is not claimed as locally verified.
+
+The default quality workflow no longer runs the real Docker Compose smoke test,
+per the user request. The standalone script is retained for operator use but is
+not executed by this implementation or the default CI pipeline.
