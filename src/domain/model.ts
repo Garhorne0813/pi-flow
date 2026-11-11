@@ -46,6 +46,7 @@ export const AgentConfig = z
         .object({ provider: z.string().min(1), modelId: z.string().min(1) })
         .strict(),
     ]),
+    reasoningEffort: z.enum(["low", "medium", "high"]).optional(),
     tools: z.array(z.enum(tools)).max(12),
     skills: z.array(z.string()).default([]),
     mcpServers: z.array(z.string()).max(16).default([]),

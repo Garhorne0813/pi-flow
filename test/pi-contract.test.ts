@@ -279,3 +279,67 @@ test("sandbox tool specs expose canonical names and retain auxiliary tool names"
       .every((line) => !line.includes("remote_read")),
   );
 });
+
+test("approved DeepSeek gateway preserves native compatibility and sends the frozen high reasoning effort", async () => {
+  const requests: Record<string, any>[] = [];
+  const server = createServer(async (req, res) => {
+    let body = "";
+    for await (const chunk of req) body += chunk;
+    requests.push(JSON.parse(body));
+    res.writeHead(200, { "Content-Type": "text/event-stream" });
+    for (const [delta, finish_reason] of [
+      [{ role: "assistant", content: "42" }, null],
+      [{}, "stop"],
+    ])
+      res.write(
+        `data: ${JSON.stringify({ id: "reasoning-probe", object: "chat.completion.chunk", created: 1, model: "deepseek-flash", choices: [{ index: 0, delta, finish_reason }] })}\n\n`,
+      );
+    res.end(
+      `data: ${JSON.stringify({ choices: [], usage: { prompt_tokens: 2, completion_tokens: 2, total_tokens: 4 } })}\n\ndata: [DONE]\n\n`,
+    );
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const port = (server.address() as { port: number }).port,
+      runtime = await PiRuntime.create();
+    const config = AgentConfig.parse({
+      name: "reasoning",
+      systemPrompt: "Return 42.",
+      model: { provider: "deepseek", modelId: "deepseek-flash" },
+      reasoningEffort: "high",
+      tools: [],
+    });
+    const ctx: RuntimeContext = {
+      config,
+      gateway: {
+        baseUrl: `http://127.0.0.1:${port}/v1`,
+        apiKey: "test-placeholder",
+      },
+      entries: [],
+      prompt: "6*7",
+      skills: [],
+      specs: [],
+      signal: AbortSignal.timeout(10000),
+      call: async () => {
+        throw Error("No tools");
+      },
+      emit: async () => {},
+      checkpoint: async () => {},
+      consume: async () => {},
+    };
+    await runtime.execute(ctx);
+    assert.equal(requests.length, 1);
+    assert.equal(requests[0]!.reasoning_effort, "high");
+    assert.deepEqual(requests[0]!.thinking, { type: "enabled" });
+    await assert.rejects(
+      runtime.execute({
+        ...ctx,
+        config: { ...config, reasoningEffort: "medium" },
+      }),
+      /MODEL_REASONING_NOT_SUPPORTED/,
+    );
+    assert.equal(requests.length, 1);
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});

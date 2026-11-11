@@ -9,7 +9,7 @@ import {
   type CreateModelRuntimeOptions,
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import type { AgentConfig, Skill } from "../domain/model.js";
+import { Fault, type AgentConfig, type Skill } from "../domain/model.js";
 import type { ToolSpec } from "../mcp/manager.js";
 export interface RuntimeContext {
   executionNamespace?: "eval";
@@ -172,6 +172,17 @@ export class PiRuntime implements Runtime {
         refreshOnCreate: false,
         allowModelNetwork: false,
       });
+      const nativeModel = modelRuntime.getModel(
+        ctx.config.model.provider,
+        ctx.config.model.modelId,
+      );
+      if (
+        ctx.config.reasoningEffort &&
+        nativeModel &&
+        (!nativeModel.reasoning ||
+          nativeModel.thinkingLevelMap?.[ctx.config.reasoningEffort] === null)
+      )
+        throw new Fault(400, "MODEL_REASONING_NOT_SUPPORTED");
       modelRuntime.registerProvider(ctx.config.model.provider, {
         baseUrl: ctx.gateway.baseUrl,
         api: "openai-completions",
@@ -180,7 +191,9 @@ export class PiRuntime implements Runtime {
             id: ctx.config.model.modelId,
             name: ctx.config.model.modelId,
             input: ["text"],
-            reasoning: false,
+            reasoning: !!ctx.config.reasoningEffort,
+            thinkingLevelMap: nativeModel?.thinkingLevelMap,
+            compat: nativeModel?.compat,
             contextWindow: 128000,
             maxTokens: 4096,
             cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -227,6 +240,7 @@ export class PiRuntime implements Runtime {
       cwd: "/harness",
       agentDir: "/harness-disabled",
       model,
+      thinkingLevel: ctx.config.reasoningEffort,
       modelRuntime,
       resourceLoader: new EnterpriseResourceLoader(
         ctx.config,

@@ -41,6 +41,7 @@ export class EvalAccess {
           systemPrompt: JUDGE_TEMPLATE,
           model: { provider: selected.provider, modelId: selected.modelId },
           tools: [],
+          reasoningEffort: process.env.EVAL_JUDGE_REASONING_EFFORT,
           maxTokens: 16000,
           maxSteps: 1,
         });
@@ -50,6 +51,7 @@ export class EvalAccess {
           version: digest({
             template: JUDGE_TEMPLATE_VERSION,
             model: config.model,
+            reasoningEffort: config.reasoningEffort,
             gateway: selected.gatewayRef,
             temperature: 0,
           }),

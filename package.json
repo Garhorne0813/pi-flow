@@ -31,7 +31,8 @@
     "config:import:prod": "node dist/config/cli.js",
     "smoke:compose": "node scripts/smoke-compose.mjs",
     "eval-worker": "node dist/eval-worker-main.js",
-    "smoke:eval": "node scripts/smoke-eval.mjs"
+    "smoke:eval": "node scripts/smoke-eval.mjs",
+    "smoke:eval:deepseek": "node scripts/smoke-eval-deepseek.mjs"
   },
   "dependencies": {
     "@cubesandbox/sdk": "file:vendor/cubesandbox-sdk-0.3.0.tgz",

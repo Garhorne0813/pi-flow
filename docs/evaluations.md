@@ -16,6 +16,7 @@ Flags default off:
 | `EVAL_MAX_REPEATS` | 3 | Server cap, at most 3 |
 | `EVAL_JUDGE_ENABLED` | false | Enable the separately budgeted Judge |
 | `EVAL_JUDGE_MODEL` | unset | Approved `provider/modelId` catalog entry |
+| `EVAL_JUDGE_REASONING_EFFORT` | unset | Optional low/medium/high; frozen into Judge configuration/version |
 | `EVAL_ALLOW_READONLY_SANDBOX` | false | true is rejected: provider isolation is unaccepted |
 
 Worker concurrency is intentionally fixed at one, with one active case per user enforced by a unique index. PostgreSQL is required for jobs, including Demo jobs. In-memory Demo supports dataset management. Run the API with `EVALS_ENABLED=true`; start a separate process with `EVALS_ENABLED=true EVAL_WORKER_ENABLED=true npm run eval-worker` after building. This entry point does not construct production Sandbox/MCP managers. Normal workers continue using `npm run worker`. For Compose Demo, set `DEV_TOKEN` and run `EVALS_ENABLED=true docker compose -f compose.demo.yml --profile evals up --build`; the `evals` profile starts a dedicated worker.
@@ -77,8 +78,18 @@ npm run smoke
 npm run smoke:eval
 ```
 
-`TEST_DATABASE_URL` enables isolated-schema Eval integration tests: tenant/FK boundaries, immutable datasets, concurrent claims, stale fencing, non-replay recovery, cancellation, budgets, API/SSE, reports and browser Studio at mobile width with keyboard/XSS checks. CI runs the same new tests through its existing no-skip PostgreSQL harness. `smoke:eval` starts the built API and separate built Eval Worker against an isolated schema and drives the full Demo lifecycle over HTTP. Real LLM and provider isolation acceptance are separate and have not been performed. No 1k/10k-case historical performance SLA is claimed.
+`TEST_DATABASE_URL` enables isolated-schema Eval integration tests: tenant/FK boundaries, immutable datasets, concurrent claims, stale fencing, non-replay recovery, cancellation, budgets, API/SSE, reports and browser Studio at mobile width with keyboard/XSS checks. CI runs the same new tests through its existing no-skip PostgreSQL harness. `smoke:eval` starts the built API and separate built Eval Worker against an isolated schema and drives the full Demo lifecycle over HTTP. Real provider isolation acceptance has not been performed. Real DeepSeek model acceptance is recorded below. No 1k/10k-case historical performance SLA is claimed.
 
 Before enabling PR-07, supply and test provider-enforced network/workspace/credential isolation, fixture ownership, temporary resource capacity reservations, late-callback fencing, unknown-resource reconciliation, live revocation and timeout/cleanup behavior. V2 CLI/JSONL/multi-turn work is outside this release.
 
 The review stack is #63 → #64 → #65 → #66 → #67 → #68; merge in that order and enable flags only after the complete accepted stack is deployed.
+
+## Real DeepSeek acceptance
+
+An opt-in run against `deepseek/deepseek-flash` with `reasoningEffort=high` passed all three cases: exact text, one fixed mock read with argument/order checks, and a separately budgeted LLM Judge. The Agent made 4 requests (1308 tokens), Judge 1 request (485 tokens), with confirmed usage and no unknown requests. The configured price estimate totaled USD 0.00074; this is not a provider invoice. See [sanitized report](eval-deepseek-acceptance.json).
+
+The run also checked cancellation, request idempotency, immutable reasoning snapshots, SSE tool evidence, comparison, cross-user denial, budget rejection before a remote call, live Agent revocation, rejected readonly profiles, and zero production Session/Run records. It used a disposable PostgreSQL schema, the real Pi runtime, and a separate Eval Worker; tools were in-memory fixtures, not a real Sandbox.
+
+`AgentConfig.reasoningEffort` is optional (`low`, `medium`, `high`) and is frozen with the Agent snapshot. The approved gateway preserves native model compatibility/thinking maps when an effort is selected and rejects explicitly unsupported native levels. A transport contract test verifies DeepSeek sends `thinking.type=enabled` and `reasoning_effort=high`. Omitting the option keeps the previous gateway reasoning behavior.
+
+To repeat after building, set `TEST_DATABASE_URL` to a disposable database and run `NODE_USE_ENV_PROXY=1 npm run smoke:eval:deepseek`; supply the API key through stdin (use a terminal with echo disabled). The script seals credentials only in its disposable schema, drops the schema and worker afterward, and writes a credential-free report to `work/eval-deepseek-report.json`. It is opt-in and is not run automatically in credential-free CI.
