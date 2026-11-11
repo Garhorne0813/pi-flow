@@ -1,7 +1,7 @@
 import pg from "pg";
 import { telemetry } from "./telemetry.js";
 import { EventEmitter } from "node:events";
-import type { Event, RunState } from "./domain.js";
+import type { Session, Event, RunState } from "./domain.js";
 import type { Audit } from "./domain.js";
 import {
   loadState,
@@ -21,7 +21,121 @@ import type {
   CapacityState,
 } from "./adapters/sandbox-policy.js";
 import { SCHEMA_VERSION, type WorkerHealth } from "./health.js";
+export type AdminStats = {
+  runs: Record<string, number>;
+  pendingInteractions: number;
+  averageRunDurationMs: number;
+  toolFailures: number;
+};
 export interface Store {
+  adminStats?(user: string): Promise<AdminStats>;
+  verifyActor?(actor: import("./domain.js").Actor): Promise<void>;
+  cancelTaskTx?<T>(
+    user: string,
+    runId: string,
+    fn: (s: State) => T | Promise<T>,
+  ): Promise<T>;
+  interactionTx?<T>(
+    user: string,
+    interactionId: string,
+    fn: (s: State) => T | Promise<T>,
+  ): Promise<T>;
+  listAudit?(
+    user: string,
+    offset: number,
+    limit: number,
+    after?: { timestamp: string; id: string },
+  ): Promise<Audit[]>;
+  sessionTx?<T>(
+    user: string,
+    sessionId: string | undefined,
+    fn: (s: State) => T | Promise<T>,
+    options?: { entries?: boolean },
+  ): Promise<T>;
+  listScheduleFires?(
+    user: string,
+    scheduleId: string,
+    owner: string,
+    limit: number,
+    before?: { scheduledFor: number; id: string },
+  ): Promise<import("./schedules/service.js").Fire[]>;
+  readUsage?<T>(
+    user: string,
+    runId: string | undefined,
+    fn: (s: State) => T | Promise<T>,
+  ): Promise<T>;
+  appendRunEvents?(
+    user: string,
+    runId: string,
+    owner: string,
+    events: { type: string; data: unknown }[],
+  ): Promise<void>;
+  executionTx?<T>(
+    tenant: string,
+    runId: string,
+    fn: (s: State) => T | Promise<T>,
+    scope?: import("./personal-execution-store.js").ExecutionScope,
+  ): Promise<T>;
+  listRunWork?(
+    now: number,
+    limit: number,
+    afterUser?: string,
+  ): Promise<{ user: string; runId: string }[]>;
+  renewRunLease?(
+    user: string,
+    runId: string,
+    owner: string,
+    now: number,
+  ): Promise<boolean>;
+  readSession?<T>(
+    user: string,
+    sessionId: string,
+    fn: (s: State) => T | Promise<T>,
+  ): Promise<T>;
+  watchEvents?(
+    user: string,
+    runId: string,
+  ): Promise<{
+    wait: (ms: number, signal?: AbortSignal) => Promise<void>;
+    close: () => void;
+  }>;
+  listSandboxMaintenance?(
+    now: number,
+    pauseMs: number,
+    releaseMs: number,
+    intervalMs: number,
+  ): Promise<{ user: string; workspace: import("./domain.js").Workspace }[]>;
+  adoptLegacyCapacity?(): Promise<void>;
+
+  listSessions?(
+    tenant: string,
+    userId: string,
+    offset: number,
+    limit: number,
+  ): Promise<Omit<Session, "entries">[]>;
+  // Workspace lifecycle only: metadata and active Runs, never execution history.
+  workspaceTx?<T>(tenant: string, fn: (s: State) => T | Promise<T>): Promise<T>;
+  claimRun?<T>(
+    tenant: string,
+    runId: string,
+    fn: (state: State) => T | Promise<T>,
+  ): Promise<T>;
+  listScheduleWork?(
+    now: number,
+    limit: number,
+  ): Promise<{ user: string; scheduleId: string }[]>;
+  scheduleTx?<T>(
+    tenant: string,
+    scheduleId: string,
+    fn: (state: State) => T | Promise<T>,
+    options?: { manualFor?: number },
+  ): Promise<T>;
+  txLight?<T>(
+    user: string,
+    sessionId: string,
+    fn: (state: State) => T | Promise<T>,
+    key?: string,
+  ): Promise<T>;
   eventPage(
     tenant: string,
     runId: string,

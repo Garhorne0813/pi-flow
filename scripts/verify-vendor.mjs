@@ -7,6 +7,7 @@ import {
   statSync,
 } from "node:fs";
 import { join, resolve } from "node:path";
+import { createRequire } from "node:module";
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 const root = resolve(process.env.VENDOR_VERIFY_ROOT ?? ".");
@@ -28,8 +29,14 @@ for (const p of manifest.packages) {
   if (installed.version !== p.version || installed.license !== p.license)
     throw new Error("Installed vendor metadata mismatch: " + p.name);
 }
-const brace = json(
-  "node_modules/@earendil-works/pi-coding-agent/node_modules/brace-expansion/package.json",
+const sdkRequire = createRequire(
+  join(root, "node_modules/@earendil-works/pi-coding-agent/package.json"),
+);
+const minimatchRequire = createRequire(
+  sdkRequire.resolve("minimatch/package.json"),
+);
+const brace = JSON.parse(
+  readFileSync(minimatchRequire.resolve("brace-expansion/package.json")),
 );
 if (brace.version !== "5.0.12")
   throw new Error("Installed brace-expansion must be 5.0.12");
@@ -37,6 +44,18 @@ const fixed = json("vendor/brace-fixed-dist.json");
 const shrink = json(
   "node_modules/@earendil-works/pi-coding-agent/npm-shrinkwrap.json",
 );
+const undiciFixed = json("vendor/undici-fixed-dist.json");
+const undiciEntry = shrink.packages["node_modules/undici"];
+const installedUndici = JSON.parse(
+  readFileSync(sdkRequire.resolve("undici/package.json")),
+);
+if (
+  installedUndici.version !== undiciFixed.version ||
+  undiciEntry.version !== undiciFixed.version ||
+  undiciEntry.integrity !== undiciFixed.dist.integrity ||
+  undiciEntry.resolved !== undiciFixed.dist.tarball
+)
+  throw new Error("Installed Undici security replacement mismatch");
 const entry = shrink.packages["node_modules/brace-expansion"];
 if (
   entry.version !== brace.version ||
@@ -77,7 +96,14 @@ if (process.argv.includes("--upstream")) {
     throw new Error("Upstream Pi integrity mismatch");
   const a = unpack(pi, "pi-original"),
     b = unpack(join(root, manifest.packages[1].archive), "pi-vendor");
-  compare(a, b, ["npm-shrinkwrap.json"]);
+  compare(a, b, ["package.json", "npm-shrinkwrap.json"]);
+  const expectedPackage = JSON.parse(readFileSync(join(a, "package.json")));
+  expectedPackage.dependencies.undici = undiciFixed.version;
+  if (
+    JSON.stringify(expectedPackage) !==
+    JSON.stringify(JSON.parse(readFileSync(join(b, "package.json"))))
+  )
+    throw new Error("Undocumented package metadata difference");
   const expected = JSON.parse(readFileSync(join(a, "npm-shrinkwrap.json")));
   Object.assign(expected.packages["node_modules/brace-expansion"], {
     version: "5.0.12",
@@ -85,6 +111,13 @@ if (process.argv.includes("--upstream")) {
     integrity: fixed.dist.integrity,
     dependencies: fixed.dependencies,
     engines: fixed.engines,
+  });
+  expected.packages[""].dependencies.undici = undiciFixed.version;
+  Object.assign(expected.packages["node_modules/undici"], {
+    version: undiciFixed.version,
+    resolved: undiciFixed.dist.tarball,
+    integrity: undiciFixed.dist.integrity,
+    engines: undiciFixed.engines,
   });
   if (
     JSON.stringify(expected) !==

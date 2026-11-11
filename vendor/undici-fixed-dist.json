@@ -1,0 +1,29 @@
+{
+  "version": "8.12.2",
+  "dist": {
+    "shasum": "e869237430adcc5de6bca798c94edd7db9dac5ac",
+    "tarball": "https://registry.npmjs.org/undici/-/undici-8.12.2.tgz",
+    "fileCount": 218,
+    "integrity": "sha512-XtuDWVdqTLr3NAxm2ly9/hU6kUsJOgGh1RASzMBbsw6aWCOaQzHdW+QQDfdERjfJ2V5vL5pRPa4RetO9UfivDg==",
+    "signatures": [
+      {
+        "sig": "MEUCIQDXr5nGDUpCzzmmwHbfN3dEIVOiqp2K4i6gwg6/nbqwPAIgIzfvN88+EFB7i5Dm4sBUYh9WSAqfGXPXhXcZTsL9eto=",
+        "keyid": "SHA256:DhQ8wR5APBvFHLF/+Tc+AYvPOdTpcIDqOhxsBHRwC7U"
+      },
+      {
+        "sig": "MEQCID/l/xGTTFr4hUTVBrwEU0aE0KmRFrLnAs7onfEyICGkAiAQ9PwcQuk5cfXTv0Yw644hnaC3LFzKVsEM04v6BwG0jw==",
+        "keyid": "SHA256:DhQ8wR5APBvFHLF/+Tc+AYvPOdTpcIDqOhxsBHRwC7U"
+      }
+    ],
+    "attestations": {
+      "url": "https://registry.npmjs.org/-/npm/v1/attestations/undici@8.12.2",
+      "provenance": {
+        "predicateType": "https://slsa.dev/provenance/v1"
+      }
+    },
+    "unpackedSize": 2163430
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  }
+}

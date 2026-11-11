@@ -1,0 +1,21 @@
+-- Append-only records no longer rewrite the user's authorization/lease document.
+CREATE TABLE IF NOT EXISTS personal_audit(user_id text NOT NULL REFERENCES personal_users(id) ON DELETE CASCADE,id text NOT NULL,data jsonb NOT NULL,PRIMARY KEY(user_id,id));
+CREATE TABLE IF NOT EXISTS personal_usage_requests(user_id text NOT NULL REFERENCES personal_user_state(user_id) ON DELETE CASCADE,id text NOT NULL,run_id text NOT NULL,at text NOT NULL,data jsonb NOT NULL,PRIMARY KEY(user_id,id));
+CREATE INDEX IF NOT EXISTS personal_usage_period ON personal_usage_requests(user_id,at);
+CREATE INDEX IF NOT EXISTS personal_usage_run ON personal_usage_requests(user_id,run_id);
+CREATE TABLE IF NOT EXISTS personal_resource_transitions(id bigserial PRIMARY KEY,user_id text NOT NULL REFERENCES personal_user_state(user_id) ON DELETE CASCADE,data jsonb NOT NULL);
+CREATE INDEX IF NOT EXISTS personal_resources_user ON personal_resource_transitions(user_id,id);
+INSERT INTO personal_audit SELECT user_id,v->>'id',v FROM personal_user_state CROSS JOIN LATERAL jsonb_array_elements(COALESCE(state->'audit','[]'::jsonb)) v ON CONFLICT DO NOTHING;
+INSERT INTO personal_usage_requests SELECT user_id,k,v->>'runId',v->>'at',v FROM personal_user_state CROSS JOIN LATERAL jsonb_each(COALESCE(state->'usage'->'requests','{}'::jsonb)) e(k,v) ON CONFLICT DO NOTHING;
+INSERT INTO personal_resource_transitions(user_id,data) SELECT user_id,v FROM personal_user_state CROSS JOIN LATERAL jsonb_array_elements(COALESCE(state->'usage'->'resources','[]'::jsonb)) v;
+UPDATE personal_user_state SET state=state-'audit'-'usage' WHERE state ? 'audit' OR state ? 'usage';
+CREATE TABLE IF NOT EXISTS personal_workspace_runtime(user_id text NOT NULL REFERENCES personal_user_state(user_id) ON DELETE CASCADE,workspace_id text NOT NULL,data jsonb NOT NULL,last_used_at bigint,sandbox_id text,checked_at bigint NOT NULL DEFAULT 0,PRIMARY KEY(user_id,workspace_id));
+INSERT INTO personal_workspace_runtime(user_id,workspace_id,data,last_used_at,sandbox_id) SELECT user_id,k,v,(v->>'sandboxLastUsedAt')::bigint,v->>'sandboxId' FROM personal_user_state CROSS JOIN LATERAL jsonb_each(COALESCE(state->'workspaces','{}'::jsonb)) e(k,v) ON CONFLICT(user_id,workspace_id) DO UPDATE SET data=excluded.data,last_used_at=excluded.last_used_at,sandbox_id=excluded.sandbox_id;
+CREATE INDEX IF NOT EXISTS personal_workspace_idle ON personal_workspace_runtime(last_used_at,user_id,workspace_id) WHERE sandbox_id IS NOT NULL;
+INSERT INTO personal_sandbox_leases(tenant_id,workspace_id,user_id,state,sandbox_id,updated_at) SELECT user_id,workspace_id,data->>'ownerId',COALESCE(data->>'sandboxState','active'),sandbox_id,(extract(epoch FROM now())*1000)::bigint FROM personal_workspace_runtime WHERE sandbox_id IS NOT NULL ON CONFLICT DO NOTHING;
+CREATE TABLE IF NOT EXISTS personal_maintenance(name text PRIMARY KEY,expires bigint NOT NULL);
+CREATE INDEX IF NOT EXISTS personal_runs_task ON personal_runs(user_id,(data->>'taskId'),run_id);
+CREATE INDEX IF NOT EXISTS personal_runs_global_queued ON personal_runs(user_id,created_at,run_id) WHERE state='QUEUED';
+CREATE TABLE IF NOT EXISTS personal_run_event_counters(user_id text NOT NULL,run_id text NOT NULL,cursor bigint NOT NULL,PRIMARY KEY(user_id,run_id),FOREIGN KEY(user_id,run_id) REFERENCES personal_runs(user_id,run_id) ON DELETE CASCADE);
+INSERT INTO personal_run_event_counters SELECT user_id,run_id,COALESCE(MAX((data->>'seq')::bigint),0) FROM personal_run_events GROUP BY user_id,run_id ON CONFLICT(user_id,run_id) DO UPDATE SET cursor=GREATEST(personal_run_event_counters.cursor,excluded.cursor);
+UPDATE personal_schema SET version=9 WHERE id=1;

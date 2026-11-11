@@ -1,0 +1,8 @@
+name: Personal Assistant
+model: default
+tools: [read, write, edit, bash, ls, grep, find, todo, ask_user_question]
+approval:
+  mode: user
+maxSteps: 30
+maxTokens: 100000
+timeoutSeconds: 600

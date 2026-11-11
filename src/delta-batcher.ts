@@ -8,9 +8,12 @@ export class DeltaBatcher {
   constructor(
     private persist: (type: string, data: unknown) => Promise<void>,
     private failed: (error: unknown) => void,
-    private maxChars = 4096,
+    private maxChars = 16384,
     private maxPendingChars = 131072,
-    private delayMs = 50,
+    private delayMs = 200,
+    private persistBatch?: (
+      events: { type: string; data: unknown }[],
+    ) => Promise<void>,
   ) {}
   push(delta: string) {
     if (this.error) throw this.error;
@@ -27,27 +30,36 @@ export class DeltaBatcher {
   private schedule() {
     clearTimeout(this.timer);
     this.timer = undefined;
+    const events: { type: string; data: unknown }[] = [];
     while (this.text.length) {
       const delta = this.text.slice(0, this.maxChars);
       this.text = this.text.slice(delta.length);
-      this.pendingChars += delta.length;
-      const task = this.tail
-        .then(() => {
-          if (this.error) throw this.error;
-          return this.persist("message.delta", { delta });
-        })
-        .finally(() => {
-          this.pendingChars -= delta.length;
-        });
-      this.tail = task;
-      void task.catch((e) => {
-        if (!this.error) {
-          this.error = e;
-          this.failed(e);
-        }
-      });
+      events.push({ type: "message.delta", data: { delta } });
     }
+    if (!events.length) return;
+    const chars = events.reduce(
+      (n, e) => n + (e.data as { delta: string }).delta.length,
+      0,
+    );
+    this.pendingChars += chars;
+    const task = this.tail
+      .then(async () => {
+        if (this.error) throw this.error;
+        if (this.persistBatch) await this.persistBatch(events);
+        else for (const e of events) await this.persist(e.type, e.data);
+      })
+      .finally(() => {
+        this.pendingChars -= chars;
+      });
+    this.tail = task;
+    void task.catch((e) => {
+      if (!this.error) {
+        this.error = e;
+        this.failed(e);
+      }
+    });
   }
+
   async flush() {
     this.schedule();
     await this.tail;
@@ -59,6 +71,7 @@ export class DeltaBatcher {
       return;
     }
     await this.flush();
-    await this.persist(type, data);
+    if (this.persistBatch) await this.persistBatch([{ type, data }]);
+    else await this.persist(type, data);
   }
 }

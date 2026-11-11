@@ -7,7 +7,7 @@ import { apiClient } from "./apiClient.js";
 /** Embedded console controller; composed into the nonce-protected HTML shell. */
 export const controller = String.raw`    "use strict";
     const $ = (id) => document.getElementById(id);
-    const toolNames = ["read","write","edit","bash","ls","grep","find","todo","ask_user_question","delegate_to_agent"];
+    const toolNames = ["read","write","edit","bash","ls","grep","find","todo","ask_user_question","delegate_to_agent","web_search","web_fetch"];
     const defaults = {
       name:"",systemPrompt:"",agentsMd:[],model:{provider:"",modelId:""},
       tools:["read","ls","grep","find"],skills:[],mcpServers:[],subagents:[],
@@ -82,6 +82,11 @@ ${apiClient}${controls}${agentEditor}    async function refresh(preferredId, ses
       const savedMode = formMode, savedBaseline = draft;
       const savedAccess = preserveDraft && accessDirty() ? {id:selected.id,mode:$("access-mode").value,users:$("allowed-users").value,baseline:accessBaseline} : null;
       const [a,s,m,c] = await Promise.all([allPages("/admin/agents",session),allPages("/admin/skills",session),api("/admin/mcp-servers",undefined,undefined,session),api("/admin/configuration",undefined,undefined,session)]);
+      if (c.agentMode === "editable") {
+        const editable = await api("/admin/config/agents",undefined,undefined,session);
+        a.splice(0,a.length,...editable.items.map(v=>({...v,agentId:v.id,activeVersionId:v.id,publishedAt:v.updatedAt})));
+        c.agentsRevision = editable.revision;
+      }
       current(session);
       agents = a.sort((x,y)=>String(y.publishedAt).localeCompare(String(x.publishedAt)));
       skills = s;mcps = m.items || [];configuration = c;
@@ -185,7 +190,7 @@ ${apiClient}${controls}${agentEditor}    async function refresh(preferredId, ses
         }
       }
       if (config.subagents.length && !config.tools.includes("delegate_to_agent")) warnings.push("已选择子 Agent，但未启用 delegate_to_agent。");
-      warnings.push(baseline ? "发布会激活新版本并保留 Agent 当前 ACL。已有会话仅在下一次独立任务时跟随；续跑和子任务保持原版本。" : "新建 Agent 将允许租户内所有用户访问。发布后可设为指定用户或禁用版本。");
+      warnings.push(configuration?.agentMode === "editable" ? "保存配置后，新任务使用新配置；排队任务和审批续跑保留原配置快照。" : baseline ? "发布会激活新版本并保留 Agent 当前 ACL。已有会话仅在下一次独立任务时跟随；续跑和子任务保持原版本。" : "新建 Agent 将允许租户内所有用户访问。发布后可设为指定用户或禁用版本。");
       $("review-warning").textContent = warnings.join("\n");
       $("publish-review").hidden = false;$("confirm-publish").disabled = false;
       $("review-title").focus?.();
@@ -194,20 +199,30 @@ ${apiClient}${controls}${agentEditor}    async function refresh(preferredId, ses
       if (!token || busy || !reviewConfig || formMode === "view" || !validateEditor()) return;
       if (JSON.stringify(collect()) !== JSON.stringify(reviewConfig)) {clearReview();return notify("配置已变化，请重新检查后发布。",true);}
       const config = structuredClone(reviewConfig);
-      if (!window.confirm("确认发布新的不可变 Agent 版本？")) return;
+      if (!window.confirm(configuration?.agentMode === "editable" ? "确认保存 Agent 配置？新任务将使用新配置，已有任务保留快照。" : "确认发布新的不可变 Agent 版本？")) return;
       const session = connection;
       setBusy(true);
       try {
         const path = formMode === "clone" && selected
           ? "/admin/agents/" + encodeURIComponent(selected.agentId || selected.id) + "/versions"
           : "/admin/agents";
-        const created = await api(path,"POST",config,session);
+        let created;
+        if (configuration?.agentMode === "editable") {
+          const id = formMode === "clone" && selected ? selected.id : "agent_" + crypto.randomUUID().replaceAll("-", "");
+          const inputs = agents.map(v => ({key:v.id,config:v.config,enabled:v.enabled,allowedUsers:v.allowedUsers}));
+          const index = inputs.findIndex(v=>v.key === id);
+          const input = {key:id,config,enabled:index >= 0 ? inputs[index].enabled : true,allowedUsers:index >= 0 ? inputs[index].allowedUsers : []};
+          if (index >= 0) inputs[index] = input; else inputs.push(input);
+          const result = await api("/admin/config/agents","POST",{revision:configuration.agentsRevision,agents:inputs},session);
+          created = result.items.find(v=>v.id === id);
+          created.agentId = id;created.publishedAt = created.updatedAt;
+        } else created = await api(path,"POST",config,session);
         created.allowedUsers = formMode === "clone" && selected ? [...(selected.allowedUsers || [])] : [];
         created.activeVersionId = created.id;
         for (const item of agents) if (item.agentId === created.agentId) item.activeVersionId = created.id;
         agents.unshift(created);
         selectAgent(created,true);
-        await refreshAfterMutation("发布成功，AgentVersion ID：" + created.id,created.id,session);
+        await refreshAfterMutation((configuration?.agentMode === "editable" ? "配置已保存，Agent ID：" : "发布成功，AgentVersion ID：") + created.id,created.id,session);
       } catch(e) {if (session === connection) notify("发布失败：" + e.message,true);}
       finally {if (session === connection) setBusy(false);}
     });

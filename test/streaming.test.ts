@@ -56,3 +56,23 @@ test("slow persistence has a bounded backlog and errors reject flush rather than
   await assert.rejects(broken.flush(), /write failed/);
   assert.ok(failure);
 });
+test("one flush persists all buffered chunks in one batch and completion remains ordered", async () => {
+  const batches: { type: string; data: any }[][] = [];
+  const b = new DeltaBatcher(
+    async () => {
+      throw new Error("batch sink must be used");
+    },
+    () => {},
+    8,
+    100,
+    200,
+    async (events) => {
+      batches.push(events);
+    },
+  );
+  b.push("x".repeat(32));
+  await b.emit("message.completed", { final: true });
+  assert.equal(batches.length, 2);
+  assert.equal(batches[0]!.length, 4);
+  assert.equal(batches[1]![0]!.type, "message.completed");
+});

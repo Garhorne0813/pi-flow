@@ -1,5 +1,9 @@
+import type { State } from "./domain.js";
+import { PersonalService } from "./personal-service.js";
+import { principal } from "./store/registry.js";
+import { personalRoutes } from "./api/personal.js";
 import { alerts } from "./alerts.js";
-import { agentAdminHTML } from "./agent-admin-ui.js";
+import { agentAdminHTML, editableAgentAdminHTML } from "./agent-admin-ui.js";
 import { randomBytes } from "node:crypto";
 import Fastify from "fastify";
 import multipart from "@fastify/multipart";
@@ -27,7 +31,7 @@ import {
   type Run,
 } from "./domain.js";
 import type { Auth } from "./auth.js";
-import type { HarnessService } from "./service.js";
+import { digest, type HarnessService } from "./service.js";
 import type { SandboxManager } from "./adapters/sandbox.js";
 import type { MCPManager } from "./adapters/mcp.js";
 const uuid = z.string().uuid();
@@ -56,6 +60,10 @@ function publicRun(r: Run | undefined) {
     id: r.id,
     sessionId: r.sessionId,
     agentVersionId: r.agentVersionId,
+    agentId: r.agentId,
+    cwd: r.cwd,
+    model: r.model,
+    configDigest: r.configDigest,
     taskId: r.taskId,
     rootRunId: r.rootRunId,
     parentRunId: r.parentRunId,
@@ -88,6 +96,25 @@ export function buildAPI(
     requestTimeout: 30000,
   });
   void app.register(multipart);
+  const configurationStore =
+    service instanceof PersonalService
+      ? {
+          readMetadata: <T>(
+            _tenant: string,
+            _keys: (keyof State)[],
+            fn: (s: State) => T | Promise<T>,
+          ) => service.registry.read(fn),
+          tx: <T>(_tenant: string, fn: (s: State) => T | Promise<T>) =>
+            service.registry.tx(fn),
+        }
+      : service.store;
+  const agentKey = (value: unknown) =>
+    service instanceof PersonalService
+      ? z
+          .string()
+          .regex(/^[a-z][a-z0-9_-]{0,63}$/)
+          .parse(value)
+      : uuid.parse(value);
   const actors = new WeakMap<object, Actor>();
   const actor = (req: object) => actors.get(req)!;
   app.setErrorHandler((err, req, reply) => {
@@ -129,11 +156,22 @@ export function buildAPI(
       )
     )
       return;
-    actors.set(req, await auth(req.headers.authorization));
+    const authenticated = await auth(req.headers.authorization);
+    if (service instanceof PersonalService) {
+      if (req.url.startsWith("/api/v1/workspaces"))
+        throw new Fault(404, "ROUTE_NOT_FOUND");
+      actors.set(req, await principal(service.registry, authenticated));
+    } else actors.set(req, authenticated);
   });
   app.addHook("onResponse", async (req, reply) => {
     const a = actors.get(req);
-    if (a)
+    if (
+      a &&
+      !(
+        service instanceof PersonalService &&
+        ["GET", "HEAD", "OPTIONS"].includes(req.method)
+      )
+    )
       await service.store.appendAudit(a.tenantId, {
         id: id(),
         timestamp: new Date().toISOString(),
@@ -158,13 +196,18 @@ export function buildAPI(
         `default-src 'none'; script-src 'nonce-${nonce}'; style-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`,
       )
       .type("text/html; charset=utf-8")
-      .send(agentAdminHTML.replace("__AGENT_UI_NONCE__", nonce));
+      .send(
+        (service instanceof PersonalService
+          ? editableAgentAdminHTML
+          : agentAdminHTML
+        ).replace("__AGENT_UI_NONCE__", nonce),
+      );
   });
   app.get("/api/v1/admin/configuration", async (req, reply) => {
     const a = actor(req);
     const deployment = service.adminConfiguration(a);
     reply.header("Cache-Control", "no-store");
-    const settings = await service.store.readMetadata(
+    const settings = await configurationStore.readMetadata(
       a.tenantId,
       ["agentDefaults", "defaultsRevision"],
       (s) => ({
@@ -174,6 +217,11 @@ export function buildAPI(
     );
     return {
       tenantId: a.tenantId,
+      agentMode: service instanceof PersonalService ? "editable" : "versioned",
+      agentsRevision:
+        service instanceof PersonalService
+          ? await service.registry.read((s) => s.configRevisions?.agents ?? 0)
+          : undefined,
       deployment: {
         ...deployment,
         sandbox: sandbox.policy,
@@ -223,7 +271,7 @@ export function buildAPI(
       throw new Fault(403, "MODEL_NOT_APPROVED");
     if (!service.hasBundle(defaults.skillBundle, a.tenantId))
       throw new Fault(400, "UNKNOWN_SKILL_BUNDLE");
-    return service.store.tx(a.tenantId, (s) => {
+    return configurationStore.tx(a.tenantId, (s) => {
       if ((s.defaultsRevision ?? 0) !== expectedRevision)
         throw new Fault(
           409,
@@ -243,7 +291,7 @@ export function buildAPI(
       .strict()
       .parse(req.body ?? {});
     const key = params(req.params).id!;
-    const reg = await service.store.readMetadata(
+    const reg = await configurationStore.readMetadata(
       a.tenantId,
       ["mcp"],
       (s) => s.mcp[key],
@@ -280,20 +328,32 @@ export function buildAPI(
   app.get("/api/v1/admin/usage", async (req) => {
     const a = actor(req);
     admin(a);
-    return service.store.read(a.tenantId, (s) =>
-      usageReport(s, policyFromEnv()),
-    );
+    return service.store.readUsage
+      ? service.store.readUsage(a.tenantId, undefined, (s) =>
+          usageReport(s, policyFromEnv()),
+        )
+      : service.store.readMetadata(a.tenantId, ["usage", "workspaces"], (s) =>
+          usageReport(s, policyFromEnv()),
+        );
   });
   app.get("/api/v1/usage", async (req) => {
     const a = actor(req);
-    return service.store.read(a.tenantId, (s) =>
-      usageReport(s, policyFromEnv(), a.userId),
-    );
+    return service.store.readUsage
+      ? service.store.readUsage(a.tenantId, undefined, (s) =>
+          usageReport(s, policyFromEnv(), a.userId),
+        )
+      : service.store.readMetadata(a.tenantId, ["usage", "workspaces"], (s) =>
+          usageReport(s, policyFromEnv(), a.userId),
+        );
   });
   app.get("/api/v1/runs/:id/usage", async (req) => {
     const a = actor(req),
       rid = uuid.parse(params(req.params).id);
-    return service.store.read(a.tenantId, (s) => {
+    const read = <T>(fn: (s: State) => T) =>
+      service.store.readUsage
+        ? service.store.readUsage(a.tenantId, rid, fn)
+        : service.store.read(a.tenantId, fn);
+    return read((s) => {
       run(s, a, rid);
       return usageReport(s, policyFromEnv(), undefined, rid);
     });
@@ -344,9 +404,12 @@ export function buildAPI(
       p = page.parse(req.query);
     return service.store.readMetadata(
       a.tenantId,
-      ["agents", "logicalAgents"],
+      ["agents", "managedAgents", "logicalAgents"],
       (s) => ({
-        items: Object.values(s.agents)
+        items: (service instanceof PersonalService
+          ? Object.values(s.managedAgents ?? {})
+          : Object.values(s.agents)
+        )
           .filter((v) => agentAllowed(v, a, s))
           .slice(p.offset, p.offset + p.limit),
       }),
@@ -395,7 +458,19 @@ export function buildAPI(
     const a = actor(req);
     admin(a);
     const p = page.parse(req.query);
-    return service.store.readMetadata(
+    if (service instanceof PersonalService)
+      return service.registry.read((s) => ({
+        items: Object.values(s.managedAgents ?? {})
+          .slice(p.offset, p.offset + p.limit)
+          .map((v) => ({
+            ...v,
+            agentId: v.id,
+            activeVersionId: v.id,
+            publishedAt: v.updatedAt,
+            digest: digest(v.config),
+          })),
+      }));
+    return configurationStore.readMetadata(
       a.tenantId,
       ["agents", "logicalAgents"],
       (s) => ({
@@ -418,13 +493,21 @@ export function buildAPI(
   app.put("/api/v1/admin/agents/:id/status", async (req) => {
     const a = actor(req);
     admin(a);
-    const key = uuid.parse(params(req.params).id);
+    const key = agentKey(params(req.params).id);
     const b = z.object({ enabled: z.boolean() }).strict().parse(req.body);
-    return service.store.tx(a.tenantId, (s) => {
-      if (!s.agents[key]) throw new Fault(404, "AGENT_NOT_FOUND");
-      s.agents[key]!.enabled = b.enabled;
+    return configurationStore.tx(a.tenantId, (s) => {
+      const agent =
+        service instanceof PersonalService
+          ? s.managedAgents?.[key]
+          : s.agents[key];
+      if (!agent) throw new Fault(404, "AGENT_NOT_FOUND");
+      agent.enabled = b.enabled;
+      if (service instanceof PersonalService) {
+        s.configRevisions ??= { global: 0, agents: 0 };
+        s.configRevisions.agents++;
+      }
       audit(s, a, "agent.status", key);
-      return s.agents[key];
+      return agent;
     });
   });
   for (const path of [
@@ -438,7 +521,7 @@ export function buildAPI(
         .parse(req.body);
       return service.setAccess(
         actor(req),
-        uuid.parse(params(req.params).id),
+        agentKey(params(req.params).id),
         b.allowedUsers,
       );
     });
@@ -447,7 +530,7 @@ export function buildAPI(
     const a = actor(req);
     admin(a);
     const p = page.parse(req.query);
-    return service.store.readMetadata(a.tenantId, ["skills"], (s) => ({
+    return configurationStore.readMetadata(a.tenantId, ["skills"], (s) => ({
       items: Object.values(s.skills).slice(p.offset, p.offset + p.limit),
     }));
   });
@@ -505,7 +588,7 @@ export function buildAPI(
           throw new Fault(400, "INVALID_REQUEST", "Choose a Skill ZIP archive");
         if (!service.hasBundle(input.bundle, a.tenantId))
           throw new Fault(400, "UNKNOWN_SKILL_BUNDLE");
-        await service.store.readMetadata(a.tenantId, ["skills"], (s) => {
+        await configurationStore.readMetadata(a.tenantId, ["skills"], (s) => {
           if (s.skills[input.id])
             throw new Fault(409, "IMMUTABLE_SKILL_VERSION");
         });
@@ -522,7 +605,7 @@ export function buildAPI(
           if (req.raw.aborted) throw new Fault(400, "UPLOAD_ABORTED");
           if (a.expiresAt !== undefined && a.expiresAt <= Date.now())
             throw new Fault(401, "UNAUTHENTICATED");
-          const skill = await service.store.tx(a.tenantId, (s) => {
+          const skill = await configurationStore.tx(a.tenantId, (s) => {
             if (req.raw.aborted) throw new Fault(400, "UPLOAD_ABORTED");
             if (a.expiresAt !== undefined && a.expiresAt <= Date.now())
               throw new Fault(401, "UNAUTHENTICATED");
@@ -567,7 +650,7 @@ export function buildAPI(
     if (!service.hasBundle(b.bundle, a.tenantId))
       throw new Fault(400, "UNKNOWN_SKILL_BUNDLE");
     return reply.code(201).send(
-      await service.store.tx(a.tenantId, (s) => {
+      await configurationStore.tx(a.tenantId, (s) => {
         if (s.skills[b.id]) throw new Fault(409, "IMMUTABLE_SKILL_VERSION");
         s.skills[b.id] = { ...b, enabled: true };
         audit(s, a, "skill.register", b.id);
@@ -580,7 +663,7 @@ export function buildAPI(
     admin(a);
     const key = params(req.params).id!;
     const b = z.object({ enabled: z.boolean() }).strict().parse(req.body);
-    return service.store.tx(a.tenantId, (s) => {
+    return configurationStore.tx(a.tenantId, (s) => {
       if (!s.skills[key]) throw new Fault(404, "SKILL_NOT_FOUND");
       s.skills[key]!.enabled = b.enabled;
       audit(s, a, "skill.status", key);
@@ -590,7 +673,7 @@ export function buildAPI(
   app.get("/api/v1/admin/mcp-servers", async (req) => {
     const a = actor(req);
     admin(a);
-    return service.store.readMetadata(a.tenantId, ["mcp"], (s) => ({
+    return configurationStore.readMetadata(a.tenantId, ["mcp"], (s) => ({
       items: Object.values(s.mcp),
     }));
   });
@@ -608,7 +691,7 @@ export function buildAPI(
     if (!service.hasEndpoint(b.endpointRef, a.tenantId))
       throw new Fault(400, "MCP_ENDPOINT_NOT_REGISTERED");
     return reply.code(201).send(
-      await service.store.tx(a.tenantId, (s) => {
+      await configurationStore.tx(a.tenantId, (s) => {
         if (s.mcp[b.id]) throw new Fault(409, "MCP_ALREADY_REGISTERED");
         s.mcp[b.id] = { ...b, enabled: true };
         audit(s, a, "mcp.register", b.id);
@@ -621,7 +704,7 @@ export function buildAPI(
     admin(a);
     const key = params(req.params).id!;
     const b = z.object({ enabled: z.boolean() }).strict().parse(req.body);
-    return service.store.tx(a.tenantId, (s) => {
+    return configurationStore.tx(a.tenantId, (s) => {
       if (!s.mcp[key]) throw new Fault(404, "MCP_NOT_FOUND");
       s.mcp[key]!.enabled = b.enabled;
       audit(s, a, "mcp.status", key);
@@ -631,14 +714,64 @@ export function buildAPI(
   app.get("/api/v1/admin/audit", async (req) => {
     const a = actor(req);
     admin(a);
-    const p = page.parse(req.query);
-    return service.store.read(a.tenantId, (s) => ({
-      items: s.audit.slice(p.offset, p.offset + p.limit),
-    }));
+    const p = page
+      .extend({ cursor: z.string().max(2000).optional() })
+      .parse(req.query);
+    let after: { timestamp: string; id: string } | undefined;
+    if (p.cursor !== undefined) {
+      try {
+        after = z
+          .object({
+            timestamp: z.string().datetime(),
+            id: z.string().min(1).max(200),
+          })
+          .strict()
+          .parse(JSON.parse(Buffer.from(p.cursor, "base64url").toString()));
+      } catch {
+        throw new Fault(400, "INVALID_CURSOR");
+      }
+      if (p.offset) throw new Fault(400, "INVALID_CURSOR");
+    }
+    const rows = service.store.listAudit
+      ? await service.store.listAudit(a.tenantId, p.offset, p.limit + 1, after)
+      : await service.store.readMetadata(a.tenantId, ["audit"], (s) =>
+          s.audit
+            .sort((a, b) =>
+              a.timestamp < b.timestamp
+                ? -1
+                : a.timestamp > b.timestamp
+                  ? 1
+                  : a.id < b.id
+                    ? -1
+                    : a.id > b.id
+                      ? 1
+                      : 0,
+            )
+            .filter(
+              (r) =>
+                !after ||
+                r.timestamp > after.timestamp ||
+                (r.timestamp === after.timestamp && r.id > after.id),
+            )
+            .slice(p.offset, p.offset + p.limit + 1),
+        );
+    const items = rows.slice(0, p.limit),
+      last = items.at(-1);
+    return {
+      items,
+      ...(rows.length > p.limit && last
+        ? {
+            nextCursor: Buffer.from(
+              JSON.stringify({ timestamp: last.timestamp, id: last.id }),
+            ).toString("base64url"),
+          }
+        : {}),
+    };
   });
   app.get("/api/v1/admin/stats", async (req) => {
     const a = actor(req);
     admin(a);
+    if (service.store.adminStats) return service.store.adminStats(a.tenantId);
     return service.store.read(a.tenantId, (s) => {
       const runs = Object.values(s.runs);
       const byState: Record<string, number> = {};
@@ -828,7 +961,11 @@ export function buildAPI(
   app.get("/api/v1/sessions/:id", async (req) => {
     const a = actor(req),
       sid = uuid.parse(params(req.params).id);
-    return service.store.read(a.tenantId, (s) => ({
+    const read = service.store.readSession
+      ? <T>(fn: (s: State) => T) =>
+          service.store.readSession!(a.tenantId, sid, fn)
+      : <T>(fn: (s: State) => T) => service.store.read(a.tenantId, fn);
+    return read((s) => ({
       ...session(s, a, sid),
       todos: s.todos[sid] ?? [],
     }));
@@ -857,6 +994,7 @@ export function buildAPI(
             );
             return `00-${trace.traceId}-${trace.spanId}-01`;
           })(),
+          req.headers.authorization?.slice(7),
         ),
       ),
     );
@@ -887,6 +1025,7 @@ export function buildAPI(
             actor(req),
             uuid.parse(params(req.params).id),
             b.response,
+            req.headers.authorization?.slice(7),
           ),
         ),
       );
@@ -911,8 +1050,11 @@ export function buildAPI(
       0,
       (s) => run(s, a, rid).state,
     );
-    if (a.expiresAt !== undefined && Date.now() >= a.expiresAt)
+    const subscription = await service.store.watchEvents?.(a.tenantId, rid);
+    if (a.expiresAt !== undefined && Date.now() >= a.expiresAt) {
+      subscription?.close();
       throw new Fault(401, "AUTHENTICATION_EXPIRED");
+    }
     reply.hijack();
     telemetry.count("sse_active", 1);
     reply.raw.writeHead(200, {
@@ -927,18 +1069,40 @@ export function buildAPI(
     let expiryTimer: ReturnType<typeof setTimeout> | undefined;
     const expired = () =>
       a.expiresAt !== undefined && Date.now() >= a.expiresAt;
-    const expire = () => {
+    const closeStream = (code: string) => {
       if (closed) return;
       closed = true;
       disconnected.abort();
       // A stalled reader may prevent end() from flushing and emitting close.
-      // Destroy a backpressured response so expiry also releases the waiter.
+      // Destroy a backpressured response so revocation/expiry releases the waiter.
       if (reply.raw.writableNeedDrain) reply.raw.destroy();
       else
         reply.raw.end(
-          'event: stream.error\ndata: {"code":"AUTHENTICATION_EXPIRED"}\n\n',
+          `event: stream.error\ndata: ${JSON.stringify({ code })}\n\n`,
         );
     };
+    const expire = () => closeStream("AUTHENTICATION_EXPIRED");
+    let checkingActor = false;
+    const checkActor = async () => {
+      if (closed || checkingActor) return;
+      checkingActor = true;
+      try {
+        await service.verifyActor(a);
+      } catch (error) {
+        closeStream(
+          error instanceof Fault && error.code === "USER_DISABLED"
+            ? "ACCESS_REVOKED"
+            : "ACCESS_REVOKED_OR_UNAVAILABLE",
+        );
+      } finally {
+        checkingActor = false;
+      }
+    };
+    // Independent of event paging/backpressure: disabled accounts lose even
+    // idle or stalled connections within one second plus identity lookup time.
+    const actorTimer = setInterval(() => {
+      void checkActor();
+    }, 1000);
     const armExpiry = () => {
       if (a.expiresAt === undefined || closed) return;
       const remaining = a.expiresAt - Date.now();
@@ -954,7 +1118,9 @@ export function buildAPI(
     reply.raw.on("close", () => {
       closed = true;
       clearTimeout(expiryTimer);
+      clearInterval(actorTimer);
       disconnected.abort();
+      subscription?.close();
       telemetry.count("sse_active", -1);
     });
     armExpiry();
@@ -1013,12 +1179,14 @@ export function buildAPI(
           await new Promise<void>((resolve) => setImmediate(resolve));
           continue;
         }
-        await service.store.waitForEvents(
-          a.tenantId,
-          rid,
-          250,
-          disconnected.signal,
-        );
+        if (subscription) await subscription.wait(5000, disconnected.signal);
+        else
+          await service.store.waitForEvents(
+            a.tenantId,
+            rid,
+            250,
+            disconnected.signal,
+          );
       }
     } catch {
       if (!closed)
@@ -1026,6 +1194,9 @@ export function buildAPI(
           'event: stream.error\ndata: {"code":"ACCESS_REVOKED_OR_UNAVAILABLE"}\n\n',
         );
     } finally {
+      closed = true;
+      subscription?.close();
+      clearInterval(actorTimer);
       clearTimeout(expiryTimer);
       reply.raw.end();
     }
@@ -1097,5 +1268,7 @@ export function buildAPI(
       _workspaceOnly: true,
     });
   });
+  if (service instanceof PersonalService)
+    personalRoutes(app, service, sandbox, actor);
   return app;
 }

@@ -44,6 +44,7 @@ export class SandboxManager {
   readonly policy: SandboxPolicy;
   readonly capacity: SandboxCapacity;
   private nextSweepAt = 0;
+  private fileManager?: SandboxManager;
 
   constructor(
     private store: Store,
@@ -56,7 +57,19 @@ export class SandboxManager {
       cleanupTimeoutMs: number;
       leaseWaitTimeoutMs?: number;
     } = { remoteTimeoutMs: 30000, cleanupTimeoutMs: 1000 },
+    storeScope: "default" | "workspace" = "default",
   ) {
+    // workspaceManager already scopes writes and supplies a metadata-only read.
+    if (store.workspaceTx && storeScope !== "workspace") {
+      this.store = new Proxy(store, {
+        get: (target, key) => {
+          if (key === "read" || key === "tx")
+            return target.workspaceTx!.bind(target);
+          const value = Reflect.get(target, key);
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      });
+    }
     if (Object.values(limits).some((v) => !Number.isFinite(v) || v <= 0))
       throw new Error("Invalid Sandbox time limits");
     // Every control-plane operation has a local bound, even for SDKs that
@@ -87,7 +100,7 @@ export class SandboxManager {
       },
     });
     this.policy = SandboxPolicySchema.parse(policy);
-    this.capacity = new SandboxCapacity(store, this.policy);
+    this.capacity = new SandboxCapacity(this.store, this.policy);
   }
   private remote<T>(
     start: () => Promise<T>,
@@ -296,7 +309,7 @@ export class SandboxManager {
     wid: string,
     owner: string,
     bundle: string,
-    fn: (sid: string) => Promise<T>,
+    fn: (sid: string, assertOwned: () => Promise<void>) => Promise<T>,
     skillIds: readonly string[] = [],
     signal?: AbortSignal,
     access: {
@@ -349,6 +362,14 @@ export class SandboxManager {
     const acquire = () =>
       this.store.tx(a.tenantId, (s) => {
         const { w, skills } = validate(s);
+        if (
+          a.personal &&
+          Object.values(s.runs).some((r) => r.state === "RUNNING") &&
+          !Object.values(s.runs).some(
+            (r) => r.state === "RUNNING" && owner.startsWith(r.id + ":"),
+          )
+        )
+          throw new Fault(409, "WORKSPACE_BUSY");
         access.authorize?.(s);
         if (!available(w)) return undefined;
         const scope = this.provider.scope(bundle, skills);
@@ -547,7 +568,7 @@ export class SandboxManager {
       if (signal?.aborted) stop();
       await assertOwned();
       const result = await this.remote(
-        () => fn(sid),
+        () => fn(sid, assertOwned),
         signal,
         undefined,
         130000,
@@ -555,6 +576,11 @@ export class SandboxManager {
       await assertOwned();
       return result;
     } catch (e) {
+      // A timeout abandons fn's promise; it does not stop an SDK response.
+      // Fence the callback before cleanup awaits so it cannot dispatch another
+      // operation while we still own the durable lease and deletion is pending.
+      if (e instanceof Fault && e.code === "SANDBOX_REMOTE_TIMEOUT")
+        failed = true;
       if (reserved && !activated && e instanceof SandboxCreationError) {
         await this.creationFailure(a, wid, owner, e);
         reserved = false;
@@ -631,6 +657,79 @@ export class SandboxManager {
       });
     }
   }
+  private async dispatch(
+    a: Actor,
+    wid: string,
+    owner: string,
+    bundle: string,
+    sid: string,
+    op: string,
+    args: Record<string, unknown>,
+    signal: AbortSignal | undefined,
+    skillIds: readonly string[],
+    authorize?: (s: State) => void,
+    workspaceOnly = false,
+  ) {
+    signal?.throwIfAborted();
+    const { skills, hostUploads, trafficToken } = await this.store.readMetadata(
+      a.tenantId,
+      ["skills", "workspaces", ...(workspaceOnly ? ["policy" as const] : [])],
+      (s) => {
+        if (workspaceOnly) {
+          workspace(s, a, wid, true);
+          if (!this.canUseBundle(bundle, a.tenantId))
+            throw new Fault(403, "BUNDLE_NOT_GRANTED");
+          if (
+            !["read", "ls", "grep", "find"].includes(op) &&
+            s.policy?.disabledTools.some((t) =>
+              [
+                op,
+                "remote_" + op,
+                "write",
+                "remote_write",
+                "memory.write",
+              ].includes(t),
+            )
+          )
+            throw new Fault(403, "TOOL_DISABLED");
+        }
+        return {
+          skills: skillIds.map((id) => {
+            const skill = s.skills[id];
+            if (!skill?.enabled || skill.bundle !== bundle)
+              throw new Fault(403, "SKILL_DENIED");
+            return { path: skill.path, digest: skill.digest };
+          }),
+          hostUploads: skillIds
+            .map((id) => s.skills[id]!)
+            .filter((skill) => skill.hostUpload)
+            .map(({ id, bundle, path, hostUpload }) => ({
+              id,
+              bundle,
+              path,
+              hostUpload,
+            })),
+          trafficToken: s.workspaces[wid]?.sandboxTrafficToken,
+        };
+      },
+    );
+    // Fresh Run and registry snapshot after preparation/metadata reads,
+    // immediately before dispatch. No historical event scan on this path.
+    if (authorize) await this.store.readRun(a.tenantId, owner, authorize);
+    if (workspaceOnly) await this.store.verifyActor?.(a);
+    signal?.throwIfAborted();
+    return this.provider.execute(
+      sid,
+      op,
+      {
+        ...args,
+        _skillIds: [...skillIds],
+        _skillManifests: skills,
+        _skillHostUploads: hostUploads,
+      },
+      trafficToken,
+    );
+  }
   async execute(
     a: Actor,
     wid: string,
@@ -647,45 +746,135 @@ export class SandboxManager {
       wid,
       owner,
       bundle,
-      async (sid) => {
-        signal?.throwIfAborted();
-        const { skills, hostUploads, trafficToken } = await this.store.read(
-          a.tenantId,
-          (s) => ({
-            skills: skillIds.map((id) => {
-              const skill = s.skills[id];
-              if (!skill?.enabled || skill.bundle !== bundle)
-                throw new Fault(403, "SKILL_DENIED");
-              return { path: skill.path, digest: skill.digest };
-            }),
-            hostUploads: skillIds
-              .map((id) => s.skills[id]!)
-              .filter((skill) => skill.hostUpload)
-              .map(({ id, bundle, path, hostUpload }) => ({
-                id,
-                bundle,
-                path,
-                hostUpload,
-              })),
-            trafficToken: s.workspaces[wid]?.sandboxTrafficToken,
-          }),
-        );
-        signal?.throwIfAborted();
-        return this.provider.execute(
+      (sid) =>
+        this.dispatch(
+          a,
+          wid,
+          owner,
+          bundle,
           sid,
           op,
-          {
-            ...args,
-            _skillIds: [...skillIds],
-            _skillManifests: skills,
-            _skillHostUploads: hostUploads,
-          },
-          trafficToken,
-        );
-      },
+          args,
+          signal,
+          skillIds,
+          authorize,
+        ),
       skillIds,
       signal,
       { write: !["read", "ls", "grep", "find"].includes(op), authorize },
+    );
+  }
+  private workspaceManager() {
+    if (!this.fileManager) {
+      const store = this.store.workspaceTx
+        ? new Proxy(this.store, {
+            get: (target, key) => {
+              if (key === "tx") return target.workspaceTx!.bind(target);
+              if (key === "read")
+                return (user: string, fn: (s: State) => unknown) =>
+                  target.readMetadata(
+                    user,
+                    ["workspaces", "skills", "policy"],
+                    fn,
+                  );
+              const value = Reflect.get(target, key);
+              return typeof value === "function" ? value.bind(target) : value;
+            },
+          })
+        : this.store;
+      this.fileManager = new SandboxManager(
+        store,
+        this.provider,
+        this.policy,
+        this.canUseBundle,
+        this.limits,
+        "workspace",
+      );
+    }
+    return this.fileManager;
+  }
+  async withWorkspaceLease<T>(
+    a: Actor,
+    wid: string,
+    owner: string,
+    bundle: string,
+    fn: (
+      execute: (op: string, args: Record<string, unknown>) => Promise<unknown>,
+    ) => Promise<T>,
+    signal?: AbortSignal,
+    skillIds: readonly string[] = [],
+    authorize?: (s: State) => void,
+  ) {
+    const manager = a.personal ? this.workspaceManager() : this;
+    signal?.throwIfAborted();
+    await manager.store.verifyActor?.(a);
+    const w = await manager.store.readMetadata(
+      a.tenantId,
+      ["workspaces"],
+      (s) => workspace(s, a, wid, true),
+    );
+    bundle = w.bundle ?? bundle;
+    skillIds = w.sandboxSkills ?? skillIds;
+    return manager.withLease(
+      a,
+      wid,
+      owner,
+      bundle,
+      (sid, owned) =>
+        fn(async (op, args) => {
+          signal?.throwIfAborted();
+          await owned();
+          return manager.dispatch(
+            a,
+            wid,
+            owner,
+            bundle,
+            sid,
+            op,
+            { ...args, _workspaceOnly: true },
+            signal,
+            skillIds,
+            undefined,
+            true,
+          );
+        }),
+      skillIds,
+      signal,
+      { write: true, authorize },
+    );
+  }
+  async executeWorkspace(
+    a: Actor,
+    wid: string,
+    owner: string,
+    bundle: string,
+    op: string,
+    args: Record<string, unknown>,
+    signal?: AbortSignal,
+    skillIds: readonly string[] = [],
+    authorize?: (s: State) => void,
+  ) {
+    if (!a.personal)
+      return this.execute(
+        a,
+        wid,
+        owner,
+        bundle,
+        op,
+        args,
+        signal,
+        skillIds,
+        authorize,
+      );
+    return this.withWorkspaceLease(
+      a,
+      wid,
+      owner,
+      bundle,
+      (execute) => execute(op, args),
+      signal,
+      skillIds,
+      authorize,
     );
   }
   // File APIs use a temporary instance with only the workspace volume. Its
@@ -694,11 +883,13 @@ export class SandboxManager {
     a: Actor,
     wid: string,
     owner: string,
-    op: "read" | "ls" | "write",
+    op: "read" | "ls" | "write" | "delete",
     args: Record<string, unknown>,
   ) {
+    if (a.personal)
+      return this.executeWorkspace(a, wid, owner, "default", op, args);
     owner = `${owner}:${crypto.randomUUID()}`;
-    if (!["read", "ls", "write"].includes(op))
+    if (!["read", "ls", "write", "delete"].includes(op))
       throw new Fault(403, "TOOL_DENIED");
     const raw = args.path ?? "/workspace";
     if (typeof raw !== "string" || raw.includes("\0"))
@@ -706,7 +897,7 @@ export class SandboxManager {
     const path = posix.resolve("/workspace", raw);
     if (path !== "/workspace" && !path.startsWith("/workspace/"))
       throw new Fault(403, "PATH_DENIED");
-    const writing = op === "write";
+    const writing = op === "write" || op === "delete";
     const w = await this.store.tx(a.tenantId, (s) => {
       const w = workspace(s, a, wid, writing);
       if (!w.bundle) throw new Fault(409, "CREATE_SESSION_FIRST");
@@ -1028,7 +1219,7 @@ export class SandboxManager {
     return this.status(a, wid);
   }
   async status(a: Actor, wid: string) {
-    return this.store.read(a.tenantId, (s) => {
+    return this.store.readMetadata(a.tenantId, ["workspaces"], (s) => {
       const w = workspace(s, a, wid);
       return {
         state: w.sandboxId
@@ -1048,10 +1239,24 @@ export class SandboxManager {
   async reapIdle(now = Date.now()) {
     const result = { paused: 0, released: 0, failed: 0 };
     await this.capacity.adoptLegacy();
-    for (const tenantId of await this.store.tenants()) {
-      const candidates = await this.store.read(tenantId, (s) =>
-        Object.values(s.workspaces).filter((w) => w.sandboxId && !w.deleting),
-      );
+    const due = this.store.listSandboxMaintenance
+      ? await this.store.listSandboxMaintenance(
+          now,
+          this.policy.idlePauseSeconds * 1000,
+          this.policy.idleReleaseSeconds * 1000,
+          this.policy.sweepIntervalSeconds * 1000,
+        )
+      : undefined;
+    for (const tenantId of due
+      ? [...new Set(due.map((w) => w.user))]
+      : await this.store.tenants()) {
+      const candidates = due
+        ? due.filter((w) => w.user === tenantId).map((w) => w.workspace)
+        : await this.store.readMetadata(tenantId, ["workspaces"], (s) =>
+            Object.values(s.workspaces).filter(
+              (w) => w.sandboxId && !w.deleting,
+            ),
+          );
       for (const w of candidates) {
         if (w.sandboxLastUsedAt === undefined) {
           await this.store.tx(tenantId, (s) => {

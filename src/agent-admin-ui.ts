@@ -224,3 +224,39 @@ ${controller}  </script>
 </body>
 </html>
 `;
+
+/** The personal runtime edits stable Agents while Skill archives remain versioned. */
+export const editableAgentAdminHTML = [
+  ['id="activate"', 'id="activate" hidden'],
+  ["Agents 与历史版本", "Agent 配置"],
+  ["连接 API 后查看 Agent 版本", "连接 API 后查看 Agent 配置"],
+  [
+    "访问控制统一作用于同一 Agent 的全部版本。已发布版本的访问范围在下方管理；新建 Agent 默认允许租户内所有用户。",
+    "访问控制作用于当前 Agent。新建 Agent 默认允许平台所有用户；下方可限制访问范围。",
+  ],
+  ["发布前检查", "保存前检查"],
+  ["确认发布不可变版本", "确认保存配置"],
+  ["发布后续版本", "编辑配置"],
+  ["版本与访问控制", "配置与访问控制"],
+  [
+    "选中一个已发布版本后，可以管理其状态和访问范围。",
+    "选中一个 Agent 后，可以管理其配置、状态和访问范围。",
+  ],
+  ["<span>版本 ID</span>", "<span>Agent key</span>"],
+  ["<span>发布时间</span>", "<span>更新时间</span>"],
+  ["UCS Subject", "个人用户 UUID"],
+  ["禁用版本", "禁用 Agent"],
+  ["租户内所有用户", "平台所有用户"],
+  [
+    "发布后续版本会更新当前生效版本。会话在下一次独立任务时跟随生效版本；续跑和子任务保留原任务版本。访问范围统一作用于该 Agent 的全部版本。",
+    "保存配置后，新任务使用新配置；排队任务和审批续跑保留原快照。禁用和访问限制仍实时生效。",
+  ],
+  ["Agent 版本与委派关系", "Agent 与委派关系"],
+  [
+    "子 Agent 复用已发布的 AgentVersion。选择父 Agent 后，发布后续版本即可调整子 Agent、并发上限和委派深度。实际委派能力取父子权限交集。",
+    "选择父 Agent 并编辑配置，可调整子 Agent 与委派预算。实际委派能力取父子权限交集，个人子任务不能再次委派。",
+  ],
+  ["不修改已发布 Agent 或已有会话", "不修改当前 Agent 或已有任务"],
+]
+  .sort((a, b) => b[0]!.length - a[0]!.length)
+  .reduce((html, [from, to]) => html.replaceAll(from!, to!), agentAdminHTML);

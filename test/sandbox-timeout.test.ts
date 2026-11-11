@@ -388,3 +388,241 @@ test("Run remaining deadline bounds provisioning even when the remote timeout is
     await worker.stop();
   }
 });
+
+async function memoryBatchFixture() {
+  const { MemoryManager } = await import("../src/execution/memory.js");
+  const f = await fixture(),
+    personal = { ...actor, personal: true };
+  // Use the production 130s execution budget; virtual time makes the slow
+  // provider cases deterministic without a multi-minute wall-clock wait.
+  const sandbox = new SandboxManager(f.store, f.provider, {}, undefined, {
+    remoteTimeoutMs: 30000,
+    cleanupTimeoutMs: 60000,
+  });
+  await sandbox.execute(personal, f.w.id, "prepare", "default", "mkdir", {
+    path: "/workspace/memory",
+  });
+  const w = await f.store.read(actor.tenantId, (s) => s.workspaces[f.w.id]!);
+  return {
+    ...f,
+    personal,
+    sandbox,
+    memory: new MemoryManager(f.store, sandbox),
+    files: f.provider.volumes.get(w.volumeId!)!,
+    config: AgentConfig.parse({
+      name: "Memory",
+      systemPrompt: "",
+      model: { provider: "demo", modelId: "demo" },
+      tools: [],
+      memory: { enabled: true },
+    }),
+  };
+}
+async function flushUntil(check: () => boolean) {
+  for (let n = 0; n < 200; n++) {
+    if (check()) return;
+    await new Promise<void>((r) => setImmediate(r));
+  }
+  assert.fail("Virtual-time operation did not settle");
+}
+
+test("slow healthy Memory steps share the real 130s budget and late responses cannot dispatch while cleanup holds the lease", async (t) => {
+  const f = await memoryBatchFixture();
+  f.files.set("/workspace/memory/existing.md", "existing");
+  f.files.set("/workspace/memory/MEMORY.md", "old-index");
+  const execute = f.provider.execute.bind(f.provider),
+    kill = f.provider.kill.bind(f.provider),
+    calls: string[] = [];
+  let releaseKill!: () => void,
+    killStarted = false,
+    completed = 0;
+  const gate = new Promise<void>((r) => (releaseKill = r));
+  f.provider.kill = async (sid) => {
+    killStarted = true;
+    await gate;
+    return kill(sid);
+  };
+  f.provider.execute = async (sid, op, args) => {
+    calls.push(op);
+    // The SDK operation succeeds, but its normal response arrives after 50s.
+    const result = await execute(sid, op, args);
+    await new Promise<void>((r) => setTimeout(r, 50000));
+    completed++;
+    return result;
+  };
+  t.mock.timers.enable({ apis: ["setTimeout", "setInterval", "Date"] });
+  let settled = false;
+  const response = assert
+    .rejects(
+      f.memory.write(
+        f.personal,
+        f.w.id,
+        "batch",
+        f.config,
+        "/workspace",
+        "/workspace/memory/new.md",
+        "new",
+        new AbortController().signal,
+        true,
+      ),
+      { code: "SANDBOX_REMOTE_TIMEOUT" },
+    )
+    .then(() => {
+      settled = true;
+    });
+  try {
+    await flushUntil(() => calls.length === 1);
+    t.mock.timers.tick(50000);
+    await flushUntil(() => calls.length === 2);
+    t.mock.timers.tick(50000);
+    await flushUntil(() => calls.length === 3);
+    t.mock.timers.tick(30000);
+    await flushUntil(() => killStarted);
+    assert.equal(
+      settled,
+      false,
+      "cleanup must retain the request until kill confirms",
+    );
+    t.mock.timers.tick(20000);
+    await flushUntil(() => completed === 3);
+    // Give the successful late read and its promise continuations a chance to
+    // run while kill is still pending and the old workspace lock still exists.
+    for (let n = 0; n < 20; n++)
+      await new Promise<void>((r) => setImmediate(r));
+    assert.deepEqual(calls, ["mkdir", "find", "read"]);
+    assert.equal(f.files.has("/workspace/memory/new.md"), false);
+    assert.equal(f.files.get("/workspace/memory/MEMORY.md"), "old-index");
+    releaseKill();
+    await response;
+    assert.equal(f.provider.boxes.size, 0);
+    assert.equal((await f.sandbox.capacity.usage(actor)).user.active, 0);
+    const s = await f.store.read(actor.tenantId, (s) => s);
+    assert.equal(s.workspaces[f.w.id]!.lock, undefined);
+    assert.equal(
+      s.audit.filter((a) => a.action === "memory.write.failed").length,
+      1,
+    );
+    assert.equal(s.audit.filter((a) => a.action === "memory.write").length, 0);
+  } finally {
+    releaseKill();
+    t.mock.timers.reset();
+    await response;
+  }
+});
+
+test("Memory timeout during index write reports failure, releases capacity and retains the already-written topic with the old index", async (t) => {
+  const f = await memoryBatchFixture();
+  f.files.set("/workspace/memory/MEMORY.md", "old-index");
+  const execute = f.provider.execute.bind(f.provider),
+    calls: string[] = [];
+  let lastSettled = false;
+  f.provider.execute = async (sid, op, args) => {
+    calls.push(`${op}:${args.path}`);
+    // Every operation is below 130s. Four 40s file operations exceed the
+    // shared budget only when the final index write is in flight.
+    await new Promise<void>((r) => setTimeout(r, 40000));
+    try {
+      return await execute(sid, op, args);
+    } finally {
+      if (calls.length === 4) lastSettled = true;
+    }
+  };
+  t.mock.timers.enable({ apis: ["setTimeout", "setInterval", "Date"] });
+  const response = assert.rejects(
+    f.memory.write(
+      f.personal,
+      f.w.id,
+      "batch",
+      f.config,
+      "/workspace",
+      "/workspace/memory/new.md",
+      "new",
+      new AbortController().signal,
+      true,
+    ),
+    { code: "SANDBOX_REMOTE_TIMEOUT" },
+  );
+  try {
+    for (let n = 1; n <= 3; n++) {
+      await flushUntil(() => calls.length === n);
+      t.mock.timers.tick(40000);
+    }
+    await flushUntil(() => calls.length === 4);
+    t.mock.timers.tick(10000);
+    await response;
+    assert.match(f.files.get("/workspace/memory/new.md")!, /new/);
+    assert.equal(f.files.get("/workspace/memory/MEMORY.md"), "old-index");
+    assert.equal(f.provider.boxes.size, 0);
+    assert.equal((await f.sandbox.capacity.usage(actor)).user.active, 0);
+    t.mock.timers.tick(30000);
+    await flushUntil(() => lastSettled);
+    assert.equal(calls.length, 4);
+    assert.equal(f.files.get("/workspace/memory/MEMORY.md"), "old-index");
+    const s = await f.store.read(actor.tenantId, (s) => s);
+    assert.equal(s.workspaces[f.w.id]!.lock, undefined);
+    assert.equal(
+      s.audit.filter((a) => a.action === "memory.write.failed").length,
+      1,
+    );
+    assert.equal(
+      s.audit.find((a) => a.action === "memory.write.failed")!.result,
+      "SANDBOX_REMOTE_TIMEOUT",
+    );
+    assert.ok(!s.audit.some((a) => a.action === "memory.write"));
+  } finally {
+    t.mock.timers.reset();
+    await response;
+  }
+});
+
+test("slow Memory batch completing at 120s succeeds within the shared 130s budget", async (t) => {
+  const f = await memoryBatchFixture();
+  f.files.set("/workspace/memory/MEMORY.md", "old-index");
+  const execute = f.provider.execute.bind(f.provider),
+    calls: string[] = [];
+  let killed = 0;
+  const kill = f.provider.kill.bind(f.provider);
+  f.provider.kill = async (sid) => {
+    killed++;
+    return kill(sid);
+  };
+  f.provider.execute = async (sid, op, args) => {
+    calls.push(op);
+    await new Promise<void>((r) => setTimeout(r, 30000));
+    return execute(sid, op, args);
+  };
+  t.mock.timers.enable({ apis: ["setTimeout", "setInterval", "Date"] });
+  const response = f.memory.write(
+    f.personal,
+    f.w.id,
+    "batch",
+    f.config,
+    "/workspace",
+    "/workspace/memory/new.md",
+    "new",
+    new AbortController().signal,
+    true,
+  );
+  try {
+    for (let n = 1; n <= 4; n++) {
+      await flushUntil(() => calls.length === n);
+      t.mock.timers.tick(30000);
+    }
+    assert.deepEqual(await response, {
+      written: true,
+      path: "/workspace/memory/new.md",
+    });
+    t.mock.timers.tick(20000);
+    assert.equal(killed, 0);
+    assert.deepEqual(calls, ["mkdir", "find", "write", "write"]);
+    assert.match(f.files.get("/workspace/memory/new.md")!, /new/);
+    assert.match(f.files.get("/workspace/memory/MEMORY.md")!, /new\.md/);
+    const s = await f.store.read(actor.tenantId, (s) => s);
+    assert.equal(s.workspaces[f.w.id]!.lock, undefined);
+    assert.equal(s.audit.filter((a) => a.action === "memory.write").length, 1);
+    assert.ok(!s.audit.some((a) => a.action === "memory.write.failed"));
+  } finally {
+    t.mock.timers.reset();
+    await response;
+  }
+});

@@ -5,6 +5,8 @@ export const argumentsSchemas: Record<
   string,
   z.ZodType<Record<string, unknown>>
 > = {
+  web_search: z.object({ query: z.string().min(1).max(4000) }).strict(),
+  web_fetch: z.object({ url: z.url().max(8000) }).strict(),
   read: z.object({ path }).strict(),
   write: z.object({ path, content: z.string().max(262144) }).strict(),
   edit: z
@@ -44,9 +46,20 @@ export const argumentsSchemas: Record<
   ask_user_question: z
     .object({ question: z.string().min(1).max(8000) })
     .strict(),
-  delegate_to_agent: z
-    .object({ agentVersionId: z.string(), task: z.string().min(1).max(16000) })
-    .strict(),
+  delegate_to_agent: z.union([
+    z
+      .object({
+        agentId: z.string().min(1),
+        task: z.string().min(1).max(16000),
+      })
+      .strict(),
+    z
+      .object({
+        agentVersionId: z.string().min(1),
+        task: z.string().min(1).max(16000),
+      })
+      .strict(),
+  ]),
 };
 export function specs(names: string[]): ToolSpec[] {
   return names.map((name) => ({

@@ -6,7 +6,7 @@ import { execFileSync } from "node:child_process";
 import { mkdir, readFile } from "node:fs/promises";
 import { generateKeyPair, exportJWK, SignJWT } from "jose";
 import { authFromEnv } from "../src/auth.js";
-test("UCS verifies JWT signature, issuer, audience, expiry and trusted tenant claims", async () => {
+test("OIDC verifies JWT signatures and claims in shared and personal modes", async () => {
   await mkdir("work/auth-tls", { recursive: true });
   execFileSync(
     "openssl",
@@ -88,6 +88,66 @@ test("UCS verifies JWT signature, issuer, audience, expiry and trusted tenant cl
     await assert.rejects(auth(`Bearer ${await sign("harness", "1h", {})}`), {
       code: "UNAUTHENTICATED",
     });
+    const personal = authFromEnv({ personal: true });
+    const personalToken = await sign("harness", "1h", {
+      roles: ["harness-admin"],
+    });
+    const actor = await personal(`Bearer ${personalToken}`);
+    assert.equal(actor.userId, "user-a");
+    assert.equal(actor.subject, "user-a");
+    assert.equal(actor.issuer, "https://ucs.example");
+    assert.equal(actor.tenantId, "personal");
+    assert.equal(actor.admin, true);
+    await assert.rejects(personal("Bearer opaque-token"), {
+      code: "UNAUTHENTICATED",
+    });
+    await assert.rejects(personal(`Bearer ${await sign("wrong")}`), {
+      code: "UNAUTHENTICATED",
+    });
+    await assert.rejects(personal(`Bearer ${await sign("harness", "-1h")}`), {
+      code: "UNAUTHENTICATED",
+    });
+    delete process.env.UCS_ADMIN_USER_IDS;
+    delete process.env.UCS_ADMIN_ROLE_KEYS;
+    for (const options of [{}, { personal: true }]) {
+      const ordinary = authFromEnv(options);
+      for (const roles of [[""], [], ["ordinary"], [null, 0], undefined]) {
+        const jwt = await sign("harness", "1h", {
+          tenant_id: "tenant-a",
+          roles,
+        });
+        assert.equal((await ordinary(`Bearer ${jwt}`)).admin, false);
+      }
+    }
+    process.env.UCS_ADMIN_USER_IDS = " , user-a, , ";
+    process.env.UCS_ADMIN_ROLE_KEYS = " , platform-admin , , ";
+    const userAdmin = authFromEnv();
+    assert.equal(
+      (
+        await userAdmin(
+          `Bearer ${await sign("harness", "1h", { tenant_id: "tenant-a", roles: [] })}`,
+        )
+      ).admin,
+      true,
+    );
+    process.env.UCS_ADMIN_USER_IDS = " , , ";
+    const roleAdmin = authFromEnv();
+    assert.equal(
+      (
+        await roleAdmin(
+          `Bearer ${await sign("harness", "1h", { tenant_id: "tenant-a", roles: ["platform-admin"] })}`,
+        )
+      ).admin,
+      true,
+    );
+    assert.equal(
+      (
+        await roleAdmin(
+          `Bearer ${await sign("harness", "1h", { tenant_id: "tenant-a", roles: [""] })}`,
+        )
+      ).admin,
+      false,
+    );
     const bad = token.slice(0, -10) + "AAAAAAAAAA";
     await assert.rejects(auth(`Bearer ${bad}`), { code: "UNAUTHENTICATED" });
     await assert.rejects(auth(), { code: "UNAUTHENTICATED" });
@@ -97,6 +157,8 @@ test("UCS verifies JWT signature, issuer, audience, expiry and trusted tenant cl
       "UCS_JWKS_URL",
       "UCS_ISSUER",
       "UCS_AUDIENCE",
+      "UCS_ADMIN_USER_IDS",
+      "UCS_ADMIN_ROLE_KEYS",
     ])
       delete process.env[k];
     await new Promise<void>((r, j) => server.close((e) => (e ? j(e) : r())));

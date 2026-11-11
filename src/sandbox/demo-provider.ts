@@ -43,6 +43,22 @@ export class DemoSandbox implements SandboxProvider {
     if (!p.startsWith("/workspace/") && p !== "/workspace")
       throw new Fault(403, "PATH_DENIED");
     if (p.split("/").includes("..")) throw new Fault(403, "PATH_DENIED");
+    if (p.includes("\0")) throw new Fault(403, "PATH_DENIED");
+    if (op === "mkdir") return { created: true };
+    if (op === "edit") {
+      if (!files.has(p)) throw new Fault(404, "FILE_NOT_FOUND");
+      const old = files.get(p)!;
+      if (createHash("sha256").update(old).digest("hex") !== a.expectedHash)
+        throw new Fault(409, "EDIT_CONFLICT");
+      if (old.split(String(a.oldText)).length !== 2)
+        throw new Fault(409, "EDIT_NOT_UNIQUE");
+      files.set(p, old.replace(String(a.oldText), String(a.newText)));
+      return { edited: true };
+    }
+    if (op === "delete") {
+      files.delete(p);
+      return { deleted: true };
+    }
     if (op === "write") {
       files.set(p, String(a.content));
       return { written: true };

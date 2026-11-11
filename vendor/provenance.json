@@ -15,8 +15,8 @@
     {
       "name": "@earendil-works/pi-coding-agent",
       "version": "0.99.2",
-      "archive": "vendor/pi-coding-agent-0.99.2-harness.tgz",
-      "integrity": "sha512-qgrajdjBBnLBSWuXRU2qnDDtOHFvjbcCLpfcKfZj2ZgrOTyoZM307zYtdOhxebrwHuIz/wrf1458gmJLNWWn4Q==",
+      "archive": "vendor/pi-coding-agent-0.99.2-harness-security.tgz",
+      "integrity": "sha512-Ph2Jcihs7dp5AgZGg4pqWwnBcfYa5aBIdzi4tEP37a8nJwdr+X0dlIs2OneQvUbVG/vaqQ6ucpllzSqzp8dZTQ==",
       "license": "MIT"
     }
   ]

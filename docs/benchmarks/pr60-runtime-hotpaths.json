@@ -1,0 +1,503 @@
+{
+  "settings": {
+    "httpDurationMs": 300000,
+    "idleUsers": 1000,
+    "activeRuns": 100,
+    "sseConnections": 500,
+    "sseDurationMs": 10000
+  },
+  "pgStatStatements": true,
+  "limitations": "WAL LSN is cluster-wide; SQL rows/timings are client observations. Lock-wait time is sampled, and timings are not production SLAs.",
+  "idle-3": {
+    "queries": 20,
+    "reads": 20,
+    "writeStatements": 0,
+    "writeRows": 0,
+    "returnedRows": 0,
+    "returnedBytes": 40,
+    "eventReads": 0,
+    "fullHistoryReads": 0,
+    "agentPayloads": 0,
+    "elapsedMs": 101.99028300000009,
+    "sqlP95Ms": 0.8689939999999297,
+    "transactionP95Ms": 0,
+    "walBytes": 0,
+    "lockSamples": 1,
+    "waitingSamples": 0,
+    "maxWaiters": 0,
+    "estimatedLockWaitMs": 0,
+    "statementTotals": {
+      "calls": 20,
+      "rows": 0,
+      "walBytes": 0
+    },
+    "topStatements": [
+      {
+        "query": "WITH candidates AS (\n      (SELECT DISTINCT ON(user_id) user_id,run_id,$4 AS priority FROM personal_runs WHERE lease_owner IS NOT NULL AND lease_expires<$1 AND state<>$5 ORDER BY user_id,lease_expires,run_id)\n      UNION ALL\n      (SELECT DISTINCT ON(user_id) user_id,run_id,$6 AS priority FROM personal_runs WHERE state=$7 ORDER BY user_id,created_at,run_id)\n    ) SELECT user_id AS \"user\",run_id AS \"runId\" FROM candidates ORDER BY (user_id>$2) DESC,user_id,priority LIMIT $3",
+        "calls": 20,
+        "rows": 0,
+        "walBytes": 0,
+        "execMs": 0.806671
+      }
+    ],
+    "detail": {
+      "ticks": 20
+    }
+  },
+  "idle-4": {
+    "queries": 20,
+    "reads": 20,
+    "writeStatements": 0,
+    "writeRows": 0,
+    "returnedRows": 0,
+    "returnedBytes": 40,
+    "eventReads": 0,
+    "fullHistoryReads": 0,
+    "agentPayloads": 0,
+    "elapsedMs": 101.59109899999999,
+    "sqlP95Ms": 0.7247649999999339,
+    "transactionP95Ms": 0,
+    "walBytes": 0,
+    "lockSamples": 1,
+    "waitingSamples": 0,
+    "maxWaiters": 0,
+    "estimatedLockWaitMs": 0,
+    "statementTotals": {
+      "calls": 20,
+      "rows": 0,
+      "walBytes": 0
+    },
+    "topStatements": [
+      {
+        "query": "WITH candidates AS (\n      (SELECT DISTINCT ON(user_id) user_id,run_id,$4 AS priority FROM personal_runs WHERE lease_owner IS NOT NULL AND lease_expires<$1 AND state<>$5 ORDER BY user_id,lease_expires,run_id)\n      UNION ALL\n      (SELECT DISTINCT ON(user_id) user_id,run_id,$6 AS priority FROM personal_runs WHERE state=$7 ORDER BY user_id,created_at,run_id)\n    ) SELECT user_id AS \"user\",run_id AS \"runId\" FROM candidates ORDER BY (user_id>$2) DESC,user_id,priority LIMIT $3",
+        "calls": 20,
+        "rows": 0,
+        "walBytes": 0,
+        "execMs": 0.40679199999999993
+      }
+    ],
+    "detail": {
+      "ticks": 20
+    }
+  },
+  "targeted-get": {
+    "queries": 160,
+    "reads": 140,
+    "writeStatements": 0,
+    "writeRows": 0,
+    "returnedRows": 120,
+    "returnedBytes": 33010,
+    "eventReads": 0,
+    "fullHistoryReads": 0,
+    "agentPayloads": 0,
+    "elapsedMs": 226.5241219999998,
+    "sqlP95Ms": 1.3380400000000918,
+    "transactionP95Ms": 2.571748999999727,
+    "walBytes": 0,
+    "lockSamples": 2,
+    "waitingSamples": 0,
+    "maxWaiters": 0,
+    "estimatedLockWaitMs": 0,
+    "statementTotals": {
+      "calls": 140,
+      "rows": 120,
+      "walBytes": 0
+    },
+    "topStatements": [
+      {
+        "query": "SELECT id,enabled FROM personal_users WHERE issuer=$1 AND subject=$2",
+        "calls": 50,
+        "rows": 50,
+        "walBytes": 0,
+        "execMs": 0.7810870000000001
+      },
+      {
+        "query": "SELECT COALESCE((SELECT jsonb_object_agg(k,state->k) FILTER (WHERE state ? k)\n        FROM personal_user_state CROSS JOIN unnest($2::text[]) k WHERE user_id=$1), $3::jsonb)\n       || CASE WHEN $4=ANY($2::text[]) THEN jsonb_build_object($5,\n          COALESCE((SELECT jsonb_object_agg(schedule_id,data) FROM personal_scheduled_tasks WHERE user_id=$1),$6::jsonb)) ELSE $7::jsonb END\n       || CASE WHEN $8=ANY($2::text[]) THEN jsonb_build_object($9,\n          COALESCE((SELECT jsonb_object_agg(schedule_id||$10||trigger||$11||scheduled_for,data)\n            FROM personal_schedule_fires WHERE user_id=$1),$12::jsonb)) ELSE $13::jsonb END AS state",
+        "calls": 30,
+        "rows": 30,
+        "walBytes": 0,
+        "execMs": 0.999185
+      },
+      {
+        "query": "SELECT revision::text AS revision,\n      CASE WHEN revision::text=$1 THEN $2 ELSE document END AS document,\n      CASE WHEN revision::text=$1 THEN $3 ELSE COALESCE((SELECT jsonb_object_agg(id,data) FROM personal_agents),$4::jsonb) END AS agents\n      FROM platform_config WHERE scope=$5",
+        "calls": 10,
+        "rows": 10,
+        "walBytes": 0,
+        "execMs": 0.19018800000000002
+      },
+      {
+        "query": "WITH RECURSIVE chain AS (\n SELECT data FROM personal_runs WHERE user_id=$1 AND run_id=$2\n UNION\n SELECT p.data FROM personal_runs p JOIN chain child\n ON (p.run_id=child.data->>$7 OR p.run_id=child.data->>$8) WHERE p.user_id=$1\n), sessions AS (\n SELECT data FROM personal_sessions WHERE user_id=$1\n AND session_id IN (SELECT data->>$9 FROM chain)\n)\nSELECT jsonb_build_object(\n $10, COALESCE((SELECT jsonb_object_agg(wid,\n   jsonb_build_object($11,wid,$12,t.state->$13->wid->$14,\n     $15,t.state->$16->wid->$17))\n   FROM (SELECT DISTINCT data->>$18 AS wid FROM sessions) w\n   WHERE t.state->$19 ? wid), $20::jsonb)\n) || CASE WHEN $6 THEN jsonb_build_object(\n $21, COALESCE((SELECT jsonb_object_agg(sk,t.state->$22->sk)\n   FROM (SELECT DISTINCT jsonb_array_elements_text(COALESCE(\n     c.data->$23->$24,\n     $25::jsonb)) AS sk FROM chain c JOIN sessions s ON s.data->>$26=c.data->>$27) keys\n   WHERE t.state->$28 ? sk), $29::jsonb)\n) ELSE $30::jsonb END AS state,\n COALESCE((SELECT jsonb_agg(CASE WHEN",
+        "calls": 10,
+        "rows": 10,
+        "walBytes": 0,
+        "execMs": 1.938651
+      },
+      {
+        "query": "SELECT jsonb_build_object($2,state->$3) AS state FROM personal_user_state WHERE user_id=$1",
+        "calls": 10,
+        "rows": 10,
+        "walBytes": 0,
+        "execMs": 0.189483
+      },
+      {
+        "query": "SELECT p.data,jsonb_build_object($3,jsonb_build_object(p.workspace_id,t.state->$4->p.workspace_id),$5,jsonb_build_object(p.session_id,t.state->$6->p.session_id)) AS state\n      FROM personal_sessions p JOIN personal_user_state t USING(user_id) WHERE p.user_id=$1 AND p.session_id=$2",
+        "calls": 10,
+        "rows": 10,
+        "walBytes": 0,
+        "execMs": 0.349683
+      },
+      {
+        "query": "SELECT data FROM personal_usage_requests WHERE user_id=$1",
+        "calls": 10,
+        "rows": 0,
+        "walBytes": 0,
+        "execMs": 0.04477300000000001
+      },
+      {
+        "query": "SELECT data FROM personal_resource_transitions WHERE user_id=$1 ORDER BY id",
+        "calls": 10,
+        "rows": 0,
+        "walBytes": 0,
+        "execMs": 0.06361699999999999
+      }
+    ],
+    "detail": {
+      "requests": 50
+    }
+  },
+  "http-status-polling": {
+    "queries": 9024,
+    "reads": 9024,
+    "writeStatements": 0,
+    "writeRows": 0,
+    "returnedRows": 9024,
+    "returnedBytes": 4957184,
+    "eventReads": 0,
+    "fullHistoryReads": 0,
+    "agentPayloads": 0,
+    "elapsedMs": 300154.451778,
+    "sqlP95Ms": 2.270214999996824,
+    "transactionP95Ms": 0,
+    "walBytes": 883880,
+    "lockSamples": 2960,
+    "waitingSamples": 0,
+    "maxWaiters": 0,
+    "estimatedLockWaitMs": 0,
+    "statementTotals": {
+      "calls": 9024,
+      "rows": 9024,
+      "walBytes": 0
+    },
+    "topStatements": [
+      {
+        "query": "SELECT id,enabled FROM personal_users WHERE issuer=$1 AND subject=$2",
+        "calls": 3008,
+        "rows": 3008,
+        "walBytes": 0,
+        "execMs": 117.14480100000023
+      },
+      {
+        "query": "SELECT revision::text AS revision,\n      CASE WHEN revision::text=$1 THEN $2 ELSE document END AS document,\n      CASE WHEN revision::text=$1 THEN $3 ELSE COALESCE((SELECT jsonb_object_agg(id,data) FROM personal_agents),$4::jsonb) END AS agents\n      FROM platform_config WHERE scope=$5",
+        "calls": 3008,
+        "rows": 3008,
+        "walBytes": 0,
+        "execMs": 59.06459700000021
+      },
+      {
+        "query": "WITH RECURSIVE chain AS (\n SELECT data FROM personal_runs WHERE user_id=$1 AND run_id=$2\n UNION\n SELECT p.data FROM personal_runs p JOIN chain child\n ON (p.run_id=child.data->>$7 OR p.run_id=child.data->>$8) WHERE p.user_id=$1\n), sessions AS (\n SELECT data FROM personal_sessions WHERE user_id=$1\n AND session_id IN (SELECT data->>$9 FROM chain)\n)\nSELECT jsonb_build_object(\n $10, COALESCE((SELECT jsonb_object_agg(wid,\n   jsonb_build_object($11,wid,$12,t.state->$13->wid->$14,\n     $15,t.state->$16->wid->$17))\n   FROM (SELECT DISTINCT data->>$18 AS wid FROM sessions) w\n   WHERE t.state->$19 ? wid), $20::jsonb)\n) || CASE WHEN $6 THEN jsonb_build_object(\n $21, COALESCE((SELECT jsonb_object_agg(sk,t.state->$22->sk)\n   FROM (SELECT DISTINCT jsonb_array_elements_text(COALESCE(\n     c.data->$23->$24,\n     $25::jsonb)) AS sk FROM chain c JOIN sessions s ON s.data->>$26=c.data->>$27) keys\n   WHERE t.state->$28 ? sk), $29::jsonb)\n) ELSE $30::jsonb END AS state,\n COALESCE((SELECT jsonb_agg(CASE WHEN",
+        "calls": 3008,
+        "rows": 3008,
+        "walBytes": 0,
+        "execMs": 693.5502310000014
+      }
+    ],
+    "detail": {
+      "requests": 3008,
+      "responseP95Ms": 6.160692000004929,
+      "writesPerRequest": 0
+    }
+  },
+  "idle-sse": {
+    "queries": 5999,
+    "reads": 5999,
+    "writeStatements": 0,
+    "writeRows": 0,
+    "returnedRows": 5999,
+    "returnedBytes": 873938,
+    "eventReads": 1000,
+    "fullHistoryReads": 0,
+    "agentPayloads": 0,
+    "elapsedMs": 10077.74460200005,
+    "sqlP95Ms": 2.9935720000066794,
+    "transactionP95Ms": 0,
+    "walBytes": 88,
+    "lockSamples": 99,
+    "waitingSamples": 0,
+    "maxWaiters": 0,
+    "estimatedLockWaitMs": 0,
+    "statementTotals": {
+      "calls": 6052,
+      "rows": 6052,
+      "walBytes": 0
+    },
+    "topStatements": [
+      {
+        "query": "SELECT id,enabled FROM personal_users WHERE issuer=$1 AND subject=$2",
+        "calls": 5052,
+        "rows": 5052,
+        "walBytes": 0,
+        "execMs": 90.20418900000129
+      },
+      {
+        "query": "WITH RECURSIVE chain AS (\n SELECT data FROM personal_runs WHERE user_id=$1 AND run_id=$2\n UNION\n SELECT p.data FROM personal_runs p JOIN chain child\n ON (p.run_id=child.data->>$7 OR p.run_id=child.data->>$8) WHERE p.user_id=$1\n), sessions AS (\n SELECT data FROM personal_sessions WHERE user_id=$1\n AND session_id IN (SELECT data->>$9 FROM chain)\n)\nSELECT jsonb_build_object(\n $10, COALESCE((SELECT jsonb_object_agg(wid,\n   jsonb_build_object($11,wid,$12,t.state->$13->wid->$14,\n     $15,t.state->$16->wid->$17))\n   FROM (SELECT DISTINCT data->>$18 AS wid FROM sessions) w\n   WHERE t.state->$19 ? wid), $20::jsonb)\n) || CASE WHEN $6 THEN jsonb_build_object(\n $21, COALESCE((SELECT jsonb_object_agg(sk,t.state->$22->sk)\n   FROM (SELECT DISTINCT jsonb_array_elements_text(COALESCE(\n     c.data->$23->$24,\n     $25::jsonb)) AS sk FROM chain c JOIN sessions s ON s.data->>$26=c.data->>$27) keys\n   WHERE t.state->$28 ? sk), $29::jsonb)\n) ELSE $30::jsonb END AS state,\n COALESCE((SELECT jsonb_agg(CASE WHEN",
+        "calls": 1000,
+        "rows": 1000,
+        "walBytes": 0,
+        "execMs": 181.76865999999953
+      }
+    ],
+    "detail": {
+      "connections": 500
+    }
+  },
+  "sandbox-maintenance": {
+    "queries": 57,
+    "reads": 25,
+    "writeStatements": 18,
+    "writeRows": 12,
+    "returnedRows": 15,
+    "returnedBytes": 4777,
+    "eventReads": 0,
+    "fullHistoryReads": 0,
+    "agentPayloads": 0,
+    "elapsedMs": 102.33927700005006,
+    "sqlP95Ms": 3.684823999996297,
+    "transactionP95Ms": 15.6118289999431,
+    "walBytes": 6176,
+    "lockSamples": 1,
+    "waitingSamples": 1,
+    "maxWaiters": 1,
+    "estimatedLockWaitMs": 1.7617120000068098,
+    "statementTotals": {
+      "calls": 41,
+      "rows": 25,
+      "walBytes": 5697
+    },
+    "topStatements": [
+      {
+        "query": "SELECT revision::text AS revision,\n      CASE WHEN revision::text=$1 THEN $2 ELSE document END AS document,\n      CASE WHEN revision::text=$1 THEN $3 ELSE COALESCE((SELECT jsonb_object_agg(id,data) FROM personal_agents),$4::jsonb) END AS agents\n      FROM platform_config WHERE scope=$5",
+        "calls": 5,
+        "rows": 5,
+        "walBytes": 0,
+        "execMs": 0.0867020000000025
+      },
+      {
+        "query": "SELECT data-$3 AS data FROM personal_sessions WHERE user_id=$1 AND session_id=ANY($2::text[])",
+        "calls": 5,
+        "rows": 0,
+        "walBytes": 0,
+        "execMs": 0.09227199999999999
+      },
+      {
+        "query": "SELECT jsonb_build_object($2,state->$3) AS state FROM personal_user_state WHERE user_id=$1 FOR NO KEY UPDATE",
+        "calls": 5,
+        "rows": 5,
+        "walBytes": 270,
+        "execMs": 0.16316399999999998
+      },
+      {
+        "query": "WITH RECURSIVE active AS (\n      SELECT data FROM personal_runs WHERE user_id=$1 AND state NOT IN ($2,$3,$4)\n      UNION SELECT p.data FROM personal_runs p JOIN active a ON p.run_id=a.data->>$5 OR p.run_id=a.data->>$6 WHERE p.user_id=$1\n    ) SELECT data FROM active",
+        "calls": 5,
+        "rows": 0,
+        "walBytes": 0,
+        "execMs": 20.696920000000006
+      },
+      {
+        "query": "INSERT INTO personal_user_state (user_id,state) VALUES ($1,$2) ON CONFLICT DO NOTHING",
+        "calls": 5,
+        "rows": 0,
+        "walBytes": 0,
+        "execMs": 0.11246800000000001
+      },
+      {
+        "query": "SELECT tenant_id AS \"tenantId\", workspace_id AS \"workspaceId\", user_id AS \"userId\", state, sandbox_id AS \"sandboxId\", operation, updated_at::float8 AS \"updatedAt\" FROM personal_sandbox_leases WHERE tenant_id=$1 AND workspace_id=$2",
+        "calls": 3,
+        "rows": 3,
+        "walBytes": 0,
+        "execMs": 0.049581
+      },
+      {
+        "query": "INSERT INTO personal_workspace_runtime(user_id,workspace_id,data,last_used_at,sandbox_id) VALUES($1,$2,$3,$4,$5) ON CONFLICT(user_id,workspace_id) DO UPDATE SET data=excluded.data,last_used_at=excluded.last_used_at,sandbox_id=excluded.sandbox_id",
+        "calls": 3,
+        "rows": 3,
+        "walBytes": 1030,
+        "execMs": 0.13323799999999997
+      },
+      {
+        "query": "UPDATE personal_user_state SET state=jsonb_set(state,$3,$2::jsonb),revision=revision+$4 WHERE user_id=$1",
+        "calls": 3,
+        "rows": 3,
+        "walBytes": 2145,
+        "execMs": 0.3212280000000001
+      },
+      {
+        "query": "INSERT INTO personal_maintenance(name,expires) VALUES($3,$1::bigint+$2::bigint) ON CONFLICT(name) DO UPDATE SET expires=excluded.expires WHERE personal_maintenance.expires<=$1 RETURNING name",
+        "calls": 2,
+        "rows": 1,
+        "walBytes": 306,
+        "execMs": 1.082549
+      },
+      {
+        "query": "INSERT INTO personal_sandbox_leases(tenant_id,workspace_id,user_id,state,sandbox_id,operation,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(tenant_id,workspace_id) DO UPDATE SET user_id=excluded.user_id,state=excluded.state,sandbox_id=excluded.sandbox_id,operation=excluded.operation,updated_at=excluded.updated_at",
+        "calls": 2,
+        "rows": 2,
+        "walBytes": 765,
+        "execMs": 0.12726700000000002
+      },
+      {
+        "query": "WITH due AS (SELECT user_id,workspace_id FROM personal_workspace_runtime WHERE sandbox_id IS NOT NULL AND NOT COALESCE((data->>$4)::boolean,$5)\n      AND (last_used_at IS NULL OR last_used_at<=$1::bigint-$3::bigint OR (last_used_at<=$1::bigint-$2::bigint AND COALESCE(data->>$6,$7) NOT IN ($8,$9)))\n      ORDER BY checked_at,last_used_at NULLS FIRST,user_id,workspace_id LIMIT $10 FOR UPDATE SKIP LOCKED)\n      UPDATE personal_workspace_runtime w SET checked_at=$1 FROM due d WHERE w.user_id=d.user_id AND w.workspace_id=d.workspace_id RETURNING w.user_id AS \"user\",w.data AS workspace",
+        "calls": 1,
+        "rows": 1,
+        "walBytes": 130,
+        "execMs": 0.14725500000000002
+      },
+      {
+        "query": "INSERT INTO personal_audit(user_id,id,data) SELECT $1,v->>$3,v FROM jsonb_array_elements($2::jsonb) v ON CONFLICT DO NOTHING",
+        "calls": 1,
+        "rows": 1,
+        "walBytes": 620,
+        "execMs": 0.6058430000000001
+      }
+    ],
+    "detail": [
+      {
+        "paused": 0,
+        "released": 0,
+        "failed": 0
+      },
+      {
+        "paused": 1,
+        "released": 0,
+        "failed": 0
+      }
+    ]
+  },
+  "model-execution": {
+    "queries": 30103,
+    "reads": 17323,
+    "writeStatements": 6390,
+    "writeRows": 4793,
+    "returnedRows": 20982,
+    "returnedBytes": 8930191,
+    "eventReads": 0,
+    "fullHistoryReads": 0,
+    "agentPayloads": 0,
+    "elapsedMs": 7523.364085000008,
+    "sqlP95Ms": 4.6443469999940135,
+    "transactionP95Ms": 36.12149300001329,
+    "walBytes": 7074032,
+    "lockSamples": 73,
+    "waitingSamples": 16,
+    "maxWaiters": 5,
+    "estimatedLockWaitMs": 4429.675988000003,
+    "statementTotals": {
+      "calls": 22715,
+      "rows": 24777,
+      "walBytes": 6887353
+    },
+    "topStatements": [
+      {
+        "query": "SELECT revision::text AS revision,\n      CASE WHEN revision::text=$1 THEN $2 ELSE document END AS document,\n      CASE WHEN revision::text=$1 THEN $3 ELSE COALESCE((SELECT jsonb_object_agg(id,data) FROM personal_agents),$4::jsonb) END AS agents\n      FROM platform_config WHERE scope=$5",
+        "calls": 3895,
+        "rows": 3895,
+        "walBytes": 0,
+        "execMs": 95.46905599999967
+      },
+      {
+        "query": "SELECT jsonb_build_object($2,state->$3) AS state FROM personal_user_state WHERE user_id=$1 FOR NO KEY UPDATE",
+        "calls": 2296,
+        "rows": 2296,
+        "walBytes": 126348,
+        "execMs": 111.72078800000006
+      },
+      {
+        "query": "SELECT data-$3 AS data FROM personal_sessions WHERE user_id=$1 AND session_id=ANY($2::text[])",
+        "calls": 1896,
+        "rows": 1896,
+        "walBytes": 1292,
+        "execMs": 72.64542199999998
+      },
+      {
+        "query": "WITH RECURSIVE active AS (\n      SELECT data FROM personal_runs WHERE user_id=$1 AND state NOT IN ($2,$3,$4)\n      UNION SELECT p.data FROM personal_runs p JOIN active a ON p.run_id=a.data->>$5 OR p.run_id=a.data->>$6 WHERE p.user_id=$1\n    ) SELECT data FROM active",
+        "calls": 1596,
+        "rows": 1596,
+        "walBytes": 568,
+        "execMs": 206.4321670000003
+      },
+      {
+        "query": "INSERT INTO personal_user_state (user_id,state) VALUES ($1,$2) ON CONFLICT DO NOTHING",
+        "calls": 1596,
+        "rows": 0,
+        "walBytes": 11202,
+        "execMs": 55.77555100000001
+      },
+      {
+        "query": "WITH RECURSIVE chain AS (\n SELECT data FROM personal_runs WHERE user_id=$1 AND run_id=$2\n UNION\n SELECT p.data FROM personal_runs p JOIN chain child\n ON (p.run_id=child.data->>$7 OR p.run_id=child.data->>$8) WHERE p.user_id=$1\n), sessions AS (\n SELECT data FROM personal_sessions WHERE user_id=$1\n AND session_id IN (SELECT data->>$9 FROM chain)\n)\nSELECT jsonb_build_object(\n $10, COALESCE((SELECT jsonb_object_agg(wid,\n   jsonb_build_object($11,wid,$12,t.state->$13->wid->$14,\n     $15,t.state->$16->wid->$17))\n   FROM (SELECT DISTINCT data->>$18 AS wid FROM sessions) w\n   WHERE t.state->$19 ? wid), $20::jsonb)\n) || CASE WHEN $6 THEN jsonb_build_object(\n $21, COALESCE((SELECT jsonb_object_agg(sk,t.state->$22->sk)\n   FROM (SELECT DISTINCT jsonb_array_elements_text(COALESCE(\n     c.data->$23->$24,\n     $25::jsonb)) AS sk FROM chain c JOIN sessions s ON s.data->>$26=c.data->>$27) keys\n   WHERE t.state->$28 ? sk), $29::jsonb)\n) ELSE $30::jsonb END AS state,\n COALESCE((SELECT jsonb_agg(CASE WHEN",
+        "calls": 1099,
+        "rows": 1099,
+        "walBytes": 10942,
+        "execMs": 392.8625100000013
+      },
+      {
+        "query": "INSERT INTO personal_run_event_counters(user_id,run_id,cursor) VALUES($1,$2,$3) ON CONFLICT(user_id,run_id) DO UPDATE SET cursor=personal_run_event_counters.cursor+$3 RETURNING cursor",
+        "calls": 700,
+        "rows": 700,
+        "walBytes": 107575,
+        "execMs": 38.20708300000004
+      },
+      {
+        "query": "INSERT INTO personal_event_sequences(user_id,cursor) VALUES($1,$2::bigint+$3::bigint) ON CONFLICT(user_id) DO UPDATE SET cursor=GREATEST(personal_event_sequences.cursor,$2::bigint)+$3::bigint RETURNING cursor",
+        "calls": 700,
+        "rows": 700,
+        "walBytes": 101848,
+        "execMs": 52.434716
+      },
+      {
+        "query": "INSERT INTO personal_run_events(user_id,run_id,event_id,data) SELECT $1,v->>$3,(v->>$4)::bigint,v FROM jsonb_array_elements($2::jsonb) v",
+        "calls": 700,
+        "rows": 700,
+        "walBytes": 3445027,
+        "execMs": 109.38128999999995
+      },
+      {
+        "query": "SELECT data-$3 AS data FROM personal_sessions WHERE user_id=$1 AND session_id=ANY($2::text[]) ORDER BY session_id FOR UPDATE",
+        "calls": 600,
+        "rows": 600,
+        "walBytes": 34936,
+        "execMs": 25.947816999999997
+      },
+      {
+        "query": "SELECT data FROM personal_runs WHERE user_id=$1 AND ((data->>$4)=$2 OR run_id=ANY($3::text[])) ORDER BY run_id FOR UPDATE",
+        "calls": 600,
+        "rows": 600,
+        "walBytes": 32400,
+        "execMs": 30.292845
+      },
+      {
+        "query": "SELECT data FROM personal_runs WHERE user_id=$1 AND run_id=$2",
+        "calls": 600,
+        "rows": 600,
+        "walBytes": 3112,
+        "execMs": 35.63435900000001
+      }
+    ],
+    "detail": {
+      "runs": 100,
+      "peak": 100,
+      "sqlCallsPerRun": 301.03,
+      "writesPerRun": 47.93
+    },
+    "clusterWalBytesPerRun": 70740.32,
+    "statementWalBytesPerRun": 68873.53
+  }
+}

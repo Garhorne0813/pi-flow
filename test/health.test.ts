@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { id } from "../src/domain.js";
+import { readFile, readdir } from "node:fs/promises";
 import { buildAPI } from "../src/api.js";
 import { MemoryStore, PostgresStore } from "../src/store.js";
 import { HarnessService } from "../src/service.js";
@@ -75,11 +76,17 @@ test(
   "PostgreSQL readiness rejects missing migration and schema mismatch",
   { skip: !process.env.TEST_DATABASE_URL },
   async () => {
-    const store = new PostgresStore(process.env.TEST_DATABASE_URL!);
+    const control = new PostgresStore(process.env.TEST_DATABASE_URL!);
+    const schema = "health_" + id().replaceAll("-", "");
+    await control.pool.query(`CREATE SCHEMA ${schema}`);
+    const scoped = new URL(process.env.TEST_DATABASE_URL!);
+    scoped.searchParams.set("options", `-c search_path=${schema}`);
+    const store = new PostgresStore(scoped.toString());
     try {
-      await store.pool.query(
-        await readFile("migrations/001_initial.sql", "utf8"),
-      );
+      for (const name of (await readdir("migrations"))
+        .filter((n) => n.endsWith(".sql"))
+        .sort())
+        await store.pool.query(await readFile("migrations/" + name, "utf8"));
       await store.ready();
       await store.pool.query(
         "UPDATE harness_schema SET version=999 WHERE id=1",
@@ -105,6 +112,8 @@ test(
         "DELETE FROM harness_worker_health WHERE worker_id='health-test'",
       );
       await store.close();
+      await control.pool.query(`DROP SCHEMA ${schema} CASCADE`);
+      await control.close();
     }
     const absent = new PostgresStore(
       "postgres://harness:test-only@127.0.0.1:1/absent",

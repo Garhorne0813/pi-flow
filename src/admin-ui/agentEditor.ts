@@ -1,6 +1,7 @@
 /** Embedded console agentEditor; composed into the nonce-protected HTML shell. */
 export const agentEditor = String.raw`    function collect() {
       return {
+        ...(configuration?.agentMode === "editable" ? (draft || {}) : {}),
         name:$("name").value.trim(), systemPrompt:$("prompt").value,
         agentsMd:agentsMdValues(),
         model:{provider:$("provider").value.trim(),modelId:$("model").value.trim()},
@@ -58,6 +59,12 @@ export const agentEditor = String.raw`    function collect() {
       $("clone").disabled = !selected || !token || busy;
       $("form-title").textContent = view ? "查看已发布版本" : mode === "clone" ? "发布新版本" : "新建 Agent";
       $("mode").textContent = view ? "只读版本" : "待发布草稿";
+      if (configuration?.agentMode === "editable") {
+        $("form-title").textContent = view ? "查看 Agent 配置" : mode === "clone" ? "编辑 Agent 配置" : "新建 Agent";
+        $("mode").textContent = view ? "当前配置" : "待保存配置";
+        $("publish").textContent = "检查并保存";
+        $("clone").textContent = "编辑配置";
+      }
       draft = collect();
     }
     function renderList() {
@@ -76,14 +83,14 @@ export const agentEditor = String.raw`    function collect() {
       for (const [agentId,versions] of groups) {
         const group = el("section",undefined,"agent-group");
         const active = versions.find(a=>a.id === a.activeVersionId) || versions[0];
-        group.append(el("h3",active.config.name + " · " + versions.length + " 版本"));
+        group.append(el("h3",active.config.name + (configuration?.agentMode === "editable" ? "" : " · " + versions.length + " 版本")));
         group.append(el("div","Agent " + agentId,"agent-id"));
         for (const a of versions) {
           const btn = el("button",undefined,"agent-item" + (selected && a.id === selected.id ? " active" : ""));
           btn.type = "button";btn.setAttribute("aria-pressed",String(!!selected && a.id === selected.id));
           const name = el("div",undefined,"agent-name");
           name.append(el("span",a.config.name),el("span",a.enabled ? (a.activeVersionId === a.id ? "生效" : "历史") : "禁用","pill" + (a.enabled ? "" : " off")));
-          btn.append(name,el("div","版本 " + a.id + " · " + new Date(a.publishedAt).toLocaleString(),"agent-id"));
+          btn.append(name,el("div",(configuration?.agentMode === "editable" ? "Agent " : "版本 ") + a.id + " · " + new Date(a.publishedAt || a.updatedAt).toLocaleString(),"agent-id"));
           btn.addEventListener("click",()=>selectAgent(a));group.append(btn);
         }
         root.append(group);
@@ -108,7 +115,7 @@ export const agentEditor = String.raw`    function collect() {
       accessBaseline = accessKey();
       $("allowed-users").disabled = $("access-mode").value === "all" || busy || !token;
       $("access-mode").disabled = busy || !token;
-      $("toggle").textContent = selected.enabled ? "禁用版本" : "启用版本";
+      $("toggle").textContent = configuration?.agentMode === "editable" ? (selected.enabled ? "禁用 Agent" : "启用 Agent") : (selected.enabled ? "禁用版本" : "启用版本");
       $("toggle").className = "btn btn-sm " + (selected.enabled ? "danger" : "primary");
       $("toggle").disabled = !token || busy;
       $("activate").disabled = !token || busy || !selected.enabled || selected.activeVersionId === selected.id;

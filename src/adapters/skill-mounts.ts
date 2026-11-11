@@ -121,6 +121,7 @@ export function skillIdentityScope(bundle: string, skills: readonly Skill[]) {
           id: s.id,
           path: s.path,
           digest: s.digest,
+          ...(s.versionDigest ? {versionDigest:s.versionDigest} : {}),
         })),
       }),
     )

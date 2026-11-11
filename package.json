@@ -1,5 +1,5 @@
 {
-  "name": "enterprise-agent-harness",
+  "name": "personal-agent-platform",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -20,19 +20,27 @@
     "test:deepseek:capabilities": "node scripts/smoke-deepseek-capabilities.mjs",
     "bench:store:reads": "node scripts/bench-store-reads.mjs",
     "verify:vendor": "node scripts/verify-vendor.mjs",
-    "verify:vendor:upstream": "node scripts/verify-vendor.mjs --upstream"
+    "verify:vendor:upstream": "node scripts/verify-vendor.mjs --upstream",
+    "migrate:prod": "node dist/migrate.js",
+    "skills:deliver": "tsx src/config/deliver.ts",
+    "skills:deliver:prod": "node dist/config/deliver.js",
+    "config:import": "tsx src/config/cli.ts",
+    "config:import:prod": "node dist/config/cli.js",
+    "smoke:compose": "node scripts/smoke-compose.mjs"
   },
   "dependencies": {
     "@cubesandbox/sdk": "file:vendor/cubesandbox-sdk-0.3.0.tgz",
-    "@earendil-works/pi-coding-agent": "file:vendor/pi-coding-agent-0.99.2-harness.tgz",
+    "@earendil-works/pi-coding-agent": "file:vendor/pi-coding-agent-0.99.2-harness-security.tgz",
     "@fastify/multipart": "10.1.3",
     "@modelcontextprotocol/sdk": "1.32.1",
-    "fastify": "5.12.5",
+    "cron-parser": "5.4.0",
+    "fastify": "5.12.8",
     "jose": "6.1.0",
     "pg": "8.16.3",
     "typebox": "1.3.27",
+    "yaml": "2.9.1",
     "yauzl": "3.4.0",
-    "zod": "4.1.12"
+    "zod": "4.6.7"
   },
   "devDependencies": {
     "@types/node": "24.7.2",

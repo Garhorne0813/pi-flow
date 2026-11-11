@@ -1,3 +1,5 @@
+> **当前改造入口：** [个人平台运行说明与完成范围](docs/personal-platform.md)。默认启动已切换为个人工作区、数据库可编辑 Agent 和 Run 配置快照；下文共享工作区 API 属于旧版契约。
+
 <div align="center">
   <h1>Pi-Flow</h1>
   <p><strong>面向共享工作区的 AI 智能体后端。</strong></p>
