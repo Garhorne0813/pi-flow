@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { alerts } from "../src/alerts.js";
+import { alerts } from "../src/observability/alerts.js";
 test("new faults and unknown capacity alert conservatively without replay or repeating cumulative errors", () => {
   const previous = {
     worker_errors_total: 5,

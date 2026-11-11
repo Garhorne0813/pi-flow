@@ -2,14 +2,14 @@ import assert from "node:assert/strict";
 import { readFile, readdir } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
 import pg from "pg";
-import { PersonalPostgresStore } from "../../src/personal-postgres-store.js";
-import { PostgresRegistry, principal } from "../../src/store/registry.js";
-import { personalStore } from "../../src/store/personal.js";
-import { PersonalService } from "../../src/personal-service.js";
-import { buildAPI } from "../../src/api.js";
-import { DemoSandbox, SandboxManager } from "../../src/adapters/sandbox.js";
+import { PersonalPostgresStore } from "../../src/storage/personal-postgres-store.js";
+import { PostgresRegistry, principal } from "../../src/storage/registry.js";
+import { personalStore } from "../../src/storage/personal.js";
+import { PersonalService } from "../../src/domain/personal-service.js";
+import { buildAPI } from "../../src/api/server.js";
+import { DemoSandbox, SandboxManager } from "../../src/sandbox/manager.js";
 import { ScheduleService } from "../../src/schedules/service.js";
-import { AgentConfig, event, id, type State } from "../../src/domain.js";
+import { AgentConfig, event, id, type State } from "../../src/domain/model.js";
 import { replaceAgents } from "../../src/config/agents.js";
 
 export async function personalHistoryBenchmark(url: string) {

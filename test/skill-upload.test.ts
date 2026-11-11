@@ -12,22 +12,22 @@ import {
 } from "node:fs/promises";
 import { resolve } from "node:path";
 import test, { type TestContext } from "node:test";
-import { buildAPI } from "../src/api.js";
-import { Fault, type Skill } from "../src/domain.js";
-import { MemoryStore } from "../src/store.js";
-import { HarnessService } from "../src/service.js";
+import { buildAPI } from "../src/api/server.js";
+import { Fault, type Skill } from "../src/domain/model.js";
+import { MemoryStore } from "../src/storage/store.js";
+import { HarnessService } from "../src/domain/service.js";
 import {
   DemoSandbox,
   SandboxManager,
   CubeProvider,
-} from "../src/adapters/sandbox.js";
+} from "../src/sandbox/manager.js";
 import {
   HostSkillPackages,
   readSkillZip,
   skillZipLimits,
   skillUploadRoot,
   uploadedSkillBinding,
-} from "../src/skill-packages.js";
+} from "../src/skills/packages.js";
 import { skillZip, skillMarkdown, type ZipInput } from "./helpers/skill-zip.js";
 import { Sandbox, Volume, type CreateOptions } from "@cubesandbox/sdk";
 
@@ -498,7 +498,7 @@ test("known registration failure cleans up, but a possibly committed transaction
     "tx",
     async (
       tenant: string,
-      fn: (s: import("../src/domain.js").State) => unknown,
+      fn: (s: import("../src/domain/model.js").State) => unknown,
     ) => {
       if (failBefore) {
         failBefore = false;
@@ -516,7 +516,7 @@ test("known registration failure cleans up, but a possibly committed transaction
     "tx",
     async (
       tenant: string,
-      fn: (s: import("../src/domain.js").State) => unknown,
+      fn: (s: import("../src/domain/model.js").State) => unknown,
     ) => {
       const result = await original(tenant, fn);
       if (failAfter) {
@@ -581,7 +581,7 @@ test("expiry while waiting for the registration transaction denies publication a
     "tx",
     async (
       tenant: string,
-      fn: (s: import("../src/domain.js").State) => unknown,
+      fn: (s: import("../src/domain/model.js").State) => unknown,
     ) => {
       if (expire) {
         expire = false;

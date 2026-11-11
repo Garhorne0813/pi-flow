@@ -1,7 +1,7 @@
 import { resolve } from "node:path";
 import { loadDirectoryConfig, importDirectory } from "./import.js";
-import { PersonalPostgresStore } from "../personal-postgres-store.js";
-import { MemoryRegistry, PostgresRegistry } from "../store/registry.js";
+import { PersonalPostgresStore } from "../storage/personal-postgres-store.js";
+import { MemoryRegistry, PostgresRegistry } from "../storage/registry.js";
 const tree = await loadDirectoryConfig(
   resolve(process.env.CONFIG_DIR ?? "config"),
 );

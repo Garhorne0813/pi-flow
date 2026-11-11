@@ -1,5 +1,5 @@
-import { bootstrap } from "./bootstrap.js";
-import { telemetry } from "./telemetry.js";
+import { bootstrap } from "./app/bootstrap.js";
+import { telemetry } from "./observability/telemetry.js";
 const c = await bootstrap();
 process.once("SIGTERM", () => {
   void c.worker.stop().catch((e) => {

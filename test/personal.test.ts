@@ -1,15 +1,15 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { MemoryStore } from "../src/store.js";
-import { MemoryRegistry, principal } from "../src/store/registry.js";
-import { personalStore } from "../src/store/personal.js";
-import { PersonalService } from "../src/personal-service.js";
+import { MemoryStore } from "../src/storage/store.js";
+import { MemoryRegistry, principal } from "../src/storage/registry.js";
+import { personalStore } from "../src/storage/personal.js";
+import { PersonalService } from "../src/domain/personal-service.js";
 import {
   AgentConfig,
   type Actor,
   type Run,
   type State,
-} from "../src/domain.js";
+} from "../src/domain/model.js";
 import { replaceAgents } from "../src/config/agents.js";
 import { loadDirectoryConfig, importDirectory } from "../src/config/import.js";
 function configure(
@@ -22,11 +22,11 @@ function configure(
   s.configRevisions!.global++;
   return result;
 }
-import { buildAPI } from "../src/api.js";
-import { DemoSandbox, SandboxManager } from "../src/adapters/sandbox.js";
-import { MCPManager } from "../src/adapters/mcp.js";
-import { Worker } from "../src/worker.js";
-import { DemoRuntime, type Runtime } from "../src/runtime.js";
+import { buildAPI } from "../src/api/server.js";
+import { DemoSandbox, SandboxManager } from "../src/sandbox/manager.js";
+import { MCPManager } from "../src/mcp/manager.js";
+import { Worker } from "../src/execution/worker.js";
+import { DemoRuntime, type Runtime } from "../src/execution/runtime.js";
 const admin: Actor = { tenantId: "external", userId: "alice", admin: true };
 const config = (extra: Record<string, unknown> = {}) =>
   AgentConfig.parse({
@@ -983,7 +983,7 @@ test("approval reauthentication seals the fresh caller token for bash without ch
         return { ...f.alice, expiresAt: Date.now() + 60000 };
       if (header === "Bearer expired-caller-token" && !expired)
         return { ...f.alice, expiresAt: Date.now() + 60000 };
-      const { Fault } = await import("../src/domain.js");
+      const { Fault } = await import("../src/domain/model.js");
       throw new Fault(401, "UNAUTHENTICATED");
     },
     f.sandbox,
@@ -1310,7 +1310,7 @@ test("failed new-mode schedule admission restores Session bindings and leaves no
 for (const failure of ["total", "sandbox", "topic", "index", "abort"])
   test(`Memory ${failure} failures release successful-write quota and do not emit success audits`, async () => {
     const { MemoryManager } = await import("../src/execution/memory.js"),
-      { Fault } = await import("../src/domain.js");
+      { Fault } = await import("../src/domain/model.js");
     const f = await fixture(),
       memory = new MemoryManager(f.store, f.sandbox);
     const ses = await f.service.createPersonalSession(f.alice, {
@@ -1398,7 +1398,7 @@ for (const failure of ["total", "sandbox", "topic", "index", "abort"])
 
 test("Memory quota reservations serialize concurrent managers, release on failure and ignore stale Worker leases", async () => {
   const { MemoryManager } = await import("../src/execution/memory.js"),
-    { Fault } = await import("../src/domain.js");
+    { Fault } = await import("../src/domain/model.js");
   const f = await fixture(),
     m1 = new MemoryManager(f.store, f.sandbox),
     m2 = new MemoryManager(f.store, f.sandbox);

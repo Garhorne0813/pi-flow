@@ -178,6 +178,8 @@ npm run build
 npm run smoke
 ```
 
+源码目录、路由职责与扩展约定见 [代码结构与模块边界](docs/code-structure.md)。
+
 Smoke 自动在 `18081` 端口启动并关闭 Demo，验证对话、SSE、幂等键和文件上传下载。部分测试需要 `openssl`、Python 3 和 Bash。真实 PostgreSQL 检查使用 `TEST_DATABASE_URL`，详见 [CI 文档](docs/ci.md)。
 
 原生表单校验回归测试在安装 Chromium（`/usr/bin/chromium`、`/usr/bin/chromium-browser` 或通过 `CHROMIUM_PATH` 指定）时运行。测试使用开发依赖 `playwright-core`，不会下载浏览器；未安装 Chromium 时仅跳过原生浏览器测试。

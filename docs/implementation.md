@@ -6,14 +6,14 @@
 
 | 源码                        | 职责                                                            |
 | --------------------------- | --------------------------------------------------------------- |
-| `api.ts` / `auth.ts`        | REST/SSE、输入校验、UCS OIDC JWT、请求审计                      |
-| `domain.ts` / `service.ts`  | ACL、不可变版本、状态机、幂等与交互续跑                         |
-| `store.ts`                  | PostgreSQL 只读快照 / 行锁写事务 / 测试内存适配器               |
-| `worker.ts`                 | 调度、续租、取消、故障收敛、工具治理与子 Agent                  |
-| `runtime.ts`                | Pi AgentFactory、EnterpriseResourceLoader、Session entry 持久化 |
-| `adapters/sandbox.ts`       | Cube Volume / Sandbox 管理、工作区工具租约                      |
-| `adapters/remote-script.ts` | 仅在 Sandbox 执行的可信文件/命令适配代码                        |
-| `adapters/mcp.ts`           | 官方 Streamable HTTP MCP Client 与 Endpoint 策略                |
+| `api/server.ts` / `api/auth.ts`        | REST/SSE、输入校验、UCS OIDC JWT、请求审计                      |
+| `domain/model.ts` / `domain/service.ts`  | ACL、不可变版本、状态机、幂等与交互续跑                         |
+| `storage/store.ts`                  | PostgreSQL 只读快照 / 行锁写事务 / 测试内存适配器               |
+| `execution/worker.ts`                 | 调度、续租、取消、故障收敛、工具治理与子 Agent                  |
+| `execution/runtime.ts`                | Pi AgentFactory、EnterpriseResourceLoader、Session entry 持久化 |
+| `sandbox/manager.ts`       | Cube Volume / Sandbox 管理、工作区工具租约                      |
+| `sandbox/remote-script.ts` | 仅在 Sandbox 执行的可信文件/命令适配代码                        |
+| `mcp/manager.ts`           | 官方 Streamable HTTP MCP Client 与 Endpoint 策略                |
 
 Pi 工具使用规范名字 `read`、`write`、`edit`、`bash`、`ls`、`find`、`grep`。`createAgentSession` 设置 `noTools: "all"`，仅启用允许的 `customTools`，同名工具不会落到 Pi 的本地实现。ResourceLoader 返回空 Extensions/Skills 本地发现结果，远程 Skill 元数据进入受控 Prompt；内容经 read 读取。Worker 不调用 Pi 的本地 read/bash 工厂。
 

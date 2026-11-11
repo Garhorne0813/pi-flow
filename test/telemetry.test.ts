@@ -5,13 +5,13 @@ import {
   traceContext,
   withContext,
   currentTraceparent,
-} from "../src/telemetry.js";
-import { MemoryStore } from "../src/store.js";
-import { HarnessService } from "../src/service.js";
-import { DemoSandbox, SandboxManager } from "../src/adapters/sandbox.js";
-import { MCPManager } from "../src/adapters/mcp.js";
-import { Worker } from "../src/worker.js";
-import { AgentConfig } from "../src/domain.js";
+} from "../src/observability/telemetry.js";
+import { MemoryStore } from "../src/storage/store.js";
+import { HarnessService } from "../src/domain/service.js";
+import { DemoSandbox, SandboxManager } from "../src/sandbox/manager.js";
+import { MCPManager } from "../src/mcp/manager.js";
+import { Worker } from "../src/execution/worker.js";
+import { AgentConfig } from "../src/domain/model.js";
 test("worker task, maintenance and database errors are correlated without sensitive output", async () => {
   const logs: Record<string, unknown>[] = [];
   const old = telemetry.sink;

@@ -2,13 +2,13 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { ModelRuntime, SessionManager } from "@earendil-works/pi-coding-agent";
-import { AgentConfig } from "../src/domain.js";
+import { AgentConfig } from "../src/domain/model.js";
 import {
   EnterpriseResourceLoader,
   PiRuntime,
   type RuntimeContext,
-} from "../src/runtime.js";
-import { specs } from "../src/tool-specs.js";
+} from "../src/execution/runtime.js";
+import { specs } from "../src/execution/tool-specs.js";
 test("real Pi 0.99.2 uses canonical custom read/bash and restores canonical session entries", async () => {
   const requests: Record<string, any>[] = [];
   let count = 0;

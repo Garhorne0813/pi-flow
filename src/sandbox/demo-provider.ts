@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
-import { Fault, type Skill } from "../domain.js";
-import { skillScope } from "../adapters/skill-mounts.js";
+import { Fault, type Skill } from "../domain/model.js";
+import { skillScope } from "./skill-mounts.js";
 import type { SandboxProvider } from "./provider.js";
 // Test/demo adapter stores files in memory and never executes a local command.
 export class DemoSandbox implements SandboxProvider {

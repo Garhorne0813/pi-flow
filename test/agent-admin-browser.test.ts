@@ -6,15 +6,15 @@ import { resolve } from "node:path";
 import {
   HostSkillPackages,
   uploadedSkillBinding,
-} from "../src/skill-packages.js";
+} from "../src/skills/packages.js";
 import { skillZip, skillMarkdown } from "./helpers/skill-zip.js";
 import test from "node:test";
-import { AgentConfig } from "../src/domain.js";
-import { agentAdminHTML } from "../src/agent-admin-ui.js";
-import { buildAPI } from "../src/api.js";
-import { MemoryStore } from "../src/store.js";
-import { HarnessService } from "../src/service.js";
-import { DemoSandbox, SandboxManager } from "../src/adapters/sandbox.js";
+import { AgentConfig } from "../src/domain/model.js";
+import { agentAdminHTML } from "../src/admin-ui/page.js";
+import { buildAPI } from "../src/api/server.js";
+import { MemoryStore } from "../src/storage/store.js";
+import { HarnessService } from "../src/domain/service.js";
+import { DemoSandbox, SandboxManager } from "../src/sandbox/manager.js";
 
 const chromium = [
   process.env.CHROMIUM_PATH,

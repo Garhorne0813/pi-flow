@@ -1,5 +1,5 @@
 import test from 'node:test';import assert from 'node:assert/strict';import {readFile} from 'node:fs/promises';
-import {PostgresStore} from '../src/store.js';import {HarnessService,authorizedRun} from '../src/service.js';import {AgentConfig,id} from '../src/domain.js';
+import {PostgresStore} from '../src/storage/store.js';import {HarnessService,authorizedRun} from '../src/domain/service.js';import {AgentConfig,id} from '../src/domain/model.js';
 test('per-Run authorization retains ancestor cancellation and expired identity checks',{skip:!process.env.TEST_DATABASE_URL},async()=>{
  const store=new PostgresStore(process.env.TEST_DATABASE_URL!),actor={tenantId:'ancestry-'+id(),userId:'u',admin:true};
  try {

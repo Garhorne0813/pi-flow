@@ -1,13 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { MemoryStore } from "../src/store.js";
-import { HarnessService } from "../src/service.js";
-import { AgentConfig, Fault, id, type Actor } from "../src/domain.js";
-import { DemoSandbox, SandboxManager } from "../src/adapters/sandbox.js";
-import { MCPManager } from "../src/adapters/mcp.js";
-import { Worker } from "../src/worker.js";
-import { DemoRuntime, type Runtime } from "../src/runtime.js";
-import { buildAPI } from "../src/api.js";
+import { MemoryStore } from "../src/storage/store.js";
+import { HarnessService } from "../src/domain/service.js";
+import { AgentConfig, Fault, id, type Actor } from "../src/domain/model.js";
+import { DemoSandbox, SandboxManager } from "../src/sandbox/manager.js";
+import { MCPManager } from "../src/mcp/manager.js";
+import { Worker } from "../src/execution/worker.js";
+import { DemoRuntime, type Runtime } from "../src/execution/runtime.js";
+import { buildAPI } from "../src/api/server.js";
 const alice: Actor = { tenantId: "one", userId: "alice", admin: true };
 const bob: Actor = { tenantId: "one", userId: "bob", admin: false };
 const outsider: Actor = { tenantId: "two", userId: "alice", admin: true };
@@ -610,7 +610,7 @@ test("prototype names do not impersonate a workspace member", async () => {
 });
 
 test("SSE polls are read-only, replay ordered pages via Last-Event-ID, and recheck ACL on every poll", async () => {
-  const { event } = await import("../src/domain.js");
+  const { event } = await import("../src/domain/model.js");
   const f = await fixture();
   const r = await f.service.submit(alice, f.ses.id, "stream");
   await f.store.tx("one", (s) => {
@@ -668,7 +668,7 @@ test("SSE polls are read-only, replay ordered pages via Last-Event-ID, and reche
 });
 
 test("SSE expires its connection identity and renewed credentials replay missed events", async () => {
-  const { event } = await import("../src/domain.js");
+  const { event } = await import("../src/domain/model.js");
   const f = await fixture();
   const r = await f.service.submit(alice, f.ses.id, "expiry");
   await f.store.tx("one", (s) => {
@@ -744,7 +744,7 @@ test("SSE does not send a batch when a pending database read crosses token expir
 });
 test("SSE token expiry closes a backpressured connection even when the client stops reading", async () => {
   const { get } = await import("node:http");
-  const { event } = await import("../src/domain.js");
+  const { event } = await import("../src/domain/model.js");
   const f = await fixture(),
     r = await f.service.submit(alice, f.ses.id, "blocked stream");
   await f.store.tx(alice.tenantId, (s) => {

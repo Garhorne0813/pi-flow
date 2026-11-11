@@ -29,17 +29,17 @@ Production normally runs API and Worker as separate processes sharing one databa
 
 | Module | Responsibility |
 | --- | --- |
-| `src/api.ts`, `src/auth.ts` | REST/SSE, input validation, UCS OIDC, request audit |
-| `src/agent-admin-ui.ts` | Same-origin management page, admin API client, drafts and conflict handling |
-| `src/domain.ts`, `src/service.ts` | ACL, immutable agent versions, idempotency, interactions |
-| `src/store.ts`, `src/run-store.ts` | Metadata transactions, sessions, Runs, events, read projections |
-| `src/worker.ts` | Tenant scheduling, claims, heartbeats, cancellation, tool policy, child tasks |
-| `src/runtime.ts` | Pi sessions, controlled resource loading, model invocation |
-| `src/adapters/sandbox.ts`, `src/sandbox/*` | Sandbox orchestration, providers, leases, bounded remote calls |
-| `src/adapters/sandbox-policy.ts`, `src/capacity-store.ts` | Shared capacity reservations and operation fencing |
-| `src/adapters/skill-mounts.ts` | Skill mount identity, volume/host source validation, and logical scope |
-| `src/adapters/mcp.ts` | MCP discovery, allowlists, credentials, bounded calls |
-| `src/usage.ts`, `src/telemetry.ts`, `src/health.ts` | Budget ledger, cost estimates, telemetry, health |
+| `src/api/server.ts`, `src/api/auth.ts` | REST/SSE, input validation, UCS OIDC, request audit |
+| `src/admin-ui/page.ts` | Same-origin management page, admin API client, drafts and conflict handling |
+| `src/domain/model.ts`, `src/domain/service.ts` | ACL, immutable agent versions, idempotency, interactions |
+| `src/storage/store.ts`, `src/storage/run-store.ts` | Metadata transactions, sessions, Runs, events, read projections |
+| `src/execution/worker.ts` | Tenant scheduling, claims, heartbeats, cancellation, tool policy, child tasks |
+| `src/execution/runtime.ts` | Pi sessions, controlled resource loading, model invocation |
+| `src/sandbox/manager.ts`, `src/sandbox/*` | Sandbox orchestration, providers, leases, bounded remote calls |
+| `src/sandbox/policy.ts`, `src/storage/capacity-store.ts` | Shared capacity reservations and operation fencing |
+| `src/sandbox/skill-mounts.ts` | Skill mount identity, volume/host source validation, and logical scope |
+| `src/mcp/manager.ts` | MCP discovery, allowlists, credentials, bounded calls |
+| `src/domain/usage.ts`, `src/observability/telemetry.ts`, `src/observability/health.ts` | Budget ledger, cost estimates, telemetry, health |
 
 See [Sandbox module boundaries](sandbox-modules.md) for the provider/manager split.
 

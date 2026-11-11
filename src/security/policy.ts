@@ -1,4 +1,4 @@
-import { Fault, type AgentConfig, type State } from "../domain.js";
+import { Fault, type AgentConfig, type State } from "../domain/model.js";
 export function authorizeTool(s: State, config: AgentConfig, name: string) {
   const bare = name.replace(/^remote_/, "");
   if (

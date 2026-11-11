@@ -1,8 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { MemoryStore } from "../src/store.js";
-import { HarnessService } from "../src/service.js";
-import { DemoSandbox, SandboxManager } from "../src/adapters/sandbox.js";
+import { MemoryStore } from "../src/storage/store.js";
+import { HarnessService } from "../src/domain/service.js";
+import { DemoSandbox, SandboxManager } from "../src/sandbox/manager.js";
 
 const actor = { tenantId: "queue", userId: "owner", admin: true };
 function deferred() {

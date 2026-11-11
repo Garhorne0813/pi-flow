@@ -2,8 +2,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { fixture } from "../scripts/acceptance/fixture.js";
 import { workerHistoryBenchmark } from "../scripts/acceptance/worker-history.js";
-import { authorizedRun } from "../src/service.js";
-import { run } from "../src/domain.js";
+import { authorizedRun } from "../src/domain/service.js";
+import { run } from "../src/domain/model.js";
 const url = process.env.TEST_DATABASE_URL;
 if (process.env.REQUIRE_POSTGRES_TESTS === "true" && !url)
   throw new Error("TEST_DATABASE_URL required");

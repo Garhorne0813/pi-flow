@@ -1,5 +1,5 @@
-import { Fault } from "../domain.js";
-import { telemetry } from "../telemetry.js";
+import { Fault } from "../domain/model.js";
+import { telemetry } from "../observability/telemetry.js";
 export function remote<T>(
   start: () => Promise<T>,
   signal?: AbortSignal,

@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { performance } from "node:perf_hooks";
-import { Worker } from "../../src/worker.js";
-import { DemoSandbox, SandboxManager } from "../../src/adapters/sandbox.js";
-import { MCPManager } from "../../src/adapters/mcp.js";
-import { claimableRunsQuery } from "../../src/run-store.js";
+import { Worker } from "../../src/execution/worker.js";
+import { DemoSandbox, SandboxManager } from "../../src/sandbox/manager.js";
+import { MCPManager } from "../../src/mcp/manager.js";
+import { claimableRunsQuery } from "../../src/storage/run-store.js";
 import { fixture } from "./fixture.js";
 
 // Disposable real-DB experiment, including an actual idle Worker tick. No remote providers.

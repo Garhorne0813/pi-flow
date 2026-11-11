@@ -4,14 +4,14 @@ import { existsSync } from "node:fs";
 import { chmod, mkdtemp, readdir, rm } from "node:fs/promises";
 import { resolve } from "node:path";
 import { chromium as browserEngine } from "playwright-core";
-import { buildAPI } from "../src/api.js";
-import { MemoryStore } from "../src/store.js";
-import { MemoryRegistry, principal } from "../src/store/registry.js";
-import { personalStore } from "../src/store/personal.js";
-import { PersonalService } from "../src/personal-service.js";
+import { buildAPI } from "../src/api/server.js";
+import { MemoryStore } from "../src/storage/store.js";
+import { MemoryRegistry, principal } from "../src/storage/registry.js";
+import { personalStore } from "../src/storage/personal.js";
+import { PersonalService } from "../src/domain/personal-service.js";
 import { seedDemo } from "../src/config/agents.js";
-import { DemoSandbox, SandboxManager } from "../src/adapters/sandbox.js";
-import { HostSkillPackages } from "../src/skill-packages.js";
+import { DemoSandbox, SandboxManager } from "../src/sandbox/manager.js";
+import { HostSkillPackages } from "../src/skills/packages.js";
 import { skillZip, skillMarkdown } from "./helpers/skill-zip.js";
 
 const chromium = [

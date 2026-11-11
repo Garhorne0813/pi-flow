@@ -2,7 +2,7 @@ import { lookup } from "node:dns/promises";
 import { request as httpsRequest } from "node:https";
 import { request as httpRequest } from "node:http";
 import { BlockList, isIP } from "node:net";
-import { Fault } from "../domain.js";
+import { Fault } from "../domain/model.js";
 const blocked = new BlockList();
 for (const [ip, prefix] of [
   ["0.0.0.0", 8],

@@ -1,11 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { MemoryStore } from "../src/store.js";
-import { HarnessService } from "../src/service.js";
-import { AgentConfig } from "../src/domain.js";
-import { DemoSandbox, SandboxManager } from "../src/adapters/sandbox.js";
-import { MCPManager } from "../src/adapters/mcp.js";
-import { Worker } from "../src/worker.js";
+import { MemoryStore } from "../src/storage/store.js";
+import { HarnessService } from "../src/domain/service.js";
+import { AgentConfig } from "../src/domain/model.js";
+import { DemoSandbox, SandboxManager } from "../src/sandbox/manager.js";
+import { MCPManager } from "../src/mcp/manager.js";
+import { Worker } from "../src/execution/worker.js";
 const actor = { tenantId: "timeouts", userId: "owner", admin: true };
 const never = () => new Promise<never>(() => {});
 async function fixture() {

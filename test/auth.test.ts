@@ -5,7 +5,7 @@ import { getCACertificates, setDefaultCACertificates } from "node:tls";
 import { execFileSync } from "node:child_process";
 import { mkdir, readFile } from "node:fs/promises";
 import { generateKeyPair, exportJWK, SignJWT } from "jose";
-import { authFromEnv } from "../src/auth.js";
+import { authFromEnv } from "../src/api/auth.js";
 test("OIDC verifies JWT signatures and claims in shared and personal modes", async () => {
   await mkdir("work/auth-tls", { recursive: true });
   execFileSync(

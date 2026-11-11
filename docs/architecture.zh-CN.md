@@ -29,17 +29,17 @@ flowchart LR
 
 | 模块 | 职责 |
 | --- | --- |
-| `src/api.ts`、`src/auth.ts` | REST/SSE、输入校验、UCS OIDC、请求审计 |
-| `src/agent-admin-ui.ts` | 同源管理页面、管理员 API 客户端、草稿与冲突处理 |
-| `src/domain.ts`、`src/service.ts` | ACL、不可变智能体版本、幂等、交互 |
-| `src/store.ts`、`src/run-store.ts` | 元数据事务、Session、Run、事件、读取投影 |
-| `src/worker.ts` | 租户调度、领取、心跳、取消、工具策略、子任务 |
-| `src/runtime.ts` | Pi 会话、受控资源加载、模型调用 |
-| `src/adapters/sandbox.ts`、`src/sandbox/*` | Sandbox 编排、Provider、租约、有界远程调用 |
-| `src/adapters/sandbox-policy.ts`、`src/capacity-store.ts` | 共享容量预留与操作代次校验 |
-| `src/adapters/skill-mounts.ts` | 技能挂载身份、Volume / Host 来源校验与逻辑 scope |
-| `src/adapters/mcp.ts` | MCP 发现、白名单、凭证、有界调用 |
-| `src/usage.ts`、`src/telemetry.ts`、`src/health.ts` | 预算账本、费用估算、遥测、健康检查 |
+| `src/api/server.ts`、`src/api/auth.ts` | REST/SSE、输入校验、UCS OIDC、请求审计 |
+| `src/admin-ui/page.ts` | 同源管理页面、管理员 API 客户端、草稿与冲突处理 |
+| `src/domain/model.ts`、`src/domain/service.ts` | ACL、不可变智能体版本、幂等、交互 |
+| `src/storage/store.ts`、`src/storage/run-store.ts` | 元数据事务、Session、Run、事件、读取投影 |
+| `src/execution/worker.ts` | 租户调度、领取、心跳、取消、工具策略、子任务 |
+| `src/execution/runtime.ts` | Pi 会话、受控资源加载、模型调用 |
+| `src/sandbox/manager.ts`、`src/sandbox/*` | Sandbox 编排、Provider、租约、有界远程调用 |
+| `src/sandbox/policy.ts`、`src/storage/capacity-store.ts` | 共享容量预留与操作代次校验 |
+| `src/sandbox/skill-mounts.ts` | 技能挂载身份、Volume / Host 来源校验与逻辑 scope |
+| `src/mcp/manager.ts` | MCP 发现、白名单、凭证、有界调用 |
+| `src/domain/usage.ts`、`src/observability/telemetry.ts`、`src/observability/health.ts` | 预算账本、费用估算、遥测、健康检查 |
 
 Provider 与 Manager 的划分见 [Sandbox 模块边界](sandbox-modules.md)。
 

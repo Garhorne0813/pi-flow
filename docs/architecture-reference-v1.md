@@ -71,18 +71,20 @@ pi-flow 是一个**面向多用户的个人 AI Agent 后端**，只交付 HTTP/S
 
 | 目录 | 职责 |
 | --- | --- |
-| `src/api/` | Fastify 路由：agents、sessions/runs/interactions/events(SSE)、schedules、me（文件/沙箱/记忆）、admin（配置/Skill/审计/指标） |
-| `src/execution/` | `HarnessService`（领域操作 + 事务）、`Worker`（认领与执行循环）、`Runtime`（Pi SDK / Demo）、`DeltaBatcher`、记忆读写/整理 |
-| `src/sandbox/` | `UserSandboxManager`（生命周期/租约/围栏/对账）、Provider 适配器、网络策略、远端 Python 脚本 |
-| `src/storage/` | 工作区后端：OSS / volume / hostpath / memory |
-| `src/store/` | `Store` 接口与 `MemoryStore` / `PostgresStore`；`ScheduleStore`；Run/Session/平台配置读写 |
+| `src/app/` | 部署配置、依赖装配与 Demo 初始化 |
+| `src/api/` | Fastify 路由、OIDC/DEV_TOKEN 认证、请求审计与错误处理；agents、sessions/runs/interactions/events(SSE)、schedules、me、admin 接口 |
+| `src/domain/` | 领域模型与 ACL；`HarnessService`、`PersonalService` 的业务操作与事务编排；用量账本、预算准入与结算 |
+| `src/execution/` | `Worker`（认领与执行循环）、Pi / Demo 运行时、工具 schema、`DeltaBatcher`、记忆读写/整理 |
+| `src/sandbox/` | `SandboxManager`（生命周期/租约/容量/快照/文件访问）、Provider 适配器、技能挂载策略与远端脚本；工作区文件由 Provider 对接卷或 Demo 内存文件 |
+| `src/storage/` | `Store` 接口、`MemoryStore` / `PostgresStore` / `PersonalPostgresStore`、`Registry`；Run/Session/事件/调度/容量及平台配置的持久化与查询 |
 | `src/config/` | Git 配置加载/校验/发布、管理端配置文档、Skill 交付 |
-| `src/skills/` | Skill 版本、归档、原子物化、管理上下文 |
-| `src/security/` | 认证（OIDC/DEV_TOKEN）、Principal、策略网关、工具风险、Token 保险箱、路径策略 |
-| `src/tools/` | 内置工具 schema、MCP 管理、Web 工具、结构化提问 |
-| `src/schedules/` | cron 解析、用户侧服务、Worker 侧触发器 |
-| `src/observability/` | 健康探针、Worker 心跳、指标、告警 |
-| `src/usage.ts` | 用量账本、预算准入与结算 |
+| `src/skills/` | Skill ZIP 校验、不可变版本准备、物化与回收 |
+| `src/security/` | 工具授权与审批策略、Token 保险箱、路径策略；Principal 身份校验由 `src/storage/registry.ts` 提供 |
+| `src/mcp/` | MCP 发现、白名单、凭证与有界调用 |
+| `src/tools/` | Web 工具适配 |
+| `src/schedules/` | cron 解析、调度服务、触发与历史记录 |
+| `src/observability/` | 健康模型、有界健康检查、日志、追踪、指标与告警；HTTP 健康探针由 `src/api/operations.ts` 提供 |
+| `src/admin-ui/` | 管理控制台 HTML、脚本与样式 |
 | `migrations/` | 顺序 SQL（`harness_*` 旧表 + `personal_*` 现表 + `platform_*`） |
 
 ---

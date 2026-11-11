@@ -5,7 +5,7 @@ import {
   audit,
   type Actor,
   type State,
-} from "../domain.js";
+} from "../domain/model.js";
 export const AgentInput = z
   .object({
     key: z.string().regex(/^[a-z][a-z0-9_-]{0,63}$/),

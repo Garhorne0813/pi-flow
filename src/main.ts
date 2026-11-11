@@ -1,7 +1,7 @@
-import { bootstrap } from "./bootstrap.js";
-import { telemetry } from "./telemetry.js";
-import { buildAPI } from "./api.js";
-import { authFromEnv } from "./auth.js";
+import { bootstrap } from "./app/bootstrap.js";
+import { telemetry } from "./observability/telemetry.js";
+import { buildAPI } from "./api/server.js";
+import { authFromEnv } from "./api/auth.js";
 const auth = authFromEnv({ personal: true });
 const context = await bootstrap();
 const app = buildAPI(

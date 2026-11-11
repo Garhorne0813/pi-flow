@@ -10,12 +10,12 @@ import {
   ListToolsRequestSchema,
   CallToolRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
-import { MemoryStore } from "../src/store.js";
-import { MCPManager } from "../src/adapters/mcp.js";
-import { AgentConfig, Fault } from "../src/domain.js";
-import { HarnessService } from "../src/service.js";
-import { Worker } from "../src/worker.js";
-import { DemoSandbox, SandboxManager } from "../src/adapters/sandbox.js";
+import { MemoryStore } from "../src/storage/store.js";
+import { MCPManager } from "../src/mcp/manager.js";
+import { AgentConfig, Fault } from "../src/domain/model.js";
+import { HarnessService } from "../src/domain/service.js";
+import { Worker } from "../src/execution/worker.js";
+import { DemoSandbox, SandboxManager } from "../src/sandbox/manager.js";
 async function until(check: () => Promise<boolean>) {
   for (let i = 0; i < 500; i++) {
     if (await check()) return;

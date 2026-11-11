@@ -1,8 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile, readdir } from "node:fs/promises";
-import { PostgresStore } from "../src/store.js";
-import { emptyState, id, event, type Run, AgentConfig } from "../src/domain.js";
+import { PostgresStore } from "../src/storage/store.js";
+import { emptyState, id, event, type Run, AgentConfig } from "../src/domain/model.js";
 const url = process.env.TEST_DATABASE_URL;
 if (process.env.REQUIRE_POSTGRES_TESTS === "true" && !url)
   throw new Error("TEST_DATABASE_URL required");
@@ -368,7 +368,7 @@ test(
         };
         s.sessions.s!.agentVersionId = "b";
       });
-      const { authorizedRun } = await import("../src/service.js");
+      const { authorizedRun } = await import("../src/domain/service.js");
       assert.equal(
         await f.store.readRun(
           actor.tenantId,
@@ -461,7 +461,7 @@ test(
       );
       await f.store.pool.query(migration);
       const { HarnessService, authorizedRun } = await import(
-        "../src/service.js"
+        "../src/domain/service.js"
       );
       const service = new HarnessService(f.store, [], ["default"]);
       assert.deepEqual(

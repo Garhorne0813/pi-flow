@@ -7,21 +7,21 @@ import {
   ApiError,
   type CreateOptions,
 } from "@cubesandbox/sdk";
-import { MemoryStore } from "../src/store.js";
-import { HarnessService } from "../src/service.js";
-import { AgentConfig, Fault, type Actor, type Skill } from "../src/domain.js";
+import { MemoryStore } from "../src/storage/store.js";
+import { HarnessService } from "../src/domain/service.js";
+import { AgentConfig, Fault, type Actor, type Skill } from "../src/domain/model.js";
 import {
   DemoSandbox,
   CubeProvider,
   SandboxManager,
-} from "../src/adapters/sandbox.js";
+} from "../src/sandbox/manager.js";
 import {
   SandboxPolicySchema,
   type SandboxPolicy,
-} from "../src/adapters/sandbox-policy.js";
-import { buildAPI } from "../src/api.js";
-import { Worker } from "../src/worker.js";
-import { MCPManager } from "../src/adapters/mcp.js";
+} from "../src/sandbox/policy.js";
+import { buildAPI } from "../src/api/server.js";
+import { Worker } from "../src/execution/worker.js";
+import { MCPManager } from "../src/mcp/manager.js";
 
 const alice: Actor = { tenantId: "one", userId: "alice", admin: true };
 const bob: Actor = { tenantId: "one", userId: "bob", admin: false };

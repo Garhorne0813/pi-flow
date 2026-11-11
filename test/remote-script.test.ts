@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdir, writeFile, symlink, readFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import { remoteScript } from "../src/adapters/remote-script.js";
+import { remoteScript } from "../src/sandbox/remote-script.js";
 test("trusted remote Python contract guards paths, symlinks, optimistic edits and command timeout", async () => {
   const base = resolve("work/remote-" + crypto.randomUUID());
   const ws = base + "/workspace",

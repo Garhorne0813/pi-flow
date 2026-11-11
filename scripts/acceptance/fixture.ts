@@ -1,7 +1,7 @@
 import { readFile, readdir } from "node:fs/promises";
-import { PostgresStore } from "../../src/store.js";
-import { HarnessService } from "../../src/service.js";
-import { AgentConfig, id } from "../../src/domain.js";
+import { PostgresStore } from "../../src/storage/store.js";
+import { HarnessService } from "../../src/domain/service.js";
+import { AgentConfig, id } from "../../src/domain/model.js";
 export async function fixture() {
   if (!process.env.TEST_DATABASE_URL)
     throw new Error(

@@ -1,5 +1,5 @@
 import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
-import { Fault } from "../domain.js";
+import { Fault } from "../domain/model.js";
 function key(variable = "RUN_TOKEN_KEY") {
   const raw = process.env[variable];
   if (!raw) throw new Fault(503, variable + "_REQUIRED");

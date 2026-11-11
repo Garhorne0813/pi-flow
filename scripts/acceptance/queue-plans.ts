@@ -2,11 +2,11 @@ import assert from "node:assert/strict";
 import { readFile, readdir } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
 import pg from "pg";
-import { id, emptyState } from "../../src/domain.js";
+import { id, emptyState } from "../../src/domain/model.js";
 import {
   runWorkQuery,
   sandboxMaintenanceQuery,
-} from "../../src/personal-work-queries.js";
+} from "../../src/storage/personal-work-queries.js";
 export const previousRunWorkQuery = `WITH candidates AS (
  (SELECT DISTINCT ON(user_id) user_id,run_id,0 AS priority FROM personal_runs WHERE lease_owner IS NOT NULL AND lease_expires<$1 AND state<>'QUEUED' ORDER BY user_id,lease_expires,run_id)
  UNION ALL (SELECT DISTINCT ON(user_id) user_id,run_id,1 AS priority FROM personal_runs WHERE state='QUEUED' ORDER BY user_id,created_at,run_id)
