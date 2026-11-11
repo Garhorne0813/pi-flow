@@ -99,6 +99,7 @@ test("Aliyun uses secure E2B creation and isolated OSS prefixes with only select
   assert.deepEqual(created[0]!.network, {
     allowPublicTraffic: false,
     denyOut: ["evil.example"],
+    allowOut: ["pi-flow-test.oss-cn-hangzhou.aliyuncs.com"],
   });
   assert.equal(created[0]!.allowInternetAccess, true);
   assert.equal(created[0]!.apiUrl, config().apiUrl);
@@ -130,6 +131,148 @@ test("Aliyun uses secure E2B creation and isolated OSS prefixes with only select
   assert.equal(commands[0].args._requireWorkspaceMount, true);
   assert.equal(commands[0].options.user, "user");
   assert.equal(created[0]!.volumeMounts, undefined);
+});
+
+test("Aliyun default-deny includes the exact OSS storage host and rejects explicit domain conflicts", async (t) => {
+  const requests: SandboxOpts[] = [];
+  t.mock.method(
+    Sandbox,
+    "create",
+    async (_template: string, opts: SandboxOpts) => {
+      requests.push(opts);
+      return { sandboxId: "box", commands: { run: async () => result() } };
+    },
+  );
+  const p = new AliyunE2BProvider(config());
+  await p.create(await p.createVolume("ws-one"), "default", []);
+  assert.equal(requests[0]!.allowInternetAccess, false);
+  assert.deepEqual(requests[0]!.network, {
+    allowPublicTraffic: false,
+    allowOut: ["pi-flow-test.oss-cn-hangzhou.aliyuncs.com"],
+  });
+  const host = "pi-flow-test.oss-cn-hangzhou.aliyuncs.com";
+  for (const denied of [
+    host,
+    "*.aliyuncs.com",
+    "*.oss-cn-hangzhou.aliyuncs.com",
+  ])
+    assert.throws(
+      () => config({ network: { denyOut: [denied] } }),
+      /explicitly denied/,
+    );
+  const selected = config({
+    network: {
+      allowOut: ["api.example.com", host],
+      denyOut: ["0.0.0.0/0", host],
+    },
+  });
+  assert.deepEqual(selected.network.allowOut, ["api.example.com", host]);
+  assert.deepEqual(selected.network.denyOut, ["0.0.0.0/0", host]);
+  assert.deepEqual(
+    config({ endpoint: "https://oss-cn-shanghai-internal.aliyuncs.com" })
+      .network.allowOut,
+    ["pi-flow-test.oss-cn-shanghai-internal.aliyuncs.com"],
+  );
+  assert.throws(() => config({ endpoint: "https://oss.example.com:8443" }));
+});
+
+test("Aliyun allows four Skills and rejects a fifth before any remote creation", async (t) => {
+  const skills = Array.from({ length: 5 }, (_, n) => ({
+    ...skill,
+    id: `skill${n}@v1`,
+    path: `/skills/skill${n}/SKILL.md`,
+  }));
+  const bindings = Object.fromEntries(
+    skills.map((s, n) => [
+      s.id,
+      { bundle: s.bundle, path: s.path, bucketPath: `/published/skill${n}` },
+    ]),
+  );
+  const create = t.mock.method(
+    Sandbox,
+    "create",
+    async (_template: string, opts: SandboxOpts) => {
+      assert.equal(
+        JSON.parse(opts.metadata!["fc.sandbox.storage.oss"]!).mountPoints
+          .length,
+        5,
+      );
+      return { sandboxId: "box", commands: { run: async () => result() } };
+    },
+  );
+  const p = new AliyunE2BProvider(config({ skills: bindings }));
+  const volume = await p.createVolume("ws-one");
+  await p.create(volume, "default", skills.slice(0, 4));
+  assert.throws(() => p.scope("default", skills), {
+    code: "ALIYUN_OSS_MOUNT_LIMIT",
+  });
+  await assert.rejects(
+    p.create(volume, "default", skills),
+    (e: unknown) =>
+      e instanceof SandboxCreationError &&
+      e.cleanupConfirmed &&
+      e.code === "ALIYUN_OSS_MOUNT_LIMIT",
+  );
+  assert.equal(create.mock.callCount(), 1);
+});
+
+test("Aliyun rejects overlapping manual sources and bounds mount directories and OSS prefixes", async () => {
+  const bindings = (a: string, b: string) => ({
+    a: { bundle: "default", path: "/skills/a/SKILL.md", bucketPath: a },
+    b: { bundle: "default", path: "/skills/b/SKILL.md", bucketPath: b },
+  });
+  for (const [a, b] of [
+    ["/published/a", "/published/a"],
+    ["/published", "/published/private"],
+    ["/published/private", "/published"],
+  ])
+    assert.throws(
+      () => new AliyunE2BProvider(config({ skills: bindings(a!, b!) })),
+      /sources must not overlap/,
+    );
+  new AliyunE2BProvider(
+    config({ skills: bindings("/published/a", "/published/ab") }),
+  );
+  const path = "/skills/" + "a".repeat(56);
+  assert.equal(path.length, 64);
+  config({
+    skills: {
+      a: {
+        bundle: "default",
+        path: path + "/SKILL.md",
+        bucketPath: "/published/a",
+      },
+    },
+  });
+  assert.throws(() =>
+    config({
+      skills: {
+        a: {
+          bundle: "default",
+          path: path + "a/SKILL.md",
+          bucketPath: "/published/a",
+        },
+      },
+    }),
+  );
+  assert.throws(() => config({ skillUploadPrefix: "/" + "a".repeat(63) }));
+  assert.throws(() =>
+    config({
+      skills: {
+        a: {
+          bundle: "default",
+          path: "/skills/a/SKILL.md",
+          bucketPath: "/" + "a".repeat(128),
+        },
+      },
+    }),
+  );
+  const p = new AliyunE2BProvider(
+    config({ workspacePrefix: "/" + "w".repeat(125) }),
+  );
+  await assert.rejects(p.createVolume("ws-one"), {
+    code: "ALIYUN_OSS_PATH_TOO_LONG",
+  });
 });
 
 test("Aliyun rejects unpublished, changed, revoked and host-upload skills before creation", async (t) => {

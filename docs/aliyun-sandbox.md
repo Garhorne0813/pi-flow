@@ -39,7 +39,7 @@ ALIYUN_OSS_ENDPOINT=https://oss-cn-hangzhou.aliyuncs.com
 ALIYUN_OSS_ROLE_ARN=acs:ram::1234567890123456:role/pi-flow-sandbox
 ALIYUN_OSS_WORKSPACE_PREFIX=/pi-flow/workspaces
 ALIYUN_ALLOW_INTERNET_ACCESS=false
-ALIYUN_NETWORK_JSON={}
+ALIYUN_NETWORK_JSON={"allowOut":["my-pi-flow-bucket.oss-cn-hangzhou.aliyuncs.com"]}
 SKILL_BUNDLES_JSON={"default":"default"}
 SKILL_VOLUMES_JSON={}
 ALIYUN_SKILLS_JSON={}
@@ -51,7 +51,7 @@ ALIYUN_SKILLS_JSON={}
 
 `ALIYUN_NETWORK_JSON` 只接受 `allowOut`、`denyOut` 字符串数组，不能覆盖入站鉴权。
 `ALIYUN_ALLOW_INTERNET_ACCESS` 只接受 `true`/`false`，默认 `false`。
-这两项按阿里云网络文档共同生效；白名单和禁用出网组合的实际效果需在目标地域验证。
+按[官方网络访问控制文档](https://help.aliyun.com/zh/agent-sandbox/network-access-control)，默认拒绝可以通过 allowOut 白名单放行。Provider 自动将 `<Bucket>.<Endpoint hostname>` 加入有效 `allowOut`，例如 `my-pi-flow-bucket.oss-cn-hangzhou.aliyuncs.com`；只放行该 Bucket 域名，不放开整个 OSS 域或公网。保留用户额外配置的 allow/deny 规则；显式域名 deny 命中存储目标而没有显式 allow 时配置报错，不静默覆盖。默认 `network={}` 因此仍可访问必要的 OSS。自定义 OSS Endpoint 只接受标准 HTTPS 端口，其他端口不在域名过滤保障内。该规则符合文档，但当前没有真实云账号验证证据。
 这些是部署级配置，不会自动把 Agent 策略转换成逐任务规则。
 
 ## 持久化和 Skill
@@ -61,7 +61,9 @@ ALIYUN_SKILLS_JSON={}
 释放实例、超时回收、Skill 选择变化、文件 API 临时实例均复用这个前缀。
 实例的 connect 延长可用时间；单次命令上限 130 秒，实例超时最小为 180 秒。
 
-只读 Skill 使用同一 Bucket 中单独、不可变的版本目录，必须先发布 `SKILL.md` 和辅助文件：
+每个实例按 OSS 最多 5 个挂载点的保守上限校验：工作区占 1 个，因此最多选择 4 个 Skill。超限在 scope/create 前返回 400 `ALIYUN_OSS_MOUNT_LIMIT`，不会发起云端创建。模板不得额外预挂载 OSS；本项目不实现聚合更多 Skill 的挂载方案。
+
+手工只读 Skill 使用同一 Bucket 中单独、不可变的版本目录，必须先发布 `SKILL.md` 和辅助文件：
 
 ```dotenv
 ALIYUN_SKILLS_JSON={"review@v1":{"bundle":"default","path":"/skills/review/v1/SKILL.md","bucketPath":"/pi-flow/skills/review/v1"}}
@@ -69,13 +71,13 @@ ALIYUN_SKILLS_JSON={"review@v1":{"bundle":"default","path":"/skills/review/v1/SK
 
 该 ID、bundle、path 必须与平台 Skill 注册记录一致，SKILL.md 内容须匹配其 digest。
 只挂载本次选择的版本，读权限、目录身份和 digest 在创建及工具执行前检查。
-工作区和 Skill 的 OSS 前缀不得重叠。
+工作区和 Skill 的 OSS 前缀不得重叠；手工 Skill 源之间也不得相同或相互包含，避免只选 A 就能读取未授权 B。手工挂载目录按 64 字符上限校验、bucketPath 按 128 字符上限校验（创建文档未列同等长度细节，本项目采用[追加挂载接口](https://help.aliyun.com/zh/agent-sandbox/append-mount-oss)的保守约束）。
 缺失挂载、可写 Skill 挂载或摘要不匹配均拒绝执行，并尝试删除创建失败的实例；
 删除未确认时保留容量占用，供现有生命周期清理逻辑处理。
 
 控制台 ZIP 上传支持自动发布到 OSS：API 完整校验 ZIP 后，将文件写入
 `<skillUploadPrefix>/<随机包身份>/`，全部写入成功才登记不可变 Skill。
-上传记录包含 `ossUpload` 包身份、存储标识和归档摘要；Worker 从登记记录解析
+上传记录保留完整 64 位十六进制 `ossUpload.key`、存储标识和归档摘要，OSS 源路径仍由完整包身份推导；沙箱挂载目录改用相同 256 位身份的 base64url 编码，`/skills/uploaded/<43字符>` 共 60 字符，不截断身份或降低隔离强度。`skillUploadPrefix` 加完整包身份必须不超过 128 字符。Worker 从登记记录解析
 只读挂载，不需要逐个修改 `ALIYUN_SKILLS_JSON`，也不需要重启。
 手动发布的 Skill 仍通过 `ALIYUN_SKILLS_JSON` 映射。
 
@@ -105,6 +107,8 @@ SDK 单请求超时 20 秒，发布预算 120 秒；失败尝试删除本次已�
 清理未确认返回 `SKILL_OSS_CLEANUP_UNCONFIRMED` 并记录不透明包身份，需管理员核对
 登记记录后处理孤立包；存储版本控制可能保留历史版本，按 Bucket 策略处理。
 网络超时的迟到写入也可能留下未登记对象；回收前应先核对持久化登记记录。
+
+早期 PR 产生的 `/skills/uploaded/<64字符hex>/SKILL.md` 旧 OSS 记录不会自动改写，因为路径属于已固定的 Skill 身份；上线前请用新版本 ID 重新上传以生成短路径，旧数据先保留。
 
 现有 Cube `hostUpload` 包不会自动迁移。切换后应使用新 Skill 版本 ID 在控制台重新上传，
 将使用该 Skill 的 Agent 更新为新版本。脚本执行位以 OSS 文件模式元数据保存，实际挂载
@@ -141,10 +145,16 @@ npm run smoke:aliyun
 npm run smoke:aliyun:skill -- /path/to/skill.zip
 ```
 
-冒烟脚本通过实际远程工具写入、删除首个实例、重建、读取并编辑同一文件，
-再删除测试文件并释放实例；使用唯一工作区前缀，不操作已有数据。
+工作区冒烟脚本创建三个实例（最多同时两个），检查写入、编辑、删除的跨实例可见性，主动 SIGKILL 写进程在 rename 前后的目标文件状态，再释放全部实例、重建验证文件。使用唯一工作区前缀，不操作已有数据。该测试不模拟节点断电，也不证明 OSS 具备 POSIX 原子性或断电持久化保证。
 异常时仍尝试清理实例；失败写入的测试文件和空前缀可能需要人工清理。
 仓库测试使用 SDK mock 验证协议、只读挂载、隔离、错误映射、失败清理和空闲生命周期，
 不代表已经通过真实阿里云账号或 Cube 集群联调。
-Skill 冒烟脚本把测试 ZIP 发布到独立随机目录，读取实际挂载后的 SKILL.md 并验证摘要，
+Skill 冒烟脚本把测试 ZIP 发布到独立随机目录，读取实际挂载后的 SKILL.md、验证摘要并检查写权限被拒绝，
 最后释放实例并删除该测试包，不向平台登记；HTTP 登记、并发与提交不确定性由仓库测试覆盖。
+
+## PR #62 Review 验收记录
+
+代码侧已处理：OSS 存储域名放行与冲突检查、最多 4 个 Skill、手工源相互重叠、60 字符上传挂载路径、创建/删除不确定时保留冒烟 Skill 包。
+实例创建返回 `SandboxCreationError(cleanupConfirmed=false)` 或创建响应丢失时，Skill 冒烟不删除 OSS 包，输出实例 ID（未知时标记 unknown）和不透明包身份供人工核对；显式确认清理成功后才删除包。
+
+真实云验收仍待完成，不能用参数 mock 或 CI 通过代替。目标账号需记录地域、模板版本、运行时、OSS Endpoint、挂载驱动及有效网络策略，然后执行两个冒烟脚本并留存结果。应检查默认拒绝出网下 OSS 读写、短路径 Skill 读取与只读拒写、跨实例可见性、释放重建、SIGKILL 前后状态，并在业务要求时另测节点/网络异常。当前环境未配置阿里云凭证，此文不宣称这些项目已通过。

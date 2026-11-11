@@ -20,6 +20,7 @@ import {
 import {
   uploadedOssSkillBinding,
   ossSkillStorageId,
+  uploadedOssSkillPath,
 } from "../src/skills/oss-storage.js";
 import { uploadedSkillBinding } from "../src/skills/packages.js";
 import { telemetry } from "../src/observability/telemetry.js";
@@ -148,6 +149,16 @@ test("OSS console ZIP upload publishes binary and auxiliary files and works in a
   const skill = response.json<Skill>();
   assert.equal(skill.hostUpload, undefined);
   assert.equal(skill.ossUpload!.files, 3);
+  const mountDir = skill.path.slice(0, -"/SKILL.md".length);
+  assert.equal(mountDir.length, 60);
+  assert.equal(
+    Buffer.from(mountDir.split("/").at(-1)!, "base64url").toString("hex"),
+    skill.ossUpload!.key,
+  );
+  assert.notEqual(
+    uploadedOssSkillPath("a".repeat(64)),
+    uploadedOssSkillPath("a".repeat(63) + "b"),
+  );
   assert.equal(skill.ossUpload!.storageId, ossSkillStorageId(f.storage));
   assert.equal(
     skill.digest,

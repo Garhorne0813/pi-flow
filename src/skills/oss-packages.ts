@@ -11,6 +11,7 @@ import {
 } from "./packages.js";
 import {
   ossSkillStorageId,
+  uploadedOssSkillPath,
   storageOverlaps,
   type OssSkillStorage,
 } from "./oss-storage.js";
@@ -151,7 +152,7 @@ export class OssSkillPackages
     }
     const skill: Skill = {
       ...fields,
-      path: `/skills/uploaded/${key}/SKILL.md`,
+      path: uploadedOssSkillPath(key),
       digest: hash(files.find((file) => file.path === "SKILL.md")!.data),
       versionDigest: hash(
         JSON.stringify(

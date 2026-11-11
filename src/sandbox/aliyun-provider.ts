@@ -16,6 +16,18 @@ import {
   storageOverlaps,
 } from "../skills/oss-storage.js";
 
+export const ALIYUN_MAX_OSS_MOUNTS = 5;
+const mountPathLimit = 64;
+const bucketPathLimit = 128;
+
+function matchesDomain(rule: string, host: string) {
+  const pattern = rule.toLowerCase().replace(/\.$/, "");
+  return (
+    pattern === host ||
+    (pattern.startsWith("*.") && host.endsWith(pattern.slice(1)))
+  );
+}
+
 const directory = z
   .string()
   .refine(
@@ -50,10 +62,20 @@ export const AliyunConfigSchema = z
       .refine((v) => v !== "root"),
     timeoutMs: z.number().int().min(180000).max(86400000).default(900000),
     bucket: z.string().regex(/^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$/),
-    endpoint: httpsUrl,
+    endpoint: httpsUrl
+      .max(128)
+      .refine(
+        (v) => !new URL(v).port,
+        "OSS domain allowlisting requires the standard HTTPS port",
+      ),
     roleArn: z.string().regex(/^acs:ram::[0-9]+:role\/[a-zA-Z0-9_/-]+$/),
     workspacePrefix: directory.default("/pi-flow/workspaces"),
-    skillUploadPrefix: directory.default("/pi-flow/skill-uploads"),
+    skillUploadPrefix: directory
+      .refine(
+        (p) => p.length + 65 <= bucketPathLimit,
+        "OSS upload prefix plus package identity must fit 128 characters",
+      )
+      .default("/pi-flow/skill-uploads"),
     allowInternetAccess: z.boolean().default(false),
     network: z
       .object({
@@ -72,14 +94,44 @@ export const AliyunConfigSchema = z
             bundle: z.string().min(1),
             path: z
               .string()
+              .max(mountPathLimit + "/SKILL.md".length)
               .regex(/^\/skills\/(?:[a-zA-Z0-9_-]+\/)+SKILL\.md$/),
-            bucketPath: directory,
+            bucketPath: directory.refine(
+              (p) => p.length <= bucketPathLimit,
+              "OSS bucketPath must fit 128 characters",
+            ),
           })
           .strict(),
       )
       .default({}),
   })
-  .strict();
+  .strict()
+  .transform((config, ctx) => {
+    // Official OSS egress target: Bucket + Endpoint hostname. Preserve the
+    // default-deny baseline while allowing only this required storage host.
+    const storageHost = `${config.bucket}.${new URL(config.endpoint).hostname}`;
+    const allows = config.network.allowOut ?? [];
+    if (
+      (config.network.denyOut ?? []).some((r) =>
+        matchesDomain(r, storageHost),
+      ) &&
+      !allows.some((r) => matchesDomain(r, storageHost))
+    ) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["network", "denyOut"],
+        message: `OSS storage target ${storageHost} is explicitly denied; explicitly allow it or remove the conflicting domain deny rule`,
+      });
+      return z.NEVER;
+    }
+    return {
+      ...config,
+      network: {
+        ...config.network,
+        allowOut: [...new Set([...allows, storageHost])],
+      },
+    };
+  });
 export type AliyunConfig = z.infer<typeof AliyunConfigSchema>;
 
 export function aliyunConfig(
@@ -150,6 +202,7 @@ export class AliyunE2BProvider implements SandboxProvider {
       throw new Error(
         "OSS Skill uploads must be separate from workspace storage",
       );
+    const sources: string[] = [];
     for (const binding of Object.values(this.config.skills)) {
       const a = binding.bucketPath,
         b = this.config.workspacePrefix;
@@ -161,6 +214,9 @@ export class AliyunE2BProvider implements SandboxProvider {
         throw new Error(
           "Manual Aliyun Skill sources must not overlap the upload namespace",
         );
+      if (sources.some((source) => storageOverlaps(source, a)))
+        throw new Error("Aliyun Skill OSS sources must not overlap");
+      sources.push(a);
     }
   }
   private workspacePath(volume: string) {
@@ -170,7 +226,10 @@ export class AliyunE2BProvider implements SandboxProvider {
       !/^ws-[a-zA-Z0-9_-]{1,128}$/.test(name)
     )
       throw new Fault(409, "SANDBOX_STORAGE_PROVIDER_MISMATCH");
-    return `${this.config.workspacePrefix}/${name}`;
+    const path = `${this.config.workspacePrefix}/${name}`;
+    if (path.length > bucketPathLimit)
+      throw new Fault(400, "ALIYUN_OSS_PATH_TOO_LONG");
+    return path;
   }
   async createVolume(name: string) {
     const volume = this.volumePrefix + name;
@@ -189,6 +248,12 @@ export class AliyunE2BProvider implements SandboxProvider {
     );
   }
   scope(bundle: string, skills: readonly Skill[]) {
+    if (skills.length + 1 > ALIYUN_MAX_OSS_MOUNTS)
+      throw new Fault(
+        400,
+        "ALIYUN_OSS_MOUNT_LIMIT",
+        "Aliyun OSS supports at most 5 mounts: one workspace and up to 4 Skills",
+      );
     const identity = skillScope(bundle, skills);
     const bindings = [...skills]
       .sort((a, b) => a.id.localeCompare(b.id))
