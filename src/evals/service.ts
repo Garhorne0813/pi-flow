@@ -51,13 +51,20 @@ export class EvalService {
   }
   async patchSuite(a: Actor, sid: string, raw: unknown) {
     await this.authorize(a);
-    const input = SuiteDraft.extend({
-      revision: z.number().int().positive(),
-    }).parse(raw);
+    const input = z
+      .object({
+        revision: z.number().int().positive(),
+        name: z.string().min(1).max(100).optional(),
+        description: z.string().max(2000).optional(),
+        cases: CaseList.optional(),
+      })
+      .strict()
+      .parse(raw);
+    const previous = await this.store.getSuite(a.userId, sid);
     return this.store.patchSuite(a.userId, sid, input.revision, {
-      name: input.name,
-      description: input.description,
-      cases: input.cases,
+      name: input.name ?? previous.name,
+      description: input.description ?? previous.description,
+      cases: input.cases ?? previous.cases,
     });
   }
 }

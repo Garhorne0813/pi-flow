@@ -11,58 +11,8 @@ import { EvalAccess } from "../src/evals/access.js";
 import { EvalJobStore } from "../src/evals/job-store.js";
 import { EvalWorker, EvalDemoRuntime } from "../src/evals/worker.js";
 import { EvalExecutor } from "../src/evals/executor.js";
-export async function jobsFixture() {
-  const f = await evalFixture(),
-    registry = new PostgresRegistry(f.pool);
-  const uid = await registry.identify("test", "u");
-  await registry.tx((s) => {
-    s.managedAgents = {
-      assistant: {
-        id: "assistant",
-        enabled: true,
-        updatedAt: new Date().toISOString(),
-        config: AgentConfig.parse({
-          name: "test",
-          systemPrompt: "test",
-          model: { provider: "demo", modelId: "demo" },
-          tools: ["read"],
-        }),
-      },
-    };
-  });
-  const actor = {
-    tenantId: uid,
-    userId: uid,
-    issuer: "test",
-    subject: "u",
-    admin: false,
-  };
-  const access = new EvalAccess(
-      new PersonalService(new MemoryStore(), registry),
-      true,
-    ),
-    jobs = new EvalJobStore(f.pool, access),
-    service = new EvalService(
-      jobs,
-      async (a) => registry.verifyIdentity(a.issuer!, a.subject!, a.userId),
-      jobs,
-    );
-  const suite = await service.createSuite(actor, {
-    name: "test",
-    cases: [
-      {
-        caseId: "c",
-        inputs: "hi",
-        graders: [
-          { id: "g", type: "exact", expected: "Demo harness response: hi" },
-        ],
-      },
-    ],
-  });
-  await jobs.publish(uid, suite.id, 1);
-  const request = { suiteId: suite.id, suiteVersion: 1, agentId: "assistant" };
-  return { ...f, registry, actor, access, jobs, service, request };
-}
+import { jobsFixture } from "./eval-job-fixture.js";
+
 test(
   "eval jobs atomically freeze/idempotently reserve, two workers claim once, fence stale writes and recover without replay",
   { skip: !databaseUrl },
@@ -203,6 +153,68 @@ test(
     } finally {
       if (before === undefined) delete process.env.USAGE_POLICY_JSON;
       else process.env.USAGE_POLICY_JSON = before;
+      await f.close();
+    }
+  },
+);
+
+test(
+  "normal Run reservation and Eval job compete under one persisted user budget",
+  { skip: !databaseUrl },
+  async () => {
+    const { PersonalPostgresStore } = await import(
+      "../src/storage/personal-postgres-store.js"
+    );
+    const { personalStore } = await import("../src/storage/personal.js");
+    const { UsageLedger, UsagePolicy } = await import("../src/domain/usage.js");
+    const previous = process.env.USAGE_POLICY_JSON;
+    process.env.USAGE_POLICY_JSON = '{"userDailyTokens":5000}';
+    const f = await jobsFixture(),
+      backing = new PersonalPostgresStore(f.url),
+      store = personalStore(backing, f.registry);
+    try {
+      const normal = new PersonalService(
+        store,
+        f.registry,
+        [],
+        ["default"],
+        [{ provider: "demo", modelId: "demo" }],
+      );
+      const session = await normal.createPersonalSession(f.actor, {
+          agentId: "assistant",
+        }),
+        run = await normal.submit(f.actor, session.id, "normal work");
+      await store.runTx!(f.actor.userId, run.id, (s) => {
+        s.runs[run.id]!.state = "RUNNING";
+        s.runs[run.id]!.lease = {
+          owner: "normal",
+          expires: Date.now() + 60000,
+        };
+      });
+      const ledger = new UsageLedger(
+        store,
+        UsagePolicy.parse({ userDailyTokens: 5000 }),
+      );
+      const outcomes = await Promise.allSettled([
+        ledger.reserve(f.actor.userId, run.id, 10, "normal"),
+        f.jobs.create(
+          f.actor,
+          { ...f.request, limits: { maxTokens: 5000 } },
+          "race",
+        ),
+      ]);
+      assert.equal(outcomes.filter((r) => r.status === "fulfilled").length, 1);
+      const sum = (
+        await f.pool.query(
+          "SELECT sum((data->>'tokens')::int)::int AS n FROM personal_usage_requests WHERE user_id=$1",
+          [f.actor.userId],
+        )
+      ).rows[0].n;
+      assert.ok(sum > 0 && sum <= 5000);
+    } finally {
+      if (previous === undefined) delete process.env.USAGE_POLICY_JSON;
+      else process.env.USAGE_POLICY_JSON = previous;
+      await backing.close();
       await f.close();
     }
   },

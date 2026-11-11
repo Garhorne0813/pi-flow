@@ -336,12 +336,27 @@ export class EvalJobStore extends PostgresEvalStore {
   private async fenced(c: pg.PoolClient, run: CaseRun) {
     const row = (
       await c.query(
-        "SELECT r.state,j.cancel_requested,j.data AS job FROM personal_eval_case_runs r JOIN personal_eval_jobs j USING(user_id,job_id) WHERE r.user_id=$1 AND r.case_run_id=$2 AND r.lease_generation=$3 AND r.lease_owner=$4 AND r.lease_expires_at>now() AND r.state IN ('RUNNING','GRADING') FOR UPDATE OF r,j",
+        "SELECT r.state,r.result,j.cancel_requested,j.data AS job FROM personal_eval_case_runs r JOIN personal_eval_jobs j USING(user_id,job_id) WHERE r.user_id=$1 AND r.case_run_id=$2 AND r.lease_generation=$3 AND r.lease_owner=$4 AND r.lease_expires_at>now() AND r.state IN ('RUNNING','GRADING') FOR UPDATE OF r,j",
         [run.userId, run.caseRunId, run.generation, run.leaseOwner],
       )
     ).rows[0];
     if (!row) throw new Fault(409, "EVAL_LEASE_LOST");
-    return row as { state: string; cancel_requested: boolean; job: EvalJob };
+    return row as {
+      state: string;
+      result?: CaseResult;
+      cancel_requested: boolean;
+      job: EvalJob;
+    };
+  }
+  async toolEvent(run: CaseRun, type: string, data: Record<string, unknown>) {
+    await this.transaction(async (c) => {
+      await this.userLock(c, run.userId);
+      await this.fenced(c, run);
+      await this.event(c, run.userId, run.jobId, type, {
+        caseRunId: run.caseRunId,
+        ...data,
+      });
+    });
   }
   async heartbeat(run: CaseRun) {
     return this.transaction(async (c) => {
@@ -354,13 +369,13 @@ export class EvalJobStore extends PostgresEvalStore {
       );
     });
   }
-  async grading(run: CaseRun) {
+  async grading(run: CaseRun, result: CaseResult) {
     await this.transaction(async (c) => {
       await this.userLock(c, run.userId);
       await this.fenced(c, run);
       await c.query(
-        "UPDATE personal_eval_case_runs SET state='GRADING' WHERE user_id=$1 AND case_run_id=$2",
-        [run.userId, run.caseRunId],
+        "UPDATE personal_eval_case_runs SET state='GRADING',result=$3 WHERE user_id=$1 AND case_run_id=$2",
+        [run.userId, run.caseRunId, JSON.stringify(result)],
       );
       await this.event(
         c,
@@ -428,6 +443,7 @@ export class EvalJobStore extends PostgresEvalStore {
     await this.transaction(async (c) => {
       await this.userLock(c, run.userId);
       const row = await this.fenced(c, run);
+      result = { ...row.result, ...result };
       if (row.cancel_requested) {
         state = "CANCELLED";
         result = { ...result, errorCode: "EVAL_CANCELLED" };
@@ -487,7 +503,7 @@ export class EvalJobStore extends PostgresEvalStore {
         await this.userLock(c, r.user_id);
         const row = (
           await c.query(
-            "UPDATE personal_eval_case_runs SET state='EXECUTION_ERROR',result='{\"errorCode\":\"LEASE_LOST\"}',lease_owner=NULL,lease_generation=NULL,lease_expires_at=NULL WHERE user_id=$1 AND case_run_id=$2 AND lease_expires_at<=now() RETURNING job_id",
+            "UPDATE personal_eval_case_runs SET state='EXECUTION_ERROR',result=COALESCE(result,'{}'::jsonb)||'{\"errorCode\":\"LEASE_LOST\"}'::jsonb,lease_owner=NULL,lease_generation=NULL,lease_expires_at=NULL WHERE user_id=$1 AND case_run_id=$2 AND lease_expires_at<=now() RETURNING job_id",
             [r.user_id, r.case_run_id],
           )
         ).rows[0];

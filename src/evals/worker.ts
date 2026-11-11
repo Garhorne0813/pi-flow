@@ -4,7 +4,7 @@ import { Fault } from "../domain/model.js";
 import type { Runtime } from "../execution/runtime.js";
 import type { CaseRun, EvalJob } from "./jobs.js";
 import type { EvalScore, GraderConfig, EvalInput } from "./types.js";
-import { EvalExecutor } from "./executor.js";
+import { EvalExecutor, EvalExecutionError } from "./executor.js";
 import { grade, aggregate } from "./graders/registry.js";
 import type { EvalJobStore } from "./job-store.js";
 export type Judge = (
@@ -57,6 +57,7 @@ export class EvalWorker {
     const pipeline = async () => {
       const result = await this.executor.execute({
         config: job.snapshot.config,
+        onTool: (type, data) => this.store.toolEvent(run, type, data),
         case: run.case,
         mocks: run.case.mocks,
         signal,
@@ -73,13 +74,23 @@ export class EvalWorker {
             this.store.settle(run.userId, id, usage, ms),
         },
       });
-      await this.store.grading(run);
+      await this.store.grading(run, result);
       grading = true;
+      const targetUsage = (
+        await this.store.usage(run.userId, run.jobId)
+      ).filter((u) => u.caseRunId === run.caseRunId && u.role === "target");
+      const costEstimate =
+        targetUsage.length && targetUsage.every((u) => u.costMicros !== null)
+          ? targetUsage.reduce((n, u) => n + (u.costMicros ?? 0), 0) / 1000000
+          : undefined;
+      if (targetUsage.length)
+        result.metrics.tokens = targetUsage.reduce((n, u) => n + u.tokens, 0);
       const input: EvalInput = {
         caseId: run.caseId,
         input: run.case.inputs,
         reference: run.case.reference,
         ...result,
+        metrics: { ...result.metrics, costEstimate },
       };
       const scores: EvalScore[] = [];
       for (const config of run.case.graders) {
@@ -90,7 +101,11 @@ export class EvalWorker {
             : await grade(input, config, { signal }),
         );
       }
-      const summary = aggregate(scores, run.case.graders);
+      const summary = aggregate(
+        scores,
+        run.case.graders,
+        run.case.passThreshold,
+      );
       await this.store.finish(run, summary.state, {
         ...result,
         scores,
@@ -112,16 +127,23 @@ export class EvalWorker {
         ? "EVAL_TIMEOUT"
         : revoked.signal.aborted
           ? "EVAL_ACCESS_OR_LEASE_LOST"
-          : e instanceof Fault
-            ? e.code
-            : e instanceof Error && /^EVAL_[A-Z_]+$/.test(e.message)
-              ? e.message
-              : "EVAL_EXECUTION_FAILED";
+          : e instanceof EvalExecutionError
+            ? e.message
+            : e instanceof Fault
+              ? e.code
+              : e instanceof Error && /^EVAL_[A-Z_]+$/.test(e.message)
+                ? e.message
+                : "EVAL_EXECUTION_FAILED";
       try {
         await this.store.finish(
           run,
           grading ? "GRADING_ERROR" : "EXECUTION_ERROR",
-          { errorCode: code },
+          {
+            errorCode: code,
+            ...(e instanceof EvalExecutionError
+              ? { trajectory: e.trajectory }
+              : {}),
+          },
         );
       } catch (error) {
         if (!(error instanceof Fault && error.code === "EVAL_LEASE_LOST"))

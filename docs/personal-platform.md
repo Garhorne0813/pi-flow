@@ -24,7 +24,7 @@ npm start
 npm run worker
 ```
 
-个人 schema 版本为 **13**；迁移文件顺序为 `005_agent_task_versions.sql`、`006_logical_agent_acl.sql`、`007_personal_platform.sql`、`008_editable_agents.sql`、`009_personal_execution_indexes.sql`、`010_personal_session_pagination.sql`、`011_personal_runtime_hot_paths.sql`、`012_personal_queue_frontiers.sql`、`013_personal_dispatchable_sessions.sql`、`014_personal_control_paths.sql`、`015_personal_legacy_tasks_stats.sql`，两个 schema 独立管理。v6 将已有个人平台的 active Agent 转为当前可编辑配置，并保留旧 Run 快照和等待交互任务；009 在完成调度记录归一化和热路径索引后推进到 v7，010 增加 Session 列表索引并推进到 v8；011 规范化审计/Usage/运行状态、增加全局候选和流事件计数器并推进到 v9；012 清理旧审计副本、增加事务维护的 Run 队首投影和查询索引，推进到 v10；013 维护用户 RUNNING 标记，过滤无法认领的普通队列候选并推进到 v11；014 增加任务身份及审计分页索引，推进到 v12；015 按 parentRunId/resumedFrom 回填旧任务身份并增加失败事件计数索引，推进到 v13；readiness 同时要求相关表和有效索引；旧版本表仅作历史档案。`harness_*` 表不自动迁移、不重命名，也不推断旧工作区的数据归属。应备份数据库后在部署窗口执行迁移。
+个人 schema 版本为 **14**；迁移文件顺序为 `005_agent_task_versions.sql`、`006_logical_agent_acl.sql`、`007_personal_platform.sql`、`008_editable_agents.sql`、`009_personal_execution_indexes.sql`、`010_personal_session_pagination.sql`、`011_personal_runtime_hot_paths.sql`、`012_personal_queue_frontiers.sql`、`013_personal_dispatchable_sessions.sql`、`014_personal_control_paths.sql`、`015_personal_legacy_tasks_stats.sql`、`016_personal_evaluations.sql`，两个 schema 独立管理。v6 将已有个人平台的 active Agent 转为当前可编辑配置，并保留旧 Run 快照和等待交互任务；009 在完成调度记录归一化和热路径索引后推进到 v7，010 增加 Session 列表索引并推进到 v8；011 规范化审计/Usage/运行状态、增加全局候选和流事件计数器并推进到 v9；012 清理旧审计副本、增加事务维护的 Run 队首投影和查询索引，推进到 v10；013 维护用户 RUNNING 标记，过滤无法认领的普通队列候选并推进到 v11；014 增加任务身份及审计分页索引，推进到 v12；015 按 parentRunId/resumedFrom 回填旧任务身份并增加失败事件计数索引，推进到 v13；016 增加独立评测表并推进到 v14（见 [Pi-Eval](evaluations.md)）；readiness 同时要求相关表和有效索引；旧版本表仅作历史档案。`harness_*` 表不自动迁移、不重命名，也不推断旧工作区的数据归属。应备份数据库后在部署窗口执行迁移。
 
 ## 当前契约
 

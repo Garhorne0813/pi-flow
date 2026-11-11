@@ -206,3 +206,7 @@ Issues and pull requests are welcome. Run relevant tests plus `npm run check` an
 ## License
 
 [Apache-2.0](LICENSE). Vendored SDK provenance and licenses are documented in [vendor/README.md](vendor/README.md).
+
+## Agent 评测
+
+原生 Pi-Eval 提供私有数据集、不可变版本、独立 Worker、Mock 工具隔离、Judge、报告与 Studio。默认关闭；部署、预算、API 与验收见 [docs/evaluations.md](docs/evaluations.md)。

@@ -63,7 +63,7 @@ test("eval exact and JSON retain types and missing fields, normalize object orde
         { output: "invalid" },
       )
     ).status,
-    "ERROR",
+    "FAILED",
   );
 });
 test("eval contains is explicitly case sensitive; schemas reject remote refs", async () => {
@@ -257,5 +257,76 @@ test("eval cases are bounded single-turn data and versions are detached", () => 
     GraderConfig.safeParse({ id: "g", type: "javascript", code: "return true" })
       .success,
     false,
+  );
+});
+
+test("trajectory inclusion matches overlapping constraints without reusing observations", async () => {
+  const trajectory: EvalInput["trajectory"] = [
+    {
+      sequence: 1,
+      callId: "1",
+      name: "read",
+      args: { path: "a" },
+      status: "COMPLETED",
+    },
+    {
+      sequence: 2,
+      callId: "2",
+      name: "read",
+      args: { path: "b" },
+      status: "COMPLETED",
+    },
+  ];
+  assert.equal(
+    (
+      await run(
+        {
+          id: "g",
+          type: "trajectory",
+          mode: "subset",
+          calls: [{ name: "read" }, { name: "read", args: { path: "a" } }],
+        },
+        { trajectory },
+      )
+    ).pass,
+    true,
+  );
+  assert.equal(
+    (
+      await run(
+        {
+          id: "g",
+          type: "trajectory",
+          mode: "superset",
+          calls: [{ name: "read" }],
+        },
+        { trajectory: trajectory.slice(0, 1) },
+      )
+    ).pass,
+    true,
+  );
+  assert.equal(
+    (
+      await run(
+        {
+          id: "g",
+          type: "trajectory",
+          mode: "superset",
+          calls: [{ name: "read" }],
+        },
+        { trajectory },
+      )
+    ).pass,
+    false,
+  );
+  assert.equal(
+    (
+      await run({
+        id: "g",
+        type: "json_schema",
+        schema: { type: "string", pattern: "(a+)+$" },
+      })
+    ).status,
+    "ERROR",
   );
 });

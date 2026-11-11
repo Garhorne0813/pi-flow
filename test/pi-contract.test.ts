@@ -110,7 +110,8 @@ test("real Pi 0.99.2 uses canonical custom read/bash and restores canonical sess
       recordModelUsage: async (_id, usage) => {
         recordedUsage.push(usage);
       },
-      call: async (name, args) => {
+      call: async (name, args, callId) => {
+        assert.equal(callId, name === "read" ? "call_read" : "call_bash");
         if (name === "read") {
           assert.deepEqual(args, { path: "hello.txt" });
         } else {

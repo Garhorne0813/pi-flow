@@ -1,3 +1,4 @@
+import { Fault } from "../domain/model.js";
 import { PersonalPostgresStore } from "../storage/personal-postgres-store.js";
 import type { Store } from "../storage/store.js";
 import type { PersonalService } from "../domain/personal-service.js";
@@ -10,6 +11,8 @@ export function createEvals(
   backing: Store,
   demo: boolean,
 ) {
+  if (process.env.EVAL_ALLOW_READONLY_SANDBOX === "true")
+    throw new Fault(503, "EVAL_READONLY_NOT_ACCEPTED");
   const jobs =
     backing instanceof PersonalPostgresStore
       ? new EvalJobStore(backing.pool, new EvalAccess(service, demo))

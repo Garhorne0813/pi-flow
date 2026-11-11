@@ -73,7 +73,7 @@ export type CaseState =
 export type CaseResult = {
   output?: string;
   trajectory?: ToolCallRecord[];
-  metrics?: { tokens: number; durationMs: number };
+  metrics?: { tokens: number; durationMs: number; costEstimate?: number };
   scores?: EvalScore[];
   score?: number | null;
   pass?: boolean;

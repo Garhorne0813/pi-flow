@@ -69,3 +69,16 @@ test("eval dataset tenant scope ignores administrator privileges and paginates",
     (e) => e instanceof Fault && e.status === 401,
   );
 });
+
+test("metadata-only draft PATCH preserves cases and still advances the optimistic revision", async () => {
+  const store = new MemoryEvalStore(),
+    service = new EvalService(store, async () => {});
+  const suite = await service.createSuite(actor, draft);
+  const updated = await service.patchSuite(actor, suite.id, {
+    revision: 1,
+    name: "Renamed",
+  });
+  assert.equal(updated.name, "Renamed");
+  assert.equal(updated.cases.length, 1);
+  assert.equal(updated.draftRevision, 2);
+});

@@ -115,7 +115,7 @@ export function buildAPI(
     // Only the static shell is public; all data and mutations still require admin auth.
     if (
       req.method === "GET" &&
-      ["/admin/agents/ui", "/admin/ui"].includes(req.url.split("?")[0]!)
+      ["/admin/agents/ui", "/admin/ui", "/evals/ui"].includes(req.url.split("?")[0]!)
     )
       return;
     if (

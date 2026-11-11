@@ -7,18 +7,22 @@ import {
   type ToolCallRecord,
 } from "../types.js";
 const version = "1";
-const ajv = new Ajv({ strict: true, allErrors: false, validateFormats: false });
+const schemaValidator = () =>
+  new Ajv({ strict: true, allErrors: false, validateFormats: false });
 const json = (v: unknown) => (typeof v === "string" ? JSON.parse(v) : v);
 const same = (a: unknown, b: unknown) => canonical(a) === canonical(b);
-function noRemoteRefs(v: unknown): void {
+function noRemoteRefs(v: unknown, depth = 0): void {
+  if (depth > 30) throw new Error("SCHEMA_DEPTH_LIMIT");
   if (!v || typeof v !== "object") return;
   for (const [k, value] of Object.entries(v)) {
+    if (k === "pattern" || k === "patternProperties" || k === "format")
+      throw new Error("SCHEMA_REGEX_DENIED");
     if (
       (k === "$ref" || k === "$dynamicRef") &&
       (typeof value !== "string" || !value.startsWith("#"))
     )
       throw new Error("REMOTE_REF_DENIED");
-    noRemoteRefs(value);
+    noRemoteRefs(value, depth + 1);
   }
 }
 function ignore(v: unknown, fields: string[]): unknown {
@@ -59,16 +63,34 @@ export async function grade(
           : input.output.toLowerCase().includes(c.value.toLowerCase());
         break;
       }
-      case "json_match":
+      case "json_match": {
+        const expected = json(c.expected);
+        let output: unknown;
+        try {
+          output = json(input.output);
+        } catch {
+          pass = false;
+          break;
+        }
         pass = same(
-          ignore(json(input.output), c.ignoreFields),
-          ignore(json(c.expected), c.ignoreFields),
+          ignore(output, c.ignoreFields),
+          ignore(expected, c.ignoreFields),
         );
         break;
-      case "json_schema":
+      }
+      case "json_schema": {
         noRemoteRefs(c.schema);
-        pass = !!ajv.compile(c.schema)(json(input.output));
+        const validate = schemaValidator().compile(c.schema);
+        let output: unknown;
+        try {
+          output = json(input.output);
+        } catch {
+          pass = false;
+          break;
+        }
+        pass = !!validate(output);
         break;
+      }
       case "tool_called":
       case "tool_not_called": {
         const count = calls.filter((call) => matches(call, c)).length;
@@ -84,18 +106,26 @@ export async function grade(
             calls.length === c.calls.length &&
             calls.every((a, i) => matches(a, c.calls[i]!));
         else {
-          // Multiset inclusion: each occurrence can match at most once.
-          const source = c.mode === "superset" ? c.calls : calls;
-          const expected = c.mode === "superset" ? calls : c.calls;
-          const remaining = [...source];
-          pass = expected.every((e) => {
-            const i = remaining.findIndex((a) =>
-              matches(a as ToolCallRecord, e),
-            );
-            if (i < 0) return false;
-            remaining.splice(i, 1);
-            return true;
-          });
+          // Bipartite matching preserves multiplicity even with overlapping argument constraints.
+          const left = c.mode === "superset" ? calls : c.calls,
+            right = c.mode === "superset" ? c.calls : calls;
+          const owner = new Map<number, number>();
+          const visit = (i: number, seen: Set<number>): boolean => {
+            for (let j = 0; j < right.length; j++) {
+              const match =
+                c.mode === "superset"
+                  ? matches(left[i] as ToolCallRecord, right[j]!)
+                  : matches(right[j] as ToolCallRecord, left[i]!);
+              if (!match || seen.has(j)) continue;
+              seen.add(j);
+              if (!owner.has(j) || visit(owner.get(j)!, seen)) {
+                owner.set(j, i);
+                return true;
+              }
+            }
+            return false;
+          };
+          pass = left.every((_, i) => visit(i, new Set()));
           if (c.mode === "unordered") pass &&= calls.length === c.calls.length;
         }
         break;
