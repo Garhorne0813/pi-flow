@@ -21,13 +21,17 @@ export const auth =
         automaticSilentRenew: false,
       })
     : null;
+let localToken: string | undefined;
+export function setLocalToken(value: string) {
+  localToken = value || undefined;
+}
 export async function token() {
-  return (await auth?.getUser())?.access_token;
+  return auth ? (await auth.getUser())?.access_token : localToken;
 }
 export async function login() {
   await auth?.signinRedirect({ state: { returnTo: location.pathname } });
 }
 export async function logout() {
-  await auth?.removeUser();
+  localToken = undefined;
   if (auth) await auth.signoutRedirect();
 }

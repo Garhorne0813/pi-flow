@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { useBlocker } from "react-router-dom";
 import { api, ApiError } from "../api/client";
 export interface Config {
   name: string;
@@ -172,29 +173,23 @@ export function Choices({
   );
 }
 export function useDirtyGuard(dirty: boolean) {
+  const blocker = useBlocker(dirty);
+  useEffect(() => {
+    if (blocker.state === "blocked") {
+      if (confirm("有未保存的修改，确认离开？")) blocker.proceed();
+      else blocker.reset();
+    }
+  }, [blocker]);
   useEffect(() => {
     if (!dirty) return;
     const unload = (e: BeforeUnloadEvent) => {
       e.preventDefault();
       e.returnValue = "";
     };
-    const click = (e: MouseEvent) => {
-      const anchor = (e.target as Element)?.closest?.("a");
-      if (
-        anchor &&
-        anchor.origin === location.origin &&
-        anchor.pathname !== location.pathname &&
-        !confirm("有未保存的修改，确认离开？")
-      ) {
-        e.preventDefault();
-        e.stopPropagation();
-      }
-    };
     window.addEventListener("beforeunload", unload);
-    document.addEventListener("click", click, true);
+
     return () => {
       window.removeEventListener("beforeunload", unload);
-      document.removeEventListener("click", click, true);
     };
   }, [dirty]);
 }

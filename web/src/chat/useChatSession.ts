@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { api, ApiError, request } from "../api/client";
+import { submitRun } from "./submitRun";
 import { parseSSE } from "../api/sse";
 import {
   empty,
@@ -35,7 +36,8 @@ export function useChatSession(sid: string | undefined) {
   const state = useRef(empty),
     generation = useRef(0),
     locked = useRef(false),
-    pending = useRef<{ key: string; text: string } | null>(null);
+    historyInitialized = useRef(false),
+    olderLoading = useRef(false);
   function update(fn: (p: Projection) => Projection) {
     state.current = fn(state.current);
     setProjection(state.current);
@@ -45,7 +47,8 @@ export function useChatSession(sid: string | undefined) {
       `/sessions/${id}/timeline${older ? "?cursor=" + encodeURIComponent(older) : ""}`,
     );
     if (id !== currentSid.current) return;
-    setCursor(page.nextCursor);
+    if (older || !historyInitialized.current) setCursor(page.nextCursor);
+    historyInitialized.current = true;
     update((p) => {
       const cursors = { ...p.cursors };
       for (const item of page.items) {
@@ -74,11 +77,12 @@ export function useChatSession(sid: string | undefined) {
     setRun(null);
     setError("");
     setCursor(null);
-    pending.current = null;
+    historyInitialized.current = false;
     if (!sid) return;
     async function sync() {
       while (!controller.signal.aborted && gen === generation.current) {
         try {
+          if (!historyInitialized.current) await history(sid!);
           const active = await api<{ activeRun: Run | null }>(
             `/sessions/${sid}/active-task`,
           );
@@ -86,6 +90,7 @@ export function useChatSession(sid: string | undefined) {
           setRun(active.activeRun);
           if (!active.activeRun) {
             await history(sid!);
+            setError("");
             await delay(2500, controller.signal);
             continue;
           }
@@ -121,9 +126,7 @@ export function useChatSession(sid: string | undefined) {
         }
       }
     }
-    void history(sid)
-      .then(sync)
-      .catch((e) => setError(e.message));
+    void sync();
     return () => controller.abort();
   }, [sid]);
   async function mutate(fn: () => Promise<void>) {
@@ -146,17 +149,7 @@ export function useChatSession(sid: string | undefined) {
     await mutate(async () => {
       const id = sid;
       const operation = async () => {
-        pending.current =
-          pending.current?.text === text
-            ? pending.current
-            : { key: crypto.randomUUID(), text };
-        const r = await api<Run>(
-          `/sessions/${id}/runs`,
-          { message: text },
-          "POST",
-          pending.current.key,
-        );
-        pending.current = null;
+        const r = await submitRun<Run>(id, text);
         if (id !== currentSid.current) return;
         setRun(r);
         update((p) => ({
@@ -204,7 +197,17 @@ export function useChatSession(sid: string | undefined) {
     send,
     respond,
     cancel,
-    loadOlder: () => (sid && cursor ? history(sid, cursor) : Promise.resolve()),
+    loadOlder: async () => {
+      if (!sid || !cursor || olderLoading.current) return;
+      olderLoading.current = true;
+      try {
+        await history(sid, cursor);
+      } catch (e) {
+        setError(e instanceof Error ? e.message : "请求失败");
+      } finally {
+        olderLoading.current = false;
+      }
+    },
     hasOlder: !!cursor,
   };
 }

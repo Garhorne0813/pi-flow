@@ -206,3 +206,7 @@ Issues and pull requests are welcome. Run relevant tests plus `npm run check` an
 ## License
 
 [Apache-2.0](LICENSE). Vendored SDK provenance and licenses are documented in [vendor/README.md](vendor/README.md).
+
+无 OIDC 的本地演示：直接打开 Fastify 托管的 `/chat`，在登录页输入服务端配置的 `DEV_TOKEN`。
+令牌仅保存在当前页面内存中，刷新后需重新输入；退出会清除它。请仅在可信的本地环境或 HTTPS 下使用，
+不要把令牌放进 `VITE_*` 构建变量、URL 或公开构建产物。Vite 开发代理仍支持服务端 `CHAT_DEV_TOKEN`。

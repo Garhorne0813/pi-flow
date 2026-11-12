@@ -24,7 +24,8 @@ import {
 import React, { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
-  BrowserRouter,
+  createBrowserRouter,
+  RouterProvider,
   Link,
   useNavigate,
   useLocation,
@@ -36,7 +37,8 @@ import {
   useQueryClient,
 } from "@tanstack/react-query";
 import { api, ApiError } from "./api/client";
-import { auth, login, logout } from "./api/auth";
+import { submitRun } from "./chat/submitRun";
+import { auth, login, logout, setLocalToken } from "./api/auth";
 import { useChatSession } from "./chat/useChatSession";
 import type { Item } from "./chat/model";
 import "./style.css";
@@ -157,7 +159,8 @@ function App() {
   const sid = location.pathname.startsWith("/chat/")
     ? location.pathname.split("/")[2]
     : undefined;
-  const chat = useChatSession(sid),
+  const [ready, setReady] = useState(!auth);
+  const chat = useChatSession(ready ? sid : undefined),
     [agent, setAgent] = useState(""),
     [draft, setDraft] = useState(""),
     [error, setError] = useState(""),
@@ -165,8 +168,8 @@ function App() {
     [title, setTitle] = useState(""),
     [offset, setOffset] = useState(0),
     [sessionSearch, setSessionSearch] = useState("");
-  const [ready, setReady] = useState(!auth),
-    [bottom, setBottom] = useState(true),
+  const [credential, setCredential] = useState("");
+  const [bottom, setBottom] = useState(true),
     timeline = useRef<HTMLDivElement>(null),
     creating = useRef(false);
   useEffect(() => {
@@ -209,6 +212,14 @@ function App() {
     retry: false,
     refetchInterval: 15000,
   });
+  useEffect(() => {
+    if (
+      !auth &&
+      identity.error instanceof ApiError &&
+      identity.error.status === 401
+    )
+      setReady(false);
+  }, [identity.error]);
   const me = identity.error ? undefined : identity.data;
   const [preferences, setPreferences] = useState<Preferences>(defaults);
   useEffect(() => {
@@ -294,12 +305,7 @@ function App() {
           draft,
         );
         navigate("/chat/" + s.id);
-        await api(
-          `/sessions/${s.id}/runs`,
-          { message: draft },
-          "POST",
-          crypto.randomUUID(),
-        );
+        await submitRun(s.id, draft);
         sessionStorage.removeItem("pi-flow-draft:" + me?.userId + ":" + s.id);
         setDraft("");
       });
@@ -324,7 +330,31 @@ function App() {
         <h1>与 Agent 一起工作</h1>
         <p>使用组织身份登录，访问个人对话与工作区。</p>
         {error && <p role="alert">{error}</p>}
-        <button onClick={() => void login()}>登录</button>
+        {auth ? (
+          <button onClick={() => void login()}>登录</button>
+        ) : (
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              setLocalToken(credential);
+              setCredential("");
+              cache.clear();
+              setReady(true);
+            }}
+          >
+            <label>
+              本地访问令牌
+              <input
+                type="password"
+                autoComplete="off"
+                value={credential}
+                onChange={(e) => setCredential(e.target.value)}
+                required
+              />
+            </label>
+            <button type="submit">登录</button>
+          </form>
+        )}
       </main>
     );
   return (
@@ -523,7 +553,9 @@ function App() {
         {errors && (
           <div role="alert" className="error">
             {errors}{" "}
-            {auth && <button onClick={() => void login()}>重新登录</button>}
+            <button onClick={() => (auth ? void login() : setReady(false))}>
+              重新登录
+            </button>
           </div>
         )}
         {location.pathname === "/workspace" ? (
@@ -825,12 +857,11 @@ class Boundary extends React.Component<
     );
   }
 }
+const router = createBrowserRouter([{ path: "*", element: <App /> }]);
 createRoot(document.getElementById("root")!).render(
   <Boundary>
     <QueryClientProvider client={queryClient}>
-      <BrowserRouter>
-        <App />
-      </BrowserRouter>
+      <RouterProvider router={router} />
     </QueryClientProvider>
   </Boundary>,
 );
