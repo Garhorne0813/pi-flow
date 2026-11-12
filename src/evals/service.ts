@@ -1,4 +1,5 @@
 import type { EvalJobStore } from "./job-store.js";
+import type { EvalJob } from "./jobs.js";
 import { z } from "zod";
 import { id, Fault, type Actor } from "../domain/model.js";
 import type { EvalStore } from "./store.js";
@@ -34,6 +35,27 @@ export class EvalService {
     const job = await this.jobStore().job(a.userId, id);
     await this.jobStore().access.authorize(job);
     return job;
+  }
+  async listJobs(a: Actor, page: z.infer<typeof Page>) {
+    await this.authorize(a);
+    const store = this.jobStore(),
+      visible: EvalJob[] = [];
+    let authorizedOffset = 0;
+    for (let offset = 0; ; offset += 100) {
+      const rows = await store.jobs(a.userId, { offset, limit: 100 });
+      for (const job of rows) {
+        try {
+          await store.access.authorize(job);
+        } catch (error) {
+          if (error instanceof Fault && error.status === 403) continue;
+          throw error;
+        }
+        if (authorizedOffset++ < page.offset) continue;
+        visible.push(job);
+        if (visible.length === page.limit) return visible;
+      }
+      if (rows.length < 100) return visible;
+    }
   }
   async createSuite(a: Actor, raw: unknown) {
     await this.authorize(a);

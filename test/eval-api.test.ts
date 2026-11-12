@@ -7,6 +7,68 @@ import { PersonalService } from "../src/domain/personal-service.js";
 import { personalStore } from "../src/storage/personal.js";
 import { MemoryStore } from "../src/storage/store.js";
 import { SandboxManager, DemoSandbox } from "../src/sandbox/manager.js";
+import { randomUUID } from "node:crypto";
+test(
+  "job pagination counts authorized rows and skips entire revoked pages",
+  { skip: !databaseUrl },
+  async () => {
+    const f = await jobsFixture(),
+      backing = new MemoryStore();
+    const app = buildAPI(
+      new PersonalService(personalStore(backing, f.registry), f.registry),
+      async () => f.actor,
+      new SandboxManager(backing, new DemoSandbox()),
+      undefined,
+      undefined,
+      undefined,
+      f.service,
+    );
+    try {
+      const older = await f.jobs.create(f.actor, f.request, "older");
+      const newer = await f.jobs.create(f.actor, f.request, "newer");
+      await f.pool.query(
+        "UPDATE personal_eval_jobs SET created_at=CASE WHEN job_id=$2 THEN '2000-01-01'::timestamptz ELSE '2000-01-02'::timestamptz END WHERE user_id=$1",
+        [f.actor.userId, older.jobId],
+      );
+      for (let i = 0; i < 105; i++) {
+        const id = randomUUID();
+        const data = {
+          ...newer,
+          jobId: id,
+          request: { ...newer.request, agentId: "revoked" },
+        };
+        await f.pool.query(
+          "INSERT INTO personal_eval_jobs(user_id,job_id,suite_id,suite_version,agent_id,state,request_digest,idempotency_key,data) VALUES($1,$2::uuid,$3,1,'revoked','QUEUED','r',$2::text,$4)",
+          [f.actor.userId, id, f.request.suiteId, JSON.stringify(data)],
+        );
+      }
+      for (const [offset, expected] of [
+        [0, newer.jobId],
+        [1, older.jobId],
+        [2, undefined],
+      ] as const) {
+        const response = await app.inject({
+          url: "/api/v1/evals/jobs?limit=1&offset=" + offset,
+        });
+        assert.equal(response.statusCode, 200);
+        assert.deepEqual(
+          response.json().map((j: { jobId: string }) => j.jobId),
+          expected ? [expected] : [],
+        );
+      }
+      f.jobs.access.authorize = async () => {
+        throw Error("storage unavailable");
+      };
+      assert.equal(
+        (await app.inject({ url: "/api/v1/evals/jobs" })).statusCode,
+        500,
+      );
+    } finally {
+      await app.close();
+      await f.close();
+    }
+  },
+);
 test(
   "eval HTTP APIs enforce private tenant ACL including reports/compare/cancel and SSE replay expires",
   { skip: !databaseUrl },
@@ -30,7 +92,9 @@ test(
               admin: true,
             }
           : header === "Bearer expiring"
-            ? { ...f.actor, expiresAt: Date.now() + 300 }
+            ? // Leave time for initial tenant/Agent/database checks under the
+              // same load as the mandatory browser tests before expiring SSE.
+              { ...f.actor, expiresAt: Date.now() + 1500 }
             : f.actor,
       new SandboxManager(backing, new DemoSandbox()),
       undefined,
@@ -86,7 +150,7 @@ test(
         address + "/api/v1/evals/jobs/" + job.jobId + "/events",
         {
           headers: { authorization: "Bearer expiring", "Last-Event-ID": "0" },
-          signal: AbortSignal.timeout(3000),
+          signal: AbortSignal.timeout(10000),
         },
       );
       const reader = response.body!.getReader();

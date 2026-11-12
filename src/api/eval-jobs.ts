@@ -1,7 +1,7 @@
 import { report, compare } from "../evals/report.js";
 import { z } from "zod";
 import type { FastifyInstance } from "fastify";
-import { Fault, type Actor } from "../domain/model.js";
+import type { Actor } from "../domain/model.js";
 import { Page, type EvalService } from "../evals/service.js";
 const params = z.object({ id: z.uuid() });
 export function registerEvalJobRoutes(
@@ -54,19 +54,7 @@ export function registerEvalJobRoutes(
       .send(await service.jobStore().create(a, req.body, key));
   });
   app.get(root + "/jobs", async (req) => {
-    const a = actor(req);
-    await service.authorize(a);
-    const rows = await service.jobStore().jobs(a.userId, Page.parse(req.query));
-    const visible = [];
-    for (const job of rows) {
-      try {
-        await service.jobStore().access.authorize(job);
-        visible.push(job);
-      } catch (error) {
-        if (!(error instanceof Fault && error.status === 403)) throw error;
-      }
-    }
-    return visible;
+    return service.listJobs(actor(req), Page.parse(req.query));
   });
   app.get(root + "/jobs/:id", async (req) =>
     service.authorizeJob(actor(req), params.parse(req.params).id),

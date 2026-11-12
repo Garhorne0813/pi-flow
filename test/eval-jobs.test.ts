@@ -14,6 +14,30 @@ import { EvalExecutor } from "../src/evals/executor.js";
 import { jobsFixture } from "./eval-job-fixture.js";
 
 test(
+  "idempotent POST returns the same live cancellation projection as GET",
+  { skip: !databaseUrl },
+  async () => {
+    const f = await jobsFixture();
+    try {
+      const j = await f.jobs.create(f.actor, f.request, "cancel-view");
+      const claim = (await f.jobs.claim("worker"))!;
+      await f.jobs.cancel(f.actor.userId, j.jobId);
+      const replay = await f.jobs.create(f.actor, f.request, "cancel-view");
+      assert.equal(replay.state, "RUNNING");
+      assert.equal(replay.cancelRequested, true);
+      assert.deepEqual(replay, await f.jobs.job(f.actor.userId, j.jobId));
+      await f.jobs.finish(claim.run, "PASSED", {});
+      assert.deepEqual(
+        await f.jobs.create(f.actor, f.request, "cancel-view"),
+        await f.jobs.job(f.actor.userId, j.jobId),
+      );
+    } finally {
+      await f.close();
+    }
+  },
+);
+
+test(
   "Eval reservations recheck shared period caps when a hold predates today or this month",
   { skip: !databaseUrl },
   async () => {

@@ -43,6 +43,22 @@ test("eval datasets freeze historical versions, reject stale revisions and prese
     0,
   );
   assert.equal((await store.version("u", suite.id, 1)).version, 1);
+  assert.deepEqual(
+    (await store.versions("u", suite.id, { offset: 0, limit: 1 })).map(
+      (v) => v.version,
+    ),
+    [2],
+  );
+  assert.deepEqual(
+    (await store.versions("u", suite.id, { offset: 1, limit: 1 })).map(
+      (v) => v.version,
+    ),
+    [1],
+  );
+  await assert.rejects(
+    store.versions("other", suite.id, { offset: 0, limit: 10 }),
+    /EVAL_SUITE_NOT_FOUND/,
+  );
 });
 test("eval dataset tenant scope ignores administrator privileges and paginates", async () => {
   const store = new MemoryEvalStore(),

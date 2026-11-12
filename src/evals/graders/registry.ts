@@ -6,7 +6,7 @@ import {
   type EvalInput,
   type ToolCallRecord,
 } from "../types.js";
-export const NATIVE_GRADER_VERSION = "2";
+export const NATIVE_GRADER_VERSION = "3";
 const version = NATIVE_GRADER_VERSION;
 const schemaValidator = () =>
   new Ajv({ strict: true, allErrors: false, validateFormats: false });
@@ -220,9 +220,12 @@ export function aggregate(
     scores.length !== configs.length ||
     scores.some((s) => s.status === "ERROR") ||
     score === null;
-  const hardFail = scores.some(
-    (s) => s.pass === false && configs.find((c) => c.id === s.graderId)?.hard,
-  );
+  const hardFail = scores.some((s) => {
+    const c = configs.find((c) => c.id === s.graderId);
+    return (
+      s.pass === false && (c?.hard || (c?.type === "llm_judge" && c.weight > 0))
+    );
+  });
   return {
     score,
     pass: !error && !hardFail && score! >= threshold,

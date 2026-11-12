@@ -129,7 +129,11 @@ export class PostgresEvalStore implements EvalStore {
     });
   }
   async versions(user: string, id: string, p: Page) {
-    await this.getSuite(user, id);
+    const suite = await this.pool.query(
+      "SELECT 1 FROM personal_eval_suites WHERE user_id=$1 AND suite_id=$2",
+      [user, id],
+    );
+    if (!suite.rowCount) throw new Fault(404, "EVAL_SUITE_NOT_FOUND");
     return (
       await this.pool.query(
         "SELECT data FROM personal_eval_suite_versions WHERE user_id=$1 AND suite_id=$2 ORDER BY version DESC LIMIT $3 OFFSET $4",

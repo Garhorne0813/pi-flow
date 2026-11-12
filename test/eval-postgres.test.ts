@@ -87,6 +87,22 @@ test(
           .rows[0].n,
         0,
       );
+      await f.store.deleteSuite(a.userId, s.id);
+      assert.deepEqual(
+        await f.store.versions(a.userId, s.id, { offset: 0, limit: 10 }),
+        [v],
+      );
+      assert.deepEqual(
+        await f.store.versions(a.userId, s.id, { offset: 1, limit: 10 }),
+        [],
+      );
+      await assert.rejects(
+        f.store.versions("00000000-0000-4000-8000-000000000002", s.id, {
+          offset: 0,
+          limit: 10,
+        }),
+        /EVAL_SUITE_NOT_FOUND/,
+      );
     } finally {
       await f.close();
     }

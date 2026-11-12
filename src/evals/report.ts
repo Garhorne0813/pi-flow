@@ -26,6 +26,15 @@ export function report(job: EvalJob, cases: CaseRun[], usage: Usage[]) {
         ? [r.result.score]
         : [],
     );
+  const weightedTotal = cases.reduce((n, r) => n + r.case.weight, 0);
+  const weightedGraded = graded.reduce(
+    (n, r) => n + (typeof r.result?.score === "number" ? r.case.weight : 0),
+    0,
+  );
+  const weightedScore = graded.reduce(
+    (n, r) => n + (r.result?.score ?? 0) * r.case.weight,
+    0,
+  );
   const byGrader: Record<
     string,
     { count: number; errors: number; avgScore: number | null }
@@ -60,19 +69,29 @@ export function report(job: EvalJob, cases: CaseRun[], usage: Usage[]) {
       ),
     };
   };
-  const repeatGroups = new Map<string, number[]>();
-  for (const r of graded)
-    if (r.result?.score !== null && r.result?.score !== undefined) {
-      const values = repeatGroups.get(r.caseId) ?? [];
-      values.push(r.result.score);
-      repeatGroups.set(r.caseId, values);
-    }
+  const repeatGroups = new Map<string, CaseRun[]>();
+  for (const r of cases) {
+    const rows = repeatGroups.get(r.caseId) ?? [];
+    rows.push(r);
+    repeatGroups.set(r.caseId, rows);
+  }
   return {
     jobId: job.jobId,
     state: job.state,
-    denominators: { total, graded: graded.length },
+    denominators: {
+      total,
+      graded: graded.length,
+      weightedTotal,
+      weightedGraded,
+    },
     passed: count("PASSED"),
-    passRate: total ? count("PASSED") / total : null,
+    passRate: weightedTotal
+      ? cases.reduce(
+          (n, r) => n + (r.state === "PASSED" ? r.case.weight : 0),
+          0,
+        ) / weightedTotal
+      : null,
+    unweightedPassRate: total ? count("PASSED") / total : null,
     executionErrorRate: total ? count("EXECUTION_ERROR") / total : null,
     gradingErrorRate: total ? count("GRADING_ERROR") / total : null,
     cancellationRate: total ? count("CANCELLED") / total : null,
@@ -80,7 +99,8 @@ export function report(job: EvalJob, cases: CaseRun[], usage: Usage[]) {
     terminalCaseCount: cases.filter(
       (r) => !["QUEUED", "RUNNING", "GRADING"].includes(r.state),
     ).length,
-    avgScoreOnGraded: mean(scores),
+    avgScoreOnGraded: weightedGraded ? weightedScore / weightedGraded : null,
+    unweightedAvgScoreOnGraded: mean(scores),
     timeoutCount: cases.filter((r) => r.result?.errorCode?.includes("TIMEOUT"))
       .length,
     unknownOutcomeCount: cases.filter(
@@ -108,13 +128,36 @@ export function report(job: EvalJob, cases: CaseRun[], usage: Usage[]) {
     target: performance("target"),
     judge: performance("judge"),
     graders: byGrader,
-    repeats: [...repeatGroups].map(([caseId, values]) => {
-      const avg = mean(values)!;
+    repeats: [...repeatGroups].map(([caseId, rows]) => {
+      const values = rows.flatMap((r) =>
+        ["PASSED", "FAILED_ASSERTION"].includes(r.state) &&
+        typeof r.result?.score === "number"
+          ? [r.result.score]
+          : [],
+      );
+      const requested = Math.max(job.request.repeat, rows.length);
+      const complete = values.length === requested;
+      const avg = mean(values);
       return {
         caseId,
+        requested,
         count: values.length,
+        ungraded: requested - values.length,
+        executionErrors: rows.filter((r) => r.state === "EXECUTION_ERROR")
+          .length,
+        gradingErrors: rows.filter((r) => r.state === "GRADING_ERROR").length,
+        cancelled: rows.filter((r) => r.state === "CANCELLED").length,
+        pending:
+          requested -
+          rows.length +
+          rows.filter((r) => ["QUEUED", "RUNNING", "GRADING"].includes(r.state))
+            .length,
+        complete,
         mean: avg,
-        variance: mean(values.map((v) => (v - avg) ** 2)),
+        variance:
+          complete && avg !== null
+            ? mean(values.map((v) => (v - avg) ** 2))
+            : null,
       };
     }),
     execution: {
@@ -183,6 +226,7 @@ export function compare(
     return {
       caseId: (a ?? b)!.caseId,
       repeatIndex: (a ?? b)!.repeatIndex,
+      weight: (a ?? b)!.case.weight,
       baselineState: b?.state ?? "MISSING",
       candidateState: a?.state ?? "MISSING",
       scoreDelta:
@@ -190,8 +234,14 @@ export function compare(
         typeof b?.result?.score === "number"
           ? a.result.score - b.result.score
           : null,
-      regression: b?.state === "PASSED" && a?.state !== "PASSED",
-      improvement: a?.state === "PASSED" && b?.state !== "PASSED",
+      regression:
+        (a ?? b)!.case.weight > 0 &&
+        b?.state === "PASSED" &&
+        a?.state !== "PASSED",
+      improvement:
+        (a ?? b)!.case.weight > 0 &&
+        a?.state === "PASSED" &&
+        b?.state !== "PASSED",
     };
   });
   if (
@@ -200,9 +250,12 @@ export function compare(
     )
   )
     warnings.push("CASE_SET_DIFFERS");
+  if (!pairs.some((p) => p.weight > 0)) warnings.push("NO_WEIGHTED_CASES");
   const comparable = warnings.length === 0;
-  const candidateErrors = after.some((r) =>
-    ["EXECUTION_ERROR", "GRADING_ERROR", "CANCELLED"].includes(r.state),
+  const candidateErrors = after.some(
+    (r) =>
+      r.case.weight > 0 &&
+      ["EXECUTION_ERROR", "GRADING_ERROR", "CANCELLED"].includes(r.state),
   );
   return {
     baselineJobId: baseline.jobId,
@@ -213,7 +266,9 @@ export function compare(
     gate: comparable
       ? !candidateErrors &&
         !pairs.some(
-          (p) => p.regression || (p.scoreDelta !== null && p.scoreDelta < 0),
+          (p) =>
+            p.weight > 0 &&
+            (p.regression || (p.scoreDelta !== null && p.scoreDelta < 0)),
         )
       : null,
   };

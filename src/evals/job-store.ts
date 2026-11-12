@@ -98,15 +98,20 @@ export class EvalJobStore extends PostgresEvalStore {
         await this.userLock(c, a.userId);
         const old = (
           await c.query(
-            "SELECT data,request_digest FROM personal_eval_jobs WHERE user_id=$1 AND idempotency_key=$2",
+            "SELECT data,request_digest,state,cancel_requested FROM personal_eval_jobs WHERE user_id=$1 AND idempotency_key=$2",
             [a.userId, key],
           )
         ).rows[0];
         if (old) {
           if (old.request_digest !== requestDigest)
             throw new Fault(409, "EVAL_IDEMPOTENCY_CONFLICT");
-          await this.access.authorize(old.data);
-          return old.data as EvalJob;
+          const job: EvalJob = {
+            ...old.data,
+            state: old.state,
+            cancelRequested: old.cancel_requested,
+          };
+          await this.access.authorize(job);
+          return job;
         }
         const snapshot = await this.access.snapshot(a, request.agentId);
         const version = (
@@ -155,6 +160,7 @@ export class EvalJobStore extends PostgresEvalStore {
           snapshot,
           configDigest: digest(snapshot),
           state: "QUEUED",
+          cancelRequested: false,
           createdAt: now,
         };
         const model =

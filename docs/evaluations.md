@@ -25,7 +25,7 @@ Roll back by disabling flags and stopping the Eval Worker while preserving table
 
 ## Studio and API
 
-Open `/evals/ui`, enter the existing user API token, and create a dataset. Saving a draft requires the last `revision`; a stale write returns 409. Publish with `POST /api/v1/evals/suites/:id/versions` and `{ "revision": 1 }`. Published versions never change. Deleting a suite hides it from management but preserves versions and job history. User scope is always the authenticated identity, including for administrators.
+Open `/evals/ui`, enter the existing user API token, and create a dataset. Saving a draft requires the last `revision`; a stale write returns 409. Publish with `POST /api/v1/evals/suites/:id/versions` and `{ "revision": 1 }`. Published versions never change. Deleting a suite hides it from management but preserves versions and job history; its owner can still enumerate the archived versions with `GET /api/v1/evals/suites/:id/versions`, including pagination. User scope is always the authenticated identity, including for administrators.
 
 Example draft:
 
@@ -45,6 +45,8 @@ Same key/request returns the original job; changed payload returns 409. Job crea
 
 All routes are under `/api/v1/evals`: suites CRUD, versions list/publish/get, jobs list/create/get/cancel, job cases/report/events, and POST compare with `baselineJobId`/`candidateJobId`. Lists use bounded `offset` and `limit` (1..100). Draft PATCH updates only supplied fields and requires `revision`. The maximum expanded job size makes reports bounded to 100 case rows; they do not load unrelated user history.
 
+Job list offsets count authorized rows. The API scans history in bounded batches until the visible page is full or history is exhausted, so revoked Agents cannot hide later visible records behind an empty page. Repeating an idempotent job POST returns the same current state/cancellation projection as GET. Studio provides Agent and version pagination, and comparison inputs retain selections across job pages and accept known Job IDs. New datasets start from the default example rather than copying the previous draft. Transient polling failures retry automatically; a successful manual refresh resumes polling after an authorization failure.
+
 Events use job-local monotonic `eventId`; reconnect with `Last-Event-ID` or `?after=`. Both REST and SSE verify live identity and Agent authorization. Long streams recheck once per second and close on token expiry; slow readers are disconnected and can resume. Events and case state changes commit together. Consumer disconnects do not stop execution.
 
 ## Scoring semantics
@@ -53,13 +55,17 @@ Native graders: exact, contains, json_match, json_schema, tool_called/tool_not_c
 
 Trajectory `strict` uses monotonic sequence order; `unordered` requires the same multiset. `subset` requires expected calls to be included in observed calls; `superset` requires observed calls to be included in expected calls. Each occurrence matches only once, including overlapping argument constraints.
 
-Argument assertions compare the original canonical argument digest, including denied attempts; the redacted/truncated argument display is never used as the assertion value when a digest exists. Schema keyword restrictions apply only at schema positions, so object properties named `format` or `pattern` and literal JSON data remain valid. Native grader version **2** records these semantics. Workers reject queued jobs frozen against an unavailable grader version with `EVAL_GRADER_VERSION_UNAVAILABLE` before any model request; recreate those jobs after upgrading. Historical results remain readable, and comparisons across grader versions are incomparable.
+Argument assertions compare the original canonical argument digest, including denied attempts; the redacted/truncated argument display is never used as the assertion value when a digest exists. Schema keyword restrictions apply only at schema positions, so object properties named `format` or `pattern` and literal JSON data remain valid. Native grader version **3** includes these semantics and the Judge aggregation constraint below. Workers reject queued jobs frozen against an unavailable grader version with `EVAL_GRADER_VERSION_UNAVAILABLE` before any model request; recreate those jobs after upgrading. Historical results remain readable, and comparisons across grader versions are incomparable.
 
 Positive grader weights determine the quality average; weight zero is observation-only. `hard=true` failures override the mean. A case passes when its quality score reaches `passThreshold` (default 0.5), no hard assertion fails, and no grader errors occur. All-zero weights/no scorable output is GRADING_ERROR. A grader ERROR/SKIPPED has null score/pass; execution errors and grading errors stay separate. The final output is the last complete assistant message with stopReason=stop; tool-use, truncated and incomplete messages cannot be final output.
+
+A positive-weight `llm_judge` must also pass its own threshold and return `passed=true`; failure cannot be overridden by the case mean, even when `hard=false`. Its continuous score remains available in reports. A zero-weight Judge is observation-only unless `hard=true`.
 
 Judge model/template/rubric/gateway versions are retained. Judge inputs are JSON data under fixed system instructions, with no tools/skills/memory. Only malformed structured output is retried once, as a Judge-only request; errors remain null scores. Prompt injection and statistical model bias cannot be eliminated by formatting: use deterministic hard assertions for safety constraints. Temperature zero does not promise reproducibility.
 
 Reports show passed/total, graded denominator, execution/grading/cancellation rates, per-grader scores, repeated-run mean/variance, duration quantiles and separate target/Judge requests/tokens/costs. Unknown usage is conservative and marked estimated. Costs are estimates, not financial billing. Baseline comparison checks suite/fixture/grader/Judge/environment/repeat compatibility and aligns `(caseId,repeatIndex)`; incompatible or unfinished comparisons have `gate=null`. Comparable gates fail on regressions, lower scores or candidate errors/cancellations.
+
+Suite `passRate` and `avgScoreOnGraded` use the frozen case weights. Raw `passed`, `denominators.total/graded`, error rates and `unweightedPassRate`/`unweightedAvgScoreOnGraded` retain unweighted counts. `weightedTotal/weightedGraded` make the weighted denominators explicit. Weight-zero cases still execute and retain all evidence, errors and usage, but do not affect quality or regression gates; an all-zero-weight comparison has `gate=null` and `NO_WEIGHTED_CASES`. Any positive-weight case regression, lower score or candidate error/cancellation fails the gate. Repeat groups include requested/scored/ungraded counts, execution/grading errors, cancellations and pending runs, even for all-error groups. Their mean describes scored runs only; variance is null until every requested repeat is scored.
 
 ## Shared budgets and failures
 
