@@ -1,3 +1,4 @@
+import { checkUsageCaps } from "./usage-budget.js";
 import { z } from "zod";
 import { Fault, id, taskRoot, type State, type Run } from "./model.js";
 import { authorizedRun, runConfig } from "./service.js";
@@ -214,6 +215,13 @@ export class UsageLedger {
         pricingVersion: price?.version ?? null,
         price: price ? structuredClone(price) : undefined,
       };
+      checkUsageCaps(
+        records,
+        this.policy,
+        r.actor.userId,
+        record.tokens,
+        record.costMicros,
+      );
       ledger.requests[record.id] = record;
       return { id: record.id, maxOutputTokens };
     });

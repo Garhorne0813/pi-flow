@@ -77,6 +77,15 @@ export const EvalCase = z
   .object({
     caseId: z.string().min(1).max(128),
     inputs: text,
+    mocks: z
+      .object({
+        read: JsonValue.optional(),
+        ls: JsonValue.optional(),
+        grep: JsonValue.optional(),
+        find: JsonValue.optional(),
+      })
+      .strict()
+      .default({}),
     reference: JsonValue.optional(),
     graders: z.array(GraderConfig).min(1).max(32),
     tags: z.array(z.string().max(64)).max(32).default([]),
