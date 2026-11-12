@@ -46,7 +46,27 @@ try {
           json: { error: { code: "TEMPORARY" } },
         });
       return json({
-        items: [],
+        items:
+          url.searchParams.get("cursor") === "A"
+            ? [
+                {
+                  id: "event:10",
+                  kind: "interaction",
+                  runId: "r1",
+                  interactionId: "approval1",
+                  interactionKind: "approval",
+                  text: "Historical approval",
+                  resolved: false,
+                },
+              ]
+            : [
+                {
+                  id: "event:20",
+                  kind: "resolved",
+                  runId: "r1",
+                  interactionId: "approval1",
+                },
+              ],
         nextCursor: url.searchParams.get("cursor") === "A" ? "B" : "A",
       });
     }
@@ -62,6 +82,11 @@ try {
   await page.getByRole("button", { name: "加载更早的消息" }).click();
   await page.waitForTimeout(200);
   assert.deepEqual(cursors.filter(Boolean), ["A", "B"]);
+  await page.getByText("Historical approval", { exact: true }).waitFor();
+  assert.equal(await page.getByText("等待响应", { exact: true }).count(), 0);
+  assert.equal(await page.getByText("已响应", { exact: true }).count(), 2);
+  assert.equal(await page.locator(".interaction button").count(), 0);
+  assert.equal(await page.locator(".message.resolved").count(), 0);
   await page.getByLabel("退出登录", { exact: true }).click();
   await page.getByLabel("本地访问令牌").waitFor();
   authorized = false;

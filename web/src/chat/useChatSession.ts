@@ -7,6 +7,7 @@ import {
   EventSchema,
   mergeHistory,
   reduce,
+  sequence,
   type Item,
   type Projection,
 } from "./model";
@@ -52,10 +53,10 @@ export function useChatSession(sid: string | undefined) {
     update((p) => {
       const cursors = { ...p.cursors };
       for (const item of page.items) {
-        if (item.id.startsWith("event:"))
+        if (sequence(item))
           cursors[item.runId] = Math.max(
             cursors[item.runId] || 0,
-            Number(item.id.slice(6)),
+            sequence(item),
           );
       }
       return {

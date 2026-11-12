@@ -10,6 +10,7 @@ export const EventSchema = z.object({
 export type PiEvent = z.infer<typeof EventSchema>;
 export interface Item {
   id: string;
+  eventId?: number;
   kind: string;
   runId: string;
   text?: string;
@@ -53,9 +54,7 @@ export function reduce(s: Projection, e: PiEvent): Projection {
     },
     d = object(e.data);
   const upsert = (item: Item) => {
-    const i = next.items.findIndex((x) => x.id === item.id);
-    if (i < 0) next.items.push(item);
-    else next.items[i] = { ...next.items[i], ...item };
+    next.items = mergeHistory([...next.items, { ...item, eventId: e.eventId }]);
   };
   if (e.type === "message.delta")
     next.drafts[e.runId] = (next.drafts[e.runId] || "") + str(d.delta);
@@ -97,9 +96,12 @@ export function reduce(s: Projection, e: PiEvent): Projection {
     });
   }
   if (e.type === "interaction.resolved")
-    next.items = next.items.map((x) =>
-      x.interactionId === str(d.interactionId) ? { ...x, resolved: true } : x,
-    );
+    upsert({
+      id: `event:${e.eventId}`,
+      kind: "resolved",
+      runId: e.runId,
+      interactionId: str(d.interactionId),
+    });
   if (e.type === "run.failed" || e.type === "run.cancelled")
     upsert({
       id: `event:${e.eventId}`,
@@ -109,26 +111,55 @@ export function reduce(s: Projection, e: PiEvent): Projection {
     });
   return next;
 }
+// Timeline IDs encode the source event sequence; live items carry it explicitly.
+export const sequence = (item: Item) =>
+  item.eventId ?? (/^event:\d+$/.test(item.id) ? Number(item.id.slice(6)) : 0);
+const interactionKey = (item: Item) =>
+  JSON.stringify([item.runId, item.interactionId]);
 export function mergeHistory(items: Item[]): Item[] {
   const result: Item[] = [];
+  const resolutions = new Map<string, Item>();
   for (const item of items) {
-    if (item.kind === "resolved") {
-      for (const x of result)
-        if (x.interactionId === item.interactionId) x.resolved = true;
-      continue;
+    if (
+      item.kind === "resolved" ||
+      (item.kind === "interaction" && item.resolved)
+    ) {
+      const key = interactionKey(item);
+      const previous = resolutions.get(key);
+      if (!previous || sequence(item) > sequence(previous))
+        resolutions.set(key, item);
     }
+    if (item.kind === "resolved") continue;
     const previous = result.find((x) =>
       item.kind === "tool"
         ? x.kind === "tool" &&
           x.runId === item.runId &&
           x.callId === item.callId
         : item.kind === "interaction"
-          ? x.interactionId === item.interactionId
-          : x.id === item.id,
+          ? x.kind === "interaction" &&
+            interactionKey(x) === interactionKey(item)
+          : x.runId === item.runId && x.id === item.id,
     );
-    if (previous)
-      Object.assign(previous, { ...item, name: item.name || previous.name });
-    else result.push({ ...item });
+    if (previous) {
+      const newer = sequence(item) >= sequence(previous) ? item : previous;
+      const older = newer === item ? previous : item;
+      Object.assign(previous, {
+        ...older,
+        ...newer,
+        eventId: sequence(newer),
+        name: newer.name || older.name,
+      });
+    } else result.push({ ...item, eventId: sequence(item) });
   }
+  for (const item of result) {
+    if (item.kind === "interaction" && resolutions.has(interactionKey(item))) {
+      item.resolved = true;
+      resolutions.delete(interactionKey(item));
+    }
+  }
+  // Keep unmatched resolutions until an older page supplies their request.
+  // These markers are projection metadata and never render as messages.
+  for (const item of resolutions.values())
+    if (item.kind === "resolved") result.push({ ...item });
   return result;
 }

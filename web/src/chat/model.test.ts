@@ -61,3 +61,108 @@ describe("run projection", () => {
   it("ignores unknown events without crashing", () =>
     expect(reduce(empty, event(1, "future.event", null)).items).toEqual([]));
 });
+
+describe("history ordering and live updates", () => {
+  const required = {
+    id: "event:10",
+    kind: "interaction",
+    runId: "a",
+    interactionId: "q",
+    resolved: false,
+  };
+  const resolved = {
+    id: "event:20",
+    kind: "resolved",
+    runId: "a",
+    interactionId: "q",
+  };
+  const started = {
+    id: "event:11",
+    kind: "tool",
+    runId: "a",
+    callId: "call",
+    name: "bash",
+    state: "started",
+  };
+  const completed = {
+    ...started,
+    id: "event:21",
+    state: "completed",
+    name: "",
+  };
+  it("retains an orphan resolution across separate pages in either load order", () => {
+    for (const pages of [
+      [resolved, required],
+      [required, resolved],
+    ]) {
+      const firstPage = mergeHistory([pages[0]]);
+      const merged = mergeHistory([...firstPage, pages[1]]);
+      expect(merged).toHaveLength(1);
+      expect(merged[0]).toMatchObject({ kind: "interaction", resolved: true });
+      expect(required.resolved).toBe(false);
+    }
+  });
+  it("merges out-of-order tool events by sequence and retains the tool name", () => {
+    for (const events of [
+      [started, completed],
+      [completed, started],
+    ]) {
+      expect(mergeHistory(events)[0]).toMatchObject({
+        eventId: 21,
+        state: "completed",
+        name: "bash",
+      });
+    }
+  });
+  it("does not let a delayed history response overwrite newer SSE state", async () => {
+    let release!: (items: (typeof started)[]) => void;
+    const response = new Promise<(typeof started)[]>((resolve) => {
+      release = resolve;
+    });
+    let state = reduce(
+      empty,
+      event(11, "tool.started", { callId: "call", name: "bash" }),
+    );
+    const history = response.then((items) => {
+      state = { ...state, items: mergeHistory([...state.items, ...items]) };
+    });
+    state = reduce(state, event(21, "tool.completed", { callId: "call" }));
+    release([started]);
+    await history;
+    expect(state.items[0]).toMatchObject({
+      eventId: 21,
+      state: "completed",
+      name: "bash",
+    });
+  });
+  it("retains SSE resolution before history supplies its request", () => {
+    const state = reduce(
+      empty,
+      event(20, "interaction.resolved", { interactionId: "q" }),
+    );
+    expect(mergeHistory([...state.items, required])[0]).toMatchObject({
+      resolved: true,
+    });
+    const history = { ...empty, items: mergeHistory([resolved]) };
+    const live = reduce(
+      history,
+      event(10, "interaction.required", {
+        interaction: { id: "q", kind: "approval" },
+      }),
+    );
+    expect(live.items[0]).toMatchObject({
+      kind: "interaction",
+      resolved: true,
+    });
+  });
+  it("keeps resolved state when stale requests return, without affecting another run", () => {
+    const resolvedItems = mergeHistory([required, resolved]);
+    const merged = mergeHistory([
+      ...resolvedItems,
+      required,
+      { ...required, runId: "b" },
+    ]);
+    expect(merged.find((x) => x.runId === "a")?.resolved).toBe(true);
+    expect(merged.find((x) => x.runId === "b")?.resolved).toBe(false);
+  });
+});

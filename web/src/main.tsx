@@ -66,6 +66,7 @@ function Message({
   respond: (id: string, response: string) => Promise<void>;
 }) {
   const [answer, setAnswer] = useState("");
+  if (item.kind === "resolved") return null;
   if (item.kind === "tool")
     return (
       <details open={item.state === "failed"} className="tool">
@@ -93,7 +94,7 @@ function Message({
               ? "需要你的批准"
               : "Agent 提问"}
           </strong>
-          <Pill>等待响应</Pill>
+          <Pill>{item.resolved ? "已响应" : "等待响应"}</Pill>
         </div>
         <p>{item.text || "请确认是否允许此操作。"}</p>
         {item.resolved ? (
