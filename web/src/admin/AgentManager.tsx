@@ -25,11 +25,15 @@ export function AgentManager({
   skills,
   mcps,
   configuration,
+  skillsUnavailable = false,
+  mcpsUnavailable = false,
 }: {
   snapshot: Snapshot;
   skills: Skill[];
   mcps: MCP[];
   configuration: Configuration;
+  skillsUnavailable?: boolean;
+  mcpsUnavailable?: boolean;
 }) {
   const cache = useQueryClient(),
     action = useMutationAction(),
@@ -152,7 +156,7 @@ export function AgentManager({
       await api("/admin/config/agents", { revision: expected, agents });
       setDraft(null);
       setReview(false);
-      await cache.invalidateQueries({ queryKey: ["admin", "console"] });
+      await cache.invalidateQueries({ queryKey: ["admin", "agents"] });
       await cache.invalidateQueries({ queryKey: ["agents"] });
     });
   }
@@ -169,7 +173,7 @@ export function AgentManager({
             if (dirty && !confirm("重新加载会放弃未保存的修改，确认继续？"))
               return;
             setDraft(null);
-            void cache.invalidateQueries({ queryKey: ["admin", "console"] });
+            void cache.invalidateQueries({ queryKey: ["admin", "agents"] });
           }}
         >
           重新加载 Agent 列表
@@ -368,12 +372,14 @@ export function AgentManager({
                 />
                 <Choices
                   label="绑定 Skills"
+                  disabled={skillsUnavailable}
                   values={draft.config.skills}
                   options={skills}
                   onChange={(skills) => config({ skills })}
                 />
                 <Choices
                   label="绑定 MCP Servers"
+                  disabled={mcpsUnavailable}
                   values={draft.config.mcpServers}
                   options={mcps}
                   onChange={(mcpServers) => config({ mcpServers })}

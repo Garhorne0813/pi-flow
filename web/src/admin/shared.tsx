@@ -134,11 +134,13 @@ export function Choices({
   values,
   options,
   onChange,
+  disabled = false,
 }: {
   label: string;
   values: string[];
   options: { id: string; name?: string; enabled?: boolean }[];
   onChange: (v: string[]) => void;
+  disabled?: boolean;
 }) {
   const list = [
     ...options,
@@ -147,7 +149,7 @@ export function Choices({
       .map((id) => ({ id, name: id + "（当前未登记）", enabled: undefined })),
   ];
   return (
-    <fieldset>
+    <fieldset disabled={disabled}>
       <legend>{label}</legend>
       <div className="admin-choices">
         {list.map((o) => (

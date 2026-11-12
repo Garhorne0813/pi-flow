@@ -38,6 +38,7 @@ import {
   useQueryClient,
 } from "@tanstack/react-query";
 import { api, ApiError } from "./api/client";
+import { observeOidcSession } from "./api/oidcSession";
 import { submitRun } from "./chat/submitRun";
 import { auth, login, logout, setLocalToken } from "./api/auth";
 import { useChatSession } from "./chat/useChatSession";
@@ -171,8 +172,8 @@ function App() {
     ? location.pathname.split("/")[2]
     : undefined;
   const [ready, setReady] = useState(!auth);
-  const chat = useChatSession(ready ? sid : undefined),
-    [agent, setAgent] = useState(""),
+  const [authGeneration, setAuthGeneration] = useState(0);
+  const [agent, setAgent] = useState(""),
     [draft, setDraft] = useState(""),
     [error, setError] = useState(""),
     [menu, setMenu] = useState(false),
@@ -184,55 +185,62 @@ function App() {
     timeline = useRef<HTMLDivElement>(null),
     creating = useRef(false);
   useEffect(() => {
-    if (location.pathname === "/auth/callback" && auth) {
-      void auth
-        .signinRedirectCallback()
-        .then((user) => {
-          setReady(true);
-          const target = (user.state as { returnTo?: string } | undefined)
-            ?.returnTo;
-          navigate(
-            target &&
-              (/^\/chat(?:\/[^/]+)?$/.test(target) ||
-                [
-                  "/settings",
-                  "/workspace",
-                  "/admin",
-                  "/admin/settings",
-                  "/admin/agents",
-                  "/admin/skills",
-                  "/admin/mcp",
-                  "/admin/delegation",
-                ].includes(target))
-              ? target
-              : "/chat",
-            {
-              replace: true,
-            },
-          );
-        })
-        .catch((e) => setError(e.message));
-    } else if (auth)
-      void auth.getUser().then((u) => {
-        if (u && !u.expired) setReady(true);
-      });
+    if (!auth) return;
+    return observeOidcSession(auth, location.pathname === "/auth/callback", {
+      onUser: () => {
+        cache.clear();
+        setAuthGeneration((n) => n + 1);
+        setDraft("");
+        setAgent("");
+        setOffset(0);
+        setSessionSearch("");
+        setReady(true);
+      },
+      onEnd: () => {
+        setReady(false);
+        cache.clear();
+      },
+      onError: (e) => setError(e instanceof Error ? e.message : "登录失败"),
+      onCallback: (user) => {
+        const target = (user.state as { returnTo?: string } | undefined)
+          ?.returnTo;
+        navigate(
+          target &&
+            (/^\/chat(?:\/[^/]+)?$/.test(target) ||
+              [
+                "/settings",
+                "/workspace",
+                "/admin",
+                "/admin/settings",
+                "/admin/agents",
+                "/admin/skills",
+                "/admin/mcp",
+                "/admin/delegation",
+              ].includes(target))
+            ? target
+            : "/chat",
+          {
+            replace: true,
+          },
+        );
+      },
+    });
   }, []);
   const identity = useQuery({
-    queryKey: ["identity"],
+    queryKey: ["identity", authGeneration],
     queryFn: () => api<Identity>("/me"),
     enabled: ready,
     retry: false,
     refetchInterval: 15000,
   });
   useEffect(() => {
-    if (
-      !auth &&
-      identity.error instanceof ApiError &&
-      identity.error.status === 401
-    )
+    if (identity.error instanceof ApiError && identity.error.status === 401) {
       setReady(false);
+      cache.clear();
+    }
   }, [identity.error]);
-  const me = identity.error ? undefined : identity.data;
+  const me = ready && !identity.error ? identity.data : undefined;
+  const chat = useChatSession(me ? sid : undefined);
   const [preferences, setPreferences] = useState<Preferences>(defaults);
   useEffect(() => {
     setPreferences(me ? loadPreferences(me.userId) : { ...defaults });
@@ -250,15 +258,15 @@ function App() {
     setPreferences(value);
   }
   const agents = useQuery({
-    queryKey: ["agents"],
+    queryKey: ["agents", authGeneration],
     queryFn: () => api<{ items: Agent[] }>("/agents"),
-    enabled: ready,
+    enabled: ready && !!me,
   });
   const sessions = useQuery({
-    queryKey: ["sessions", offset],
+    queryKey: ["sessions", authGeneration, offset],
     queryFn: () =>
       api<{ items: Session[] }>(`/sessions?offset=${offset}&limit=50`),
-    enabled: ready,
+    enabled: ready && !!me,
     refetchInterval: 5000,
   });
   const selected = sessions.data?.items.find((s) => s.id === sid);

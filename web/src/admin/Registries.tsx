@@ -60,7 +60,7 @@ export function SkillManager({
       } else await api("/admin/skills", Object.fromEntries(data));
       form.reset();
       setFile(null);
-      await cache.invalidateQueries({ queryKey: ["admin", "console"] });
+      await cache.invalidateQueries({ queryKey: ["admin", "skills"] });
     });
   }
   const fields = (
@@ -126,7 +126,7 @@ export function SkillManager({
                       "PUT",
                     );
                     await cache.invalidateQueries({
-                      queryKey: ["admin", "console"],
+                      queryKey: ["admin", "skills"],
                     });
                   });
               }}
@@ -248,7 +248,7 @@ export function MCPManager({
                       "PUT",
                     );
                     await cache.invalidateQueries({
-                      queryKey: ["admin", "console"],
+                      queryKey: ["admin", "mcps"],
                     });
                   });
               }}
@@ -296,7 +296,7 @@ export function MCPManager({
                 .filter(Boolean),
             });
             form.reset();
-            await cache.invalidateQueries({ queryKey: ["admin", "console"] });
+            await cache.invalidateQueries({ queryKey: ["admin", "mcps"] });
           });
         }}
       >

@@ -35,48 +35,70 @@ export function AdminConsole({
   return <ConsoleContent path={path} />;
 }
 function ConsoleContent({ path }: { path: string }) {
-  const query = useQuery({
-    queryKey: ["admin", "console"],
-    queryFn: async () => {
-      const results = await Promise.all([
-        api<Snapshot>("/admin/config/agents"),
-        allPages<Skill>("/admin/skills"),
-        api<{ items: MCP[] }>("/admin/mcp-servers").then((r) => r.items),
-        api<Configuration>("/admin/configuration"),
-      ]);
-      return {
-        snapshot: results[0],
-        skills: results[1],
-        mcps: results[2],
-        configuration: results[3],
-      };
-    },
+  const agentPage = path === "/admin/agents";
+  const skillsPage = path === "/admin/skills";
+  const mcpPage = path === "/admin/mcp";
+  const snapshot = useQuery({
+    queryKey: ["admin", "agents"],
+    queryFn: () => api<Snapshot>("/admin/config/agents"),
+    enabled: agentPage || path === "/admin/delegation",
     retry: false,
   });
+  const skills = useQuery({
+    queryKey: ["admin", "skills"],
+    queryFn: () => allPages<Skill>("/admin/skills"),
+    enabled: agentPage || skillsPage,
+    retry: false,
+  });
+  const mcps = useQuery({
+    queryKey: ["admin", "mcps"],
+    queryFn: () =>
+      api<{ items: MCP[] }>("/admin/mcp-servers").then((r) => r.items),
+    enabled: agentPage || mcpPage,
+    retry: false,
+  });
+  const configuration = useQuery({
+    queryKey: ["admin", "configuration"],
+    queryFn: () => api<Configuration>("/admin/configuration"),
+    enabled: agentPage || skillsPage || mcpPage,
+    retry: false,
+  });
+  const required = agentPage
+    ? [snapshot, configuration]
+    : skillsPage
+      ? [skills, configuration]
+      : mcpPage
+        ? [mcps, configuration]
+        : [snapshot];
+  const failed = required.filter((q) => q.isError);
+  const loading = required.some((q) => !q.data);
   return (
     <section className="settings settings-page">
       <h1>管理中心</h1>
-      {query.error ? (
+      {failed.length ? (
         <>
-          <p role="alert">{query.error.message}</p>
-          <button onClick={() => void query.refetch()}>重试加载</button>
+          <p role="alert">{failed.map((q) => q.error?.message).join(" · ")}</p>
+          <button
+            onClick={() => {
+              for (const q of failed) void q.refetch();
+            }}
+          >
+            重试加载
+          </button>
         </>
-      ) : !query.data ? (
+      ) : loading ? (
         <p role="status">正在加载配置…</p>
       ) : path === "/admin/skills" ? (
         <SkillManager
-          skills={query.data.skills}
-          configuration={query.data.configuration}
+          skills={skills.data!}
+          configuration={configuration.data!}
         />
       ) : path === "/admin/mcp" ? (
-        <MCPManager
-          mcps={query.data.mcps}
-          configuration={query.data.configuration}
-        />
+        <MCPManager mcps={mcps.data!} configuration={configuration.data!} />
       ) : path === "/admin/delegation" ? (
         <>
           <h2>委派关系</h2>
-          {query.data.snapshot.items.map((a) => (
+          {snapshot.data!.items.map((a) => (
             <article className="settings-card" key={a.id}>
               <h3>
                 {a.config.name} · {a.enabled ? "启用" : "禁用"}
@@ -97,7 +119,29 @@ function ConsoleContent({ path }: { path: string }) {
           ))}
         </>
       ) : (
-        <AgentManager {...query.data} />
+        <>
+          {(skills.isError || mcps.isError) && (
+            <p role="alert">
+              部分绑定列表加载失败，其他配置仍可编辑。
+              <button
+                onClick={() => {
+                  if (skills.isError) void skills.refetch();
+                  if (mcps.isError) void mcps.refetch();
+                }}
+              >
+                重试绑定列表
+              </button>
+            </p>
+          )}
+          <AgentManager
+            snapshot={snapshot.data!}
+            configuration={configuration.data!}
+            skills={skills.data || []}
+            mcps={mcps.data || []}
+            skillsUnavailable={!skills.data || skills.isError}
+            mcpsUnavailable={!mcps.data || mcps.isError}
+          />
+        </>
       )}
     </section>
   );
