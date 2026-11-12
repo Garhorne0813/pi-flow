@@ -31,10 +31,12 @@ export async function api<T>(
   body?: unknown,
   method = body === undefined ? "GET" : "POST",
   key?: string,
+  signal?: AbortSignal,
 ): Promise<T> {
   return (
     await request(path, {
       method,
+      signal,
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       ...(key ? { headers: { "Idempotency-Key": key } } : {}),
     })
