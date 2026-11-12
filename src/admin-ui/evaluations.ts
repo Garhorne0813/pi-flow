@@ -74,7 +74,7 @@ async function loadSuite() {
     $('cases').value = JSON.stringify(draft.cases, null, 2);
     $('revision').textContent = '草稿 revision ' + draft.draftRevision;
     options('version', rows, versionLabel);
-  } finally { if (generation === suiteLoad) for (const control of controls) $(control).disabled = false; }
+  } finally { if (generation === suiteLoad) { for (const control of controls) $(control).disabled = false; updatePublish(); } }
 }
 async function jobs() {
   const offset = jobOffset, generation = accountGeneration;
@@ -133,9 +133,18 @@ action('connect', async () => {
 });
 $('suite').addEventListener('change', () => loadSuite().catch(handleError));
 action('new', async () => { $('suite').value = ''; await loadSuite(); });
+const pendingSaves = new Set();
+function publishReady() {
+  if (!draft || [...pendingSaves].some(p => p.account === accountGeneration && p.id === draft.id)) return false;
+  try { return $('name').value === draft.name && $('description').value === draft.description && JSON.stringify(JSON.parse($('cases').value)) === JSON.stringify(draft.cases); } catch { return false; }
+}
+function updatePublish() { $('publish').disabled = Boolean(draft) && !publishReady(); }
+for (const id of ['name','description','cases']) $(id).addEventListener('input', updatePublish);
 action('save', async () => {
   const generation = suiteLoad, selected = $('suite').value, account = accountGeneration;
   const original = draft;
+  const operation = { account, id: original?.id }; pendingSaves.add(operation); updatePublish();
+  try {
   const body = { name: $('name').value, description: $('description').value, cases: JSON.parse($('cases').value) };
   if (original) body.revision = original.draftRevision;
   let saved;
@@ -149,8 +158,9 @@ action('save', async () => {
   $('suite').value = saved.id;
   await loadSuite();
   if (account === accountGeneration && $('suite').value === saved.id) status('草稿已保存');
+  } finally { pendingSaves.delete(operation); updatePublish(); }
 });
-action('publish', async () => { if (!draft) throw Error('请先保存草稿'); await api('/evals/suites/' + draft.id + '/versions', { revision: draft.draftRevision }); await loadSuite(); status('不可变版本已发布'); });
+action('publish', async () => { if (!draft) throw Error('请先保存草稿'); if (!publishReady()) throw Error('请先保存草稿并等待保存完成'); await api('/evals/suites/' + draft.id + '/versions', { revision: draft.draftRevision }); await loadSuite(); status('不可变版本已发布'); });
 action('delete', async () => { if (!draft) throw Error('请先选择数据集'); await api('/evals/suites/' + draft.id, undefined, 'DELETE'); draft = null; await suites(); await loadSuite(); status('数据集已删除；历史版本与报告保留'); });
 action('show-version', async () => {
   if (!draft || !$('version').value) throw Error('请先发布版本');

@@ -619,3 +619,87 @@ for (const method of ["PATCH", "POST"])
       }
     },
   );
+
+test(
+  "Studio prevents publication while dirty or saving and uses the saved revision afterward",
+  { skip: !browserPath },
+  async () => {
+    const entered = deferred(),
+      release = deferred();
+    let saved = false,
+      published = 0;
+    try {
+      await studio(
+        async (url, request) => {
+          if (
+            url.pathname === "/api/v1/evals/suites/" + suiteId &&
+            request.method() === "PATCH"
+          ) {
+            entered.resolve();
+            await release.promise;
+            saved = true;
+            return {
+              body: {
+                ...request.postDataJSON(),
+                id: suiteId,
+                draftRevision: 2,
+              },
+            };
+          }
+          if (url.pathname === "/api/v1/evals/suites/" + suiteId && saved)
+            return {
+              body: {
+                id: suiteId,
+                name: "edited",
+                description: "original",
+                draftRevision: 2,
+                cases: [
+                  {
+                    caseId: "sensitive-source",
+                    inputs: "private-example",
+                    graders: [{ id: "g", type: "exact", expected: "ok" }],
+                  },
+                ],
+              },
+            };
+          if (
+            url.pathname.endsWith("/versions") &&
+            request.method() === "POST"
+          ) {
+            published++;
+            assert.equal(request.postDataJSON().revision, 2);
+            return { body: version(2) };
+          }
+          return undefined;
+        },
+        async (page) => {
+          await connect(page);
+          await page.locator("#suite").selectOption(suiteId);
+          await page
+            .locator("#revision")
+            .filter({ hasText: "revision 1" })
+            .waitFor();
+          await page.locator("#name").fill("edited");
+          assert.equal(await page.locator("#publish").isDisabled(), true);
+          await page.locator("#save").click();
+          await entered.promise;
+          await page.locator("#publish").dispatchEvent("click");
+          assert.equal(published, 0);
+          release.resolve();
+          await page
+            .locator("#status")
+            .filter({ hasText: "草稿已保存" })
+            .waitFor();
+          await page.locator("#publish").click();
+          await page
+            .locator("#status")
+            .filter({ hasText: "不可变版本已发布" })
+            .waitFor();
+          assert.equal(published, 1);
+        },
+      );
+    } finally {
+      release.resolve();
+    }
+  },
+);

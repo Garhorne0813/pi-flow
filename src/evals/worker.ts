@@ -121,18 +121,22 @@ export class EvalWorker {
       const targetUsage = (
         await this.store.usage(run.userId, run.jobId)
       ).filter((u) => u.caseRunId === run.caseRunId && u.role === "target");
+      const usageConfirmed =
+        targetUsage.length > 0 &&
+        targetUsage.every((u) => u.status === "confirmed");
+      Object.assign(result.metrics, { usageConfirmed });
       const costEstimate =
-        targetUsage.length && targetUsage.every((u) => u.costMicros !== null)
+        usageConfirmed && targetUsage.every((u) => u.costMicros !== null)
           ? targetUsage.reduce((n, u) => n + (u.costMicros ?? 0), 0) / 1000000
           : undefined;
-      if (targetUsage.length)
+      if (usageConfirmed)
         result.metrics.tokens = targetUsage.reduce((n, u) => n + u.tokens, 0);
       const input: EvalInput = {
         caseId: run.caseId,
         input: run.case.inputs,
         reference: run.case.reference,
         ...result,
-        metrics: { ...result.metrics, costEstimate },
+        metrics: { ...result.metrics, costEstimate, usageConfirmed },
       };
       const scores: EvalScore[] = [];
       for (const config of run.case.graders) {

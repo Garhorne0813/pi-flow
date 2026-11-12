@@ -572,3 +572,52 @@ test(
     }
   },
 );
+
+test(
+  "unknown ledger reservations preserve native consume metrics and produce metric grading errors",
+  { skip: !databaseUrl },
+  async () => {
+    const f = await jobsFixture();
+    try {
+      const suite = await f.service.createSuite(f.actor, {
+        name: "usage",
+        cases: [
+          {
+            caseId: "c",
+            inputs: "hi",
+            graders: [
+              { id: "tokens", type: "tokens", max: 20 },
+              { id: "cost", type: "cost", max: 1 },
+            ],
+          },
+        ],
+      });
+      await f.jobs.publish(f.actor.userId, suite.id, 1);
+      const j = await f.jobs.create(
+        f.actor,
+        { ...f.request, suiteId: suite.id },
+        "unknown-metrics",
+      );
+      await new EvalWorker(
+        f.jobs,
+        new EvalExecutor(new EvalDemoRuntime()),
+      ).tick();
+      const row = (
+        await f.jobs.caseRuns(f.actor.userId, j.jobId, {
+          offset: 0,
+          limit: 100,
+        })
+      )[0]!;
+      assert.equal(row.result!.metrics!.tokens, 10);
+      assert.ok((await f.jobs.usage(f.actor.userId, j.jobId))[0]!.tokens > 20);
+      assert.equal(row.state, "GRADING_ERROR");
+      assert.ok(
+        row.result!.scores!.every(
+          (s) => s.status === "ERROR" && s.score === null,
+        ),
+      );
+    } finally {
+      await f.close();
+    }
+  },
+);

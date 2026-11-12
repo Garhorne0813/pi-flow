@@ -503,3 +503,73 @@ test("trajectory inclusion matches overlapping constraints without reusing obser
     "ERROR",
   );
 });
+
+test("observation errors remain evidence without vetoing weighted quality", async () => {
+  const quality = GraderConfig.parse({
+    id: "quality",
+    type: "exact",
+    expected: "Hello",
+  });
+  const observed = GraderConfig.parse({
+    id: "observe",
+    type: "llm_judge",
+    rubric: "quality",
+    weight: 0,
+  });
+  const scores: EvalScore[] = [
+    await run(quality),
+    {
+      graderId: "observe",
+      graderVersion: "test",
+      status: "ERROR",
+      score: null,
+      pass: null,
+    },
+  ];
+  assert.equal(aggregate(scores, [quality, observed]).state, "PASSED");
+  assert.equal(
+    aggregate(scores, [quality, { ...observed, hard: true }]).state,
+    "GRADING_ERROR",
+  );
+  assert.equal(
+    aggregate(scores, [quality, { ...observed, weight: 1 }]).state,
+    "GRADING_ERROR",
+  );
+  assert.equal(aggregate([scores[1]!], [observed]).state, "GRADING_ERROR");
+});
+test("unknown usage cannot be used for precise token/cost assertions", async () => {
+  for (const type of ["tokens", "cost"]) {
+    assert.equal(
+      (
+        await run(
+          { id: "g", type, max: 20 },
+          {
+            metrics: {
+              durationMs: 1,
+              tokens: 10,
+              costEstimate: 0,
+              usageConfirmed: false,
+            },
+          },
+        )
+      ).status,
+      "ERROR",
+    );
+    assert.equal(
+      (
+        await run(
+          { id: "g", type, max: 20 },
+          {
+            metrics: {
+              durationMs: 1,
+              tokens: 10,
+              costEstimate: 0,
+              usageConfirmed: true,
+            },
+          },
+        )
+      ).status,
+      "PASSED",
+    );
+  }
+});

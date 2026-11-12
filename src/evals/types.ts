@@ -114,7 +114,12 @@ export interface EvalInput {
   output: unknown;
   reference?: unknown;
   trajectory: ToolCallRecord[];
-  metrics: { durationMs: number; tokens: number; costEstimate?: number };
+  metrics: {
+    durationMs: number;
+    tokens: number;
+    costEstimate?: number;
+    usageConfirmed?: boolean;
+  };
 }
 export const EvalScore = z
   .object({

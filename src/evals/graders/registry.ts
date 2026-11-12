@@ -6,7 +6,7 @@ import {
   type EvalInput,
   type ToolCallRecord,
 } from "../types.js";
-export const NATIVE_GRADER_VERSION = "4";
+export const NATIVE_GRADER_VERSION = "5";
 const version = NATIVE_GRADER_VERSION;
 const json = (v: unknown) => (typeof v === "string" ? JSON.parse(v) : v);
 const same = (a: unknown, b: unknown) => canonical(a) === canonical(b);
@@ -124,6 +124,8 @@ export async function grade(
       case "latency":
       case "tokens":
       case "cost": {
+        if (c.type !== "latency" && input.metrics.usageConfirmed === false)
+          throw new Error("METRIC_UNAVAILABLE");
         const value =
           c.type === "latency"
             ? input.metrics.durationMs
@@ -173,7 +175,14 @@ export function aggregate(
     : null;
   const error =
     scores.length !== configs.length ||
-    scores.some((s) => s.status === "ERROR") ||
+    scores.some((s) => {
+      const c = configs.find((c) => c.id === s.graderId);
+      return (
+        !c ||
+        ((c.weight > 0 || c.hard) &&
+          (s.status === "ERROR" || s.status === "SKIPPED"))
+      );
+    }) ||
     score === null;
   const hardFail = scores.some((s) => {
     const c = configs.find((c) => c.id === s.graderId);

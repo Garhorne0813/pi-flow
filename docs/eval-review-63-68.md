@@ -75,3 +75,16 @@ Eight additional findings against `ec6d300` are addressed on the final stack bra
 Validation: **455 tests passed, 0 failures, 0 skips**, using PostgreSQL 17, Chromium and test concurrency 2. All 57 evaluation tests passed separately. TypeScript check/build, dedicated-process Eval HTTP/SSE smoke and Demo smoke passed. Native grader version 4 requires recreating queued jobs frozen against older grader versions; historical reports remain preserved. Real-model/provider acceptance and Docker execution were not rerun for this follow-up.
 
 The optional Compose restart-policy edit was omitted after automatic approval review rejected uploading the existing demo configuration because it contains its original fixed demo database password. Worker-internal recovery is the implemented reliability fix; no container configuration change is required for transient polling errors.
+
+
+## Fourth submitted-review follow-up
+
+Three new findings against `ca3be5a` are addressed:
+
+- [Observation errors](https://github.com/Garhorne0813/pi-flow/pull/68#discussion_r4546423587): zero-weight non-hard ERROR/SKIPPED evidence no longer vetoes scored quality. Hard/weighted errors and all-unscored cases still return GRADING_ERROR.
+- [Unconfirmed usage](https://github.com/Garhorne0813/pi-flow/pull/68#discussion_r4546423591): only fully confirmed usage replaces token metrics and supplies cost assertions. Native consume metrics are preserved for unknown reservations; `usageConfirmed=false` makes exact resource graders return ERROR while conservative usage remains visible.
+- [Save/publish race](https://github.com/Garhorne0813/pi-flow/pull/68#discussion_r4546431460): dirty/in-flight drafts cannot publish. Browser regression holds a PATCH, attempts concurrent publication, verifies no publish request is issued, then checks the saved revision is published after completion.
+
+Native grader version 5 records the changed scoring contract; recreate queued jobs from older grader versions.
+
+Validation: **459 tests passed, 0 failures, 0 skips**, with PostgreSQL 17, Chromium and test concurrency 2. All 61 evaluation tests passed separately; TypeScript check/build, Demo smoke and dedicated-process Eval HTTP/SSE smoke passed. Native grader v5 requires recreating queued jobs frozen against previous grader versions.
