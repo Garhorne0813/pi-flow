@@ -84,7 +84,7 @@ try {
     await page.goto("http://127.0.0.1:5173/settings");
     await page.getByRole("heading", { name: "登录身份" }).waitFor();
     assert.equal(
-      await page.getByRole("link", { name: "全局配置", exact: true }).count(),
+      await page.getByRole("link", { name: "管理中心", exact: true }).count(),
       admin ? 1 : 0,
     );
     await page.getByLabel("外观").selectOption("dark");

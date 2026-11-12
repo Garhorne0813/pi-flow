@@ -93,7 +93,8 @@ try {
   await page.getByLabel("本地访问令牌").fill("local-test-token");
   await page.getByRole("button", { name: "登录", exact: true }).click();
   await page.getByRole("button", { name: "加载更早的消息" }).waitFor();
-  await page.getByRole("link", { name: "Agent 管理", exact: true }).click();
+  await page.getByRole("link", { name: "管理中心", exact: true }).click();
+  await page.waitForURL("**/admin/agents");
   await page.getByRole("button", { name: "新建 Agent", exact: true }).click();
   await page
     .getByLabel("System Prompt", { exact: true })

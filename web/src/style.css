@@ -220,31 +220,8 @@ svg {
   border-radius: 8px;
   color: var(--dsw-alias-label-secondary);
 }
-.sidebar-links > a:hover,
-.admin-nav a:hover,
-.admin-nav a.active {
+.sidebar-links > a:hover {
   background: var(--dsw-alias-interactive-bg-hover);
-}
-.admin-nav {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  padding: 4px 0 10px;
-  border-bottom: 0.5px solid var(--dsw-alias-border-l1);
-}
-.admin-nav .section-label {
-  grid-column: 1/-1;
-  margin: 8px 8px 5px;
-}
-.admin-nav a {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  min-height: 31px;
-  font-size: 11px;
-  padding: 5px 7px;
-  color: var(--dsw-alias-label-secondary);
-  border-radius: 7px;
-  white-space: nowrap;
 }
 .user-profile {
   display: flex;
@@ -815,29 +792,6 @@ body[data-ds-dark-theme] .hljs-keyword {
   background: var(--dsw-alias-button-primary-fill);
   color: var(--dsw-alias-label-primary-foreground);
   border: 0;
-}
-.admin-tabs {
-  display: flex;
-  gap: 6px;
-  flex-wrap: wrap;
-  flex: 0;
-  overflow: visible;
-  margin: 22px 0;
-  border-bottom: 0.5px solid var(--dsw-alias-border-l2);
-  padding-bottom: 12px;
-}
-.admin-tabs a {
-  padding: 6px 11px;
-  border-radius: 8px;
-  color: var(--dsw-alias-label-tertiary);
-  font-size: 12px;
-}
-.admin-tabs a:hover {
-  background: var(--dsw-alias-interactive-bg-hover);
-}
-.admin-tabs a[aria-current="page"] {
-  background: var(--dsw-alias-interactive-bg-hover);
-  color: var(--dsw-alias-label-primary);
 }
 .agent-layout {
   display: grid;

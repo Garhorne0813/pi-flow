@@ -26,6 +26,7 @@ import { createRoot } from "react-dom/client";
 import {
   createBrowserRouter,
   RouterProvider,
+  Navigate,
   Link,
   useNavigate,
   useLocation,
@@ -153,10 +154,19 @@ function Message({
     </article>
   );
 }
+const adminLinks = [
+  ["/admin/agents", "Agent 管理", "bot"],
+  ["/admin/skills", "Skills 管理", "skill"],
+  ["/admin/mcp", "MCP Servers", "link"],
+  ["/admin/delegation", "子 Agent 委派", "network"],
+  ["/admin/settings", "全局配置", "settings"],
+] as const;
 function App() {
   const location = useLocation(),
     navigate = useNavigate(),
     cache = useQueryClient();
+  const adminArea =
+    location.pathname === "/admin" || location.pathname.startsWith("/admin/");
   const sid = location.pathname.startsWith("/chat/")
     ? location.pathname.split("/")[2]
     : undefined;
@@ -187,6 +197,7 @@ function App() {
                 [
                   "/settings",
                   "/workspace",
+                  "/admin",
                   "/admin/settings",
                   "/admin/agents",
                   "/admin/skills",
@@ -370,100 +381,118 @@ function App() {
           </Link>
           <button
             className="icon-button mobile-close"
-            aria-label="关闭会话列表"
+            aria-label={adminArea ? "关闭管理导航" : "关闭会话列表"}
             onClick={() => setMenu(false)}
           >
             <Icon name="panel" />
           </button>
         </div>
-        <Button
-          className={sidebarCss.newSession + " new"}
-          icon={<Icon name="plus" size={17} />}
-          onClick={() => {
-            navigate("/chat");
-            setMenu(false);
-          }}
-        >
-          新建对话
-        </Button>
-        <Link className="sidebar-workspace" to="/workspace">
-          <Icon name="folder" size={17} />
-          <span>工作区文件</span>
-        </Link>
-        <label className="session-search">
-          <Icon name="search" size={15} />
-          <input
-            aria-label="搜索当前页对话"
-            placeholder="搜索对话"
-            value={sessionSearch}
-            onChange={(e) => setSessionSearch(e.target.value)}
-          />
-        </label>
-        <p className="section-label">对话记录</p>
-        <nav>
-          {sessions.data?.items
-            .filter((s) =>
-              (s.title || "未命名对话")
-                .toLowerCase()
-                .includes(sessionSearch.toLowerCase()),
-            )
-            .map((s) => (
-              <Link
-                className={s.id === sid ? "selected" : ""}
-                key={s.id}
-                to={"/chat/" + s.id}
-                onClick={() => setMenu(false)}
-              >
-                <Icon name="chat" size={16} />
-                <span>{s.title || "未命名对话"}</span>
-              </Link>
-            ))}
-        </nav>
-        <div
-          className="pagination"
-          hidden={offset === 0 && (sessions.data?.items.length || 0) < 50}
-        >
-          <button
-            disabled={!offset}
-            onClick={() => setOffset(Math.max(0, offset - 50))}
-          >
-            上一页
-          </button>
-          <button
-            disabled={(sessions.data?.items.length || 0) < 50}
-            onClick={() => setOffset(offset + 50)}
-          >
-            下一页
-          </button>
-        </div>
-        <footer>
-          <div className="sidebar-links">
-            <Link to="/settings">
-              <Icon name="settings" size={16} />
-              个人设置
+        {adminArea ? (
+          <>
+            <Link
+              className="sidebar-workspace"
+              to="/chat"
+              onClick={() => setMenu(false)}
+            >
+              <Icon name="chat" size={17} />
+              返回聊天
             </Link>
-          </div>
-          {me?.admin && (
-            <div className="admin-nav">
-              <span className="section-label">管理中心</span>
-              {(
-                [
-                  ["/admin/agents", "Agent 管理", "bot"],
-                  ["/admin/skills", "Skills 管理", "skill"],
-                  ["/admin/mcp", "MCP Servers", "link"],
-                  ["/admin/delegation", "子 Agent 委派", "network"],
-                  ["/admin/settings", "全局配置", "settings"],
-                ] as const
-              ).map(([href, label, icon]) => (
-                <Link
-                  key={href}
-                  to={href}
-                  className={location.pathname === href ? "active" : ""}
-                >
-                  <Icon name={icon} size={15} />
-                  {label}
+            <p className="section-label">管理中心</p>
+            <nav aria-label="管理功能">
+              {me?.admin &&
+                adminLinks.map(([href, label, icon]) => (
+                  <Link
+                    key={href}
+                    to={href}
+                    className={location.pathname === href ? "selected" : ""}
+                    aria-current={
+                      location.pathname === href ? "page" : undefined
+                    }
+                    onClick={() => setMenu(false)}
+                  >
+                    <Icon name={icon} size={16} />
+                    <span>{label}</span>
+                  </Link>
+                ))}
+            </nav>
+          </>
+        ) : (
+          <>
+            <Button
+              className={sidebarCss.newSession + " new"}
+              icon={<Icon name="plus" size={17} />}
+              onClick={() => {
+                navigate("/chat");
+                setMenu(false);
+              }}
+            >
+              新建对话
+            </Button>
+            <Link className="sidebar-workspace" to="/workspace">
+              <Icon name="folder" size={17} />
+              <span>工作区文件</span>
+            </Link>
+            <label className="session-search">
+              <Icon name="search" size={15} />
+              <input
+                aria-label="搜索当前页对话"
+                placeholder="搜索对话"
+                value={sessionSearch}
+                onChange={(e) => setSessionSearch(e.target.value)}
+              />
+            </label>
+            <p className="section-label">对话记录</p>
+            <nav>
+              {sessions.data?.items
+                .filter((s) =>
+                  (s.title || "未命名对话")
+                    .toLowerCase()
+                    .includes(sessionSearch.toLowerCase()),
+                )
+                .map((s) => (
+                  <Link
+                    className={s.id === sid ? "selected" : ""}
+                    key={s.id}
+                    to={"/chat/" + s.id}
+                    onClick={() => setMenu(false)}
+                  >
+                    <Icon name="chat" size={16} />
+                    <span>{s.title || "未命名对话"}</span>
+                  </Link>
+                ))}
+            </nav>
+            <div
+              className="pagination"
+              hidden={offset === 0 && (sessions.data?.items.length || 0) < 50}
+            >
+              <button
+                disabled={!offset}
+                onClick={() => setOffset(Math.max(0, offset - 50))}
+              >
+                上一页
+              </button>
+              <button
+                disabled={(sessions.data?.items.length || 0) < 50}
+                onClick={() => setOffset(offset + 50)}
+              >
+                下一页
+              </button>
+            </div>
+          </>
+        )}
+        <footer>
+          {!adminArea && (
+            <div className="sidebar-links">
+              <Link to="/settings" onClick={() => setMenu(false)}>
+                <Icon name="settings" size={16} />
+                个人设置
+              </Link>
+              {me?.admin && (
+                <Link to="/admin" onClick={() => setMenu(false)}>
+                  <Icon name="shield" size={16} />
+                  管理中心
                 </Link>
-              ))}
+              )}
             </div>
           )}
           <div className="user-profile">
@@ -491,16 +520,20 @@ function App() {
           <div className="header-leading">
             <button
               className="icon-button mobile"
-              aria-label="展开会话列表"
+              aria-label={adminArea ? "展开管理导航" : "展开会话列表"}
               onClick={() => setMenu(!menu)}
             >
               <Icon name="panel" />
             </button>
-            <span className="breadcrumb-root">个人空间</span>
+            <span className="breadcrumb-root">
+              {adminArea ? "管理中心" : "个人空间"}
+            </span>
             <span className="breadcrumb-slash">/</span>
             <strong>
-              {location.pathname.startsWith("/admin/")
-                ? "管理中心"
+              {adminArea
+                ? adminLinks.find(
+                    ([href]) => href === location.pathname,
+                  )?.[1] || "管理中心"
                 : location.pathname === "/settings"
                   ? "个人设置"
                   : location.pathname === "/workspace"
@@ -559,7 +592,9 @@ function App() {
             </button>
           </div>
         )}
-        {location.pathname === "/workspace" ? (
+        {location.pathname === "/admin" ? (
+          <Navigate to="/admin/agents" replace />
+        ) : location.pathname === "/workspace" ? (
           <Workspace />
         ) : location.pathname === "/settings" ? (
           me ? (

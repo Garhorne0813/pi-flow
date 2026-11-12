@@ -58,6 +58,9 @@ test("React static shell honors rollout switch and only serves configured artifa
     {} as SandboxManager,
   );
   try {
+    const rootShell = await app.inject({ url: "/admin" });
+    assert.equal(rootShell.statusCode, 200);
+    assert.match(rootShell.body, /id="root"/);
     const shell = await app.inject({ url: "/admin/skills" });
     assert.equal(shell.statusCode, 200);
     assert.match(shell.headers["cache-control"] as string, /no-store/);
@@ -69,6 +72,7 @@ test("React static shell honors rollout switch and only serves configured artifa
       404,
     );
     process.env.CHAT_UI_ENABLED = "false";
+    assert.equal((await app.inject({ url: "/admin" })).statusCode, 404);
     assert.equal((await app.inject({ url: "/admin/skills" })).statusCode, 404);
     assert.equal(
       (await app.inject({ url: "/assets/app-test.js" })).statusCode,

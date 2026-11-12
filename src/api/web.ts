@@ -6,6 +6,7 @@ const pages = [
   "/workspace",
   "/settings",
   "/auth/callback",
+  "/admin",
   "/admin/agents",
   "/admin/skills",
   "/admin/mcp",

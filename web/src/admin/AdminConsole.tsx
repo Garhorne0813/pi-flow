@@ -56,23 +56,6 @@ function ConsoleContent({ path }: { path: string }) {
   return (
     <section className="settings settings-page">
       <h1>管理中心</h1>
-      <nav className="admin-tabs" aria-label="管理功能">
-        {[
-          ["/admin/agents", "Agents"],
-          ["/admin/skills", "Skills"],
-          ["/admin/mcp", "MCP Servers"],
-          ["/admin/delegation", "子 Agent 委派"],
-          ["/admin/settings", "全局配置"],
-        ].map(([href, label]) => (
-          <Link
-            key={href}
-            to={href}
-            aria-current={path === href ? "page" : undefined}
-          >
-            {label}
-          </Link>
-        ))}
-      </nav>
       {query.error ? (
         <>
           <p role="alert">{query.error.message}</p>
