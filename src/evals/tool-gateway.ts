@@ -8,6 +8,10 @@ export class EvalToolGateway {
     readonly mocks: MockTools,
     private allowed: string[],
     private authorize: (name: string) => Promise<void>,
+    private observe?: (
+      type: string,
+      data: Record<string, unknown>,
+    ) => Promise<void>,
   ) {}
   specs() {
     return Object.keys(this.mocks)
@@ -21,6 +25,11 @@ export class EvalToolGateway {
   async call(name: string, args: Record<string, unknown>, callId?: string) {
     const call = this.trace.start(name, args, callId);
     try {
+      await this.observe?.("eval.case.tool_started", {
+        sequence: call.sequence,
+        callId: call.callId,
+        name,
+      });
       if (
         !mockNames.includes(name as (typeof mockNames)[number]) ||
         !this.allowed.includes(name) ||
@@ -49,10 +58,22 @@ export class EvalToolGateway {
         return v;
       };
       call.args = safe(args) as Record<string, unknown>;
+      await this.observe?.("eval.case.tool_completed", {
+        sequence: call.sequence,
+        callId: call.callId,
+        name,
+        status: call.status,
+      });
       return structuredClone(this.mocks[name as keyof MockTools]);
     } catch (e) {
       call.status = "DENIED";
       call.errorCode = e instanceof Fault ? e.code : "EVAL_TOOL_FAILED";
+      await this.observe?.("eval.case.tool_failed", {
+        sequence: call.sequence,
+        callId: call.callId,
+        name,
+        errorCode: call.errorCode,
+      });
       throw e;
     }
   }

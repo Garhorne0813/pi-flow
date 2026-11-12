@@ -9,7 +9,7 @@ import {
 import { checkUsageCaps } from "../domain/usage-budget.js";
 import { personalConnection } from "../execution/personal-context.js";
 import { PostgresEvalStore } from "./postgres-store.js";
-import { digest } from "./dataset.js";
+import { digest, freezeDataset } from "./dataset.js";
 import {
   JobRequest,
   type EvalJob,
@@ -98,17 +98,21 @@ export class EvalJobStore extends PostgresEvalStore {
         await this.userLock(c, a.userId);
         const old = (
           await c.query(
-            "SELECT data,request_digest FROM personal_eval_jobs WHERE user_id=$1 AND idempotency_key=$2",
+            "SELECT data,request_digest,state,cancel_requested FROM personal_eval_jobs WHERE user_id=$1 AND idempotency_key=$2",
             [a.userId, key],
           )
         ).rows[0];
         if (old) {
           if (old.request_digest !== requestDigest)
             throw new Fault(409, "EVAL_IDEMPOTENCY_CONFLICT");
-          await this.access.authorize(old.data);
-          return old.data as EvalJob;
+          const job: EvalJob = {
+            ...old.data,
+            state: old.state,
+            cancelRequested: old.cancel_requested,
+          };
+          await this.access.authorize(job);
+          return job;
         }
-        const snapshot = await this.access.snapshot(a, request.agentId);
         const version = (
           await c.query(
             "SELECT v.data FROM personal_eval_suite_versions v JOIN personal_eval_suites s USING(user_id,suite_id) WHERE v.user_id=$1 AND v.suite_id=$2 AND v.version=$3 AND NOT s.deleted",
@@ -128,12 +132,18 @@ export class EvalJobStore extends PostgresEvalStore {
           cases.length * request.repeat > caseCap
         )
           throw new Fault(400, "EVAL_CASE_LIMIT");
-        if (
-          cases.some((item) =>
-            item.graders.some((g: { type: string }) => g.type === "llm_judge"),
-          ) &&
-          (!snapshot.judge || request.limits.maxJudgeCalls < 1)
-        )
+        // Published versions from older deployments must pass the same local
+        // schema preflight before snapshots, holds or model execution.
+        freezeDataset(cases);
+        const needsJudge = cases.some((item) =>
+          item.graders.some((g: { type: string }) => g.type === "llm_judge"),
+        );
+        const snapshot = await this.access.snapshot(
+          a,
+          request.agentId,
+          needsJudge,
+        );
+        if (needsJudge && (!snapshot.judge || request.limits.maxJudgeCalls < 1))
           throw new Fault(400, "EVAL_JUDGE_NOT_CONFIGURED");
         const jobId = randomUUID(),
           now = new Date().toISOString();
@@ -155,6 +165,7 @@ export class EvalJobStore extends PostgresEvalStore {
           snapshot,
           configDigest: digest(snapshot),
           state: "QUEUED",
+          cancelRequested: false,
           createdAt: now,
         };
         const model =
@@ -163,10 +174,28 @@ export class EvalJobStore extends PostgresEvalStore {
             snapshot.config.model.modelId,
           price = snapshot.prices[model];
         if (!price) throw new Fault(503, "MODEL_PRICE_REQUIRED");
-        const cost =
-          price.input === 0 && price.output === 0 && !snapshot.judge
-            ? 0
-            : Math.ceil(request.limits.maxCostEstimateUsd * 1000000);
+        const selectedPrices = [
+          price,
+          ...(snapshot.judge
+            ? [
+                snapshot.prices[
+                  snapshot.judge.config.model.provider +
+                    "/" +
+                    snapshot.judge.config.model.modelId
+                ]!,
+              ]
+            : []),
+        ];
+        const free = selectedPrices.every(
+          (p) =>
+            p &&
+            [p.input, p.output, p.cacheRead, p.cacheWrite].every(
+              (value) => value === 0,
+            ),
+        );
+        const cost = free
+          ? 0
+          : Math.ceil(request.limits.maxCostEstimateUsd * 1000000);
         const records = (
           await c.query(
             "SELECT data FROM personal_usage_requests WHERE user_id=$1 AND at >= $2",
@@ -262,6 +291,26 @@ export class EvalJobStore extends PostgresEvalStore {
       )
     ).rows.map((r) => r.data as EvalJob);
   }
+  async visibleJobs(a: Actor, p: Page) {
+    const scope = await this.access.scope(a);
+    if (!scope.agentIds.length || (!scope.demo && !scope.models.length))
+      return [];
+    const approved = (path: string) =>
+      `(($6 AND data #>> '{snapshot,${path}gatewayRef}' IS NULL) OR $5::jsonb @> jsonb_build_array(jsonb_build_object('provider',data #>> '{snapshot,${path}config,model,provider}','modelId',data #>> '{snapshot,${path}config,model,modelId}')))`;
+    return (
+      await this.pool.query(
+        `SELECT data||jsonb_build_object('state',state,'cancelRequested',cancel_requested) AS data FROM personal_eval_jobs WHERE user_id=$1 AND agent_id=ANY($4::text[]) AND ${approved("")} AND (data #> '{snapshot,judge}' IS NULL OR data #> '{snapshot,judge}'='null'::jsonb OR ${approved("judge,")}) ORDER BY created_at DESC,job_id LIMIT $2 OFFSET $3`,
+        [
+          a.userId,
+          p.limit,
+          p.offset,
+          scope.agentIds,
+          JSON.stringify(scope.models),
+          scope.demo,
+        ],
+      )
+    ).rows.map((r) => r.data as EvalJob);
+  }
   async caseRuns(user: string, id: string, p: Page): Promise<CaseRun[]> {
     await this.job(user, id);
     return (
@@ -336,12 +385,27 @@ export class EvalJobStore extends PostgresEvalStore {
   private async fenced(c: pg.PoolClient, run: CaseRun) {
     const row = (
       await c.query(
-        "SELECT r.state,j.cancel_requested,j.data AS job FROM personal_eval_case_runs r JOIN personal_eval_jobs j USING(user_id,job_id) WHERE r.user_id=$1 AND r.case_run_id=$2 AND r.lease_generation=$3 AND r.lease_owner=$4 AND r.lease_expires_at>now() AND r.state IN ('RUNNING','GRADING') FOR UPDATE OF r,j",
+        "SELECT r.state,r.result,j.cancel_requested,j.data AS job FROM personal_eval_case_runs r JOIN personal_eval_jobs j USING(user_id,job_id) WHERE r.user_id=$1 AND r.case_run_id=$2 AND r.lease_generation=$3 AND r.lease_owner=$4 AND r.lease_expires_at>now() AND r.state IN ('RUNNING','GRADING') FOR UPDATE OF r,j",
         [run.userId, run.caseRunId, run.generation, run.leaseOwner],
       )
     ).rows[0];
     if (!row) throw new Fault(409, "EVAL_LEASE_LOST");
-    return row as { state: string; cancel_requested: boolean; job: EvalJob };
+    return row as {
+      state: string;
+      result?: CaseResult;
+      cancel_requested: boolean;
+      job: EvalJob;
+    };
+  }
+  async toolEvent(run: CaseRun, type: string, data: Record<string, unknown>) {
+    await this.transaction(async (c) => {
+      await this.userLock(c, run.userId);
+      await this.fenced(c, run);
+      await this.event(c, run.userId, run.jobId, type, {
+        caseRunId: run.caseRunId,
+        ...data,
+      });
+    });
   }
   async heartbeat(run: CaseRun) {
     return this.transaction(async (c) => {
@@ -354,13 +418,13 @@ export class EvalJobStore extends PostgresEvalStore {
       );
     });
   }
-  async grading(run: CaseRun) {
+  async grading(run: CaseRun, result: CaseResult) {
     await this.transaction(async (c) => {
       await this.userLock(c, run.userId);
       await this.fenced(c, run);
       await c.query(
-        "UPDATE personal_eval_case_runs SET state='GRADING' WHERE user_id=$1 AND case_run_id=$2",
-        [run.userId, run.caseRunId],
+        "UPDATE personal_eval_case_runs SET state='GRADING',result=$3 WHERE user_id=$1 AND case_run_id=$2",
+        [run.userId, run.caseRunId, JSON.stringify(result)],
       );
       await this.event(
         c,
@@ -428,6 +492,7 @@ export class EvalJobStore extends PostgresEvalStore {
     await this.transaction(async (c) => {
       await this.userLock(c, run.userId);
       const row = await this.fenced(c, run);
+      result = { ...row.result, ...result };
       if (row.cancel_requested) {
         state = "CANCELLED";
         result = { ...result, errorCode: "EVAL_CANCELLED" };
@@ -487,7 +552,7 @@ export class EvalJobStore extends PostgresEvalStore {
         await this.userLock(c, r.user_id);
         const row = (
           await c.query(
-            "UPDATE personal_eval_case_runs SET state='EXECUTION_ERROR',result='{\"errorCode\":\"LEASE_LOST\"}',lease_owner=NULL,lease_generation=NULL,lease_expires_at=NULL WHERE user_id=$1 AND case_run_id=$2 AND lease_expires_at<=now() RETURNING job_id",
+            "UPDATE personal_eval_case_runs SET state=CASE WHEN state='GRADING' THEN 'GRADING_ERROR' ELSE 'EXECUTION_ERROR' END,result=COALESCE(result,'{}'::jsonb)||'{\"errorCode\":\"LEASE_LOST\"}'::jsonb,lease_owner=NULL,lease_generation=NULL,lease_expires_at=NULL WHERE user_id=$1 AND case_run_id=$2 AND lease_expires_at<=now() RETURNING job_id,state",
             [r.user_id, r.case_run_id],
           )
         ).rows[0];
@@ -499,6 +564,7 @@ export class EvalJobStore extends PostgresEvalStore {
           await this.event(c, r.user_id, row.job_id, "eval.case.failed", {
             caseRunId: r.case_run_id,
             errorCode: "LEASE_LOST",
+            state: row.state,
           });
           await this.finishJob(c, r.user_id, row.job_id);
         }
@@ -513,7 +579,7 @@ export class EvalJobStore extends PostgresEvalStore {
         const row = await this.fenced(c, run);
         if (row.cancel_requested) throw new Fault(409, "EVAL_CANCELLED");
         const job = row.job;
-        await this.access.authorize(job);
+        await this.access.authorize(job, undefined, true);
         if (
           Date.now() >
           Date.parse(job.startedAt!) +
@@ -547,7 +613,7 @@ export class EvalJobStore extends PostgresEvalStore {
           .filter(
             (r) =>
               (r as UsageRecord & { caseRunId?: string }).caseRunId ===
-              run.caseRunId,
+                run.caseRunId && r.id.startsWith(prefix),
           )
           .reduce((n, r) => n + r.tokens, 0);
         const maxOutput = Math.min(
@@ -563,7 +629,12 @@ export class EvalJobStore extends PostgresEvalStore {
             cacheWrite: 0,
             totalTokens: input + maxOutput,
           },
-          cost = micros(estimate, price);
+          // Input may be billed as uncached input, cache reads or cache writes.
+          // Reserve the worst input price without counting tokens repeatedly.
+          cost = Math.ceil(
+            input * Math.max(price.input, price.cacheRead, price.cacheWrite) +
+              maxOutput * price.output,
+          );
         if (cost > (hold.costMicros ?? 0))
           throw new Fault(429, "MODEL_COST_BUDGET_EXCEEDED");
         const record: UsageRecord & { caseRunId: string } = {
@@ -586,6 +657,22 @@ export class EvalJobStore extends PostgresEvalStore {
         };
         hold.tokens -= record.tokens;
         hold.costMicros = (hold.costMicros ?? 0) - cost;
+        // Holds can wait across daily/monthly boundaries. Recheck the ledger
+        // with the reduced hold so same-period transfers are counted once and
+        // requests made in a new period compete with normal Run usage there.
+        const periodRecords = (
+          await c.query(
+            "SELECT data FROM personal_usage_requests WHERE user_id=$1 AND at >= $2 AND id<>$3",
+            [run.userId, record.at.slice(0, 7), hold.id],
+          )
+        ).rows.map((r) => r.data as UsageRecord);
+        checkUsageCaps(
+          [...periodRecords, hold],
+          policyFromEnv(),
+          run.userId,
+          record.tokens,
+          record.costMicros,
+        );
         await this.saveUsage(c, run.userId, hold);
         await this.saveUsage(c, run.userId, record);
         return { id: record.id, maxOutputTokens: maxOutput };

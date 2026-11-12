@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { Fault } from "../domain/model.js";
 import type { Runtime } from "../execution/runtime.js";
-import { EvalExecutor } from "./executor.js";
+import { EvalExecutor, EvalExecutionError } from "./executor.js";
 import type { EvalJobStore } from "./job-store.js";
 import type { Judge } from "./worker.js";
 import { JUDGE_TEMPLATE_VERSION } from "./judge-template.js";
@@ -54,13 +54,13 @@ export class JudgeGateway {
       return error("EVAL_JUDGE_INPUT_LIMIT");
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
-        await this.store.access.authorize(job);
+        await this.store.access.authorize(job, undefined, true);
         const result = await new EvalExecutor(this.runtime).execute({
           config: snapshot.config,
           case: { ...run.case, inputs: prompt },
           mocks: {},
           signal,
-          authorize: () => this.store.access.authorize(job),
+          authorize: () => this.store.access.authorize(job, undefined, true),
           gateway: await this.store.access.gateway(snapshot),
           temperature: 0,
           budget: {
@@ -94,7 +94,8 @@ export class JudgeGateway {
         return error(
           signal.aborted
             ? "EVAL_JUDGE_TIMEOUT"
-            : e instanceof Fault && e.status === 429
+            : (e instanceof Fault || e instanceof EvalExecutionError) &&
+                e.status === 429
               ? "EVAL_JUDGE_BUDGET_EXCEEDED"
               : "EVAL_JUDGE_EXECUTION_FAILED",
         );

@@ -5,6 +5,7 @@ import { AgentConfig, Fault } from "../src/domain/model.js";
 import { EvalCase, GraderConfig } from "../src/evals/types.js";
 import { JobRequest, type CaseRun, type EvalJob } from "../src/evals/jobs.js";
 import { JudgeGateway } from "../src/evals/judge.js";
+import { aggregate } from "../src/evals/graders/registry.js";
 import type { EvalJobStore } from "../src/evals/job-store.js";
 import type { Runtime } from "../src/execution/runtime.js";
 const config = AgentConfig.parse({
@@ -59,6 +60,69 @@ const input = {
   trajectory: [],
   metrics: { tokens: 10, durationMs: 1 },
 };
+test("a Judge threshold or passed=false failure cannot be reversed by the case mean", async () => {
+  const previous = process.env.EVAL_JUDGE_ENABLED;
+  process.env.EVAL_JUDGE_ENABLED = "true";
+  try {
+    const store = {
+      access: { authorize: async () => {}, gateway: async () => undefined },
+    } as unknown as EvalJobStore;
+    for (const passed of [true, false]) {
+      const grader = GraderConfig.parse({
+        id: "j",
+        type: "llm_judge",
+        rubric: "quality",
+        threshold: passed ? 0.95 : 0.5,
+      });
+      const score = await new JudgeGateway(store, {
+        async execute(ctx) {
+          await ctx.emit("message.completed", {
+            message: {
+              role: "assistant",
+              stopReason: "stop",
+              content: JSON.stringify({
+                score: 0.9,
+                passed,
+                reason: "test",
+                evidence: [],
+              }),
+            },
+          });
+        },
+      }).grade(run, job, input, grader, new AbortController().signal);
+      assert.equal(score.status, "FAILED");
+      const result = aggregate([score], [grader], 0.5);
+      assert.equal(result.score, 0.9);
+      assert.equal(result.state, "FAILED_ASSERTION");
+      // Explicit observation-only graders retain their numeric evidence without vetoing quality.
+      const observed = { ...grader, weight: 0 };
+      const native = GraderConfig.parse({
+        id: "native",
+        type: "exact",
+        expected: "ok",
+      });
+      assert.equal(
+        aggregate(
+          [
+            score,
+            {
+              graderId: "native",
+              graderVersion: "3",
+              status: "PASSED",
+              pass: true,
+              score: 1,
+            },
+          ],
+          [observed, native],
+        ).state,
+        "PASSED",
+      );
+    }
+  } finally {
+    if (previous === undefined) delete process.env.EVAL_JUDGE_ENABLED;
+    else process.env.EVAL_JUDGE_ENABLED = previous;
+  }
+});
 test("eval Judge schema validation retries only judge once and preserves independent budget and version", async () => {
   const before = process.env.EVAL_JUDGE_ENABLED;
   process.env.EVAL_JUDGE_ENABLED = "true";

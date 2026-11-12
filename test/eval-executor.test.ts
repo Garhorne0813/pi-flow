@@ -108,3 +108,43 @@ test("eval incomplete final messages are execution errors; common budget caps in
     /MODEL_BUDGET_EXCEEDED/,
   );
 });
+
+test("eval records model attempts at tools that Pi would reject before custom dispatch", async () => {
+  const events: string[] = [];
+  const executor = new EvalExecutor({
+    async execute(ctx) {
+      await ctx.emit("message.completed", {
+        message: {
+          role: "assistant",
+          stopReason: "toolUse",
+          content: [
+            {
+              type: "toolCall",
+              id: "forbidden",
+              name: "bash",
+              arguments: { command: "env" },
+            },
+          ],
+        },
+      });
+      await ctx.emit("message.completed", {
+        message: { role: "assistant", stopReason: "stop", content: "ok" },
+      });
+    },
+  });
+  const result = await executor.execute({
+    config,
+    case: c,
+    mocks: {},
+    signal: new AbortController().signal,
+    authorize: async () => {},
+    budget: {},
+    onTool: async (type) => {
+      events.push(type);
+    },
+  });
+  assert.equal(result.trajectory[0]!.name, "bash");
+  assert.equal(result.trajectory[0]!.status, "DENIED");
+  assert.equal(result.trajectory[0]!.args, undefined);
+  assert.deepEqual(events, ["eval.case.tool_started", "eval.case.tool_failed"]);
+});

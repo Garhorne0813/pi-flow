@@ -35,6 +35,9 @@ services:
       PORT: 8080
       DEV_TOKEN: ${DEV_TOKEN:?Set a demo token with at least 16 characters}
       DATABASE_URL: postgres://harness:local-demo-only@postgres:5432/harness
+      EVALS_ENABLED: ${EVALS_ENABLED:-false}
+      EVAL_MAX_CASES_PER_JOB: ${EVAL_MAX_CASES_PER_JOB:-100}
+      EVAL_MAX_REPEATS: ${EVAL_MAX_REPEATS:-3}
     ports: ["127.0.0.1:8080:8080"]
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/health/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
@@ -45,5 +48,20 @@ services:
     stop_grace_period: 30s
     depends_on:
       postgres: {condition: service_healthy}
+  eval-worker:
+    profiles: ["evals"]
+    build: .
+    command: ["node", "dist/eval-worker-main.js"]
+    environment:
+      HARNESS_MODE: demo
+      DATABASE_URL: postgres://harness:local-demo-only@postgres:5432/harness
+      EVALS_ENABLED: "true"
+      EVAL_WORKER_ENABLED: "true"
+      EVAL_MAX_CASES_PER_JOB: ${EVAL_MAX_CASES_PER_JOB:-100}
+      EVAL_MAX_REPEATS: ${EVAL_MAX_REPEATS:-3}
+    stop_grace_period: 30s
+    depends_on:
+      api: {condition: service_healthy}
+
 volumes:
   harness-db:

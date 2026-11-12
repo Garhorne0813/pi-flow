@@ -30,14 +30,16 @@
     "config:import": "tsx src/config/cli.ts",
     "config:import:prod": "node dist/config/cli.js",
     "smoke:compose": "node scripts/smoke-compose.mjs",
-    "eval-worker": "node dist/eval-worker-main.js"
+    "eval-worker": "node dist/eval-worker-main.js",
+    "smoke:eval": "node scripts/smoke-eval.mjs",
+    "smoke:eval:deepseek": "node scripts/smoke-eval-deepseek.mjs"
   },
   "dependencies": {
     "@cubesandbox/sdk": "file:vendor/cubesandbox-sdk-0.3.0.tgz",
     "@earendil-works/pi-coding-agent": "file:vendor/pi-coding-agent-0.99.2-harness-security.tgz",
     "@fastify/multipart": "10.1.3",
     "@modelcontextprotocol/sdk": "1.32.1",
-    "ajv": "^8.17.1",
+    "ajv": "8.20.0",
     "ali-oss": "6.23.0",
     "cron-parser": "5.4.0",
     "e2b": "2.31.0",

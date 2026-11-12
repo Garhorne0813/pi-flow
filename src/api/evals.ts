@@ -1,3 +1,5 @@
+import { randomBytes } from "node:crypto";
+import { evaluationsHTML } from "../admin-ui/evaluations.js";
 import { registerEvalJobRoutes } from "./eval-jobs.js";
 import { z } from "zod";
 import type { FastifyInstance } from "fastify";
@@ -9,6 +11,24 @@ export function registerEvalRoutes(
   actor: (req: object) => Actor,
   service: EvalService,
 ) {
+  app.get("/evals/ui", async (_req, reply) => {
+    const nonce = randomBytes(16).toString("base64");
+    return reply
+      .header("Cache-Control", "no-store")
+      .header("X-Content-Type-Options", "nosniff")
+      .header("Referrer-Policy", "no-referrer")
+      .header(
+        "Content-Security-Policy",
+        `default-src 'none'; script-src 'nonce-${nonce}'; style-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`,
+      )
+      .type("text/html; charset=utf-8")
+      .send(
+        evaluationsHTML().replace(
+          '<script type="module">',
+          '<script type="module" nonce="' + nonce + '">',
+        ),
+      );
+  });
   registerEvalJobRoutes(app, actor, service);
   const root = "/api/v1/evals";
   app.get(root + "/suites", async (req) => {

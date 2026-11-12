@@ -84,7 +84,8 @@ export class MemoryEvalStore implements EvalStore {
     return structuredClone(meta);
   }
   async versions(user: string, id: string, p: Page) {
-    await this.getSuite(user, id);
+    if (!this.suites.has(this.key(user, id)))
+      throw new Fault(404, "EVAL_SUITE_NOT_FOUND");
     return structuredClone(
       [...this.snapshots.entries()]
         .filter(([k]) => {

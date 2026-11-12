@@ -90,6 +90,7 @@ export const EvalCase = z
     graders: z.array(GraderConfig).min(1).max(32),
     tags: z.array(z.string().max(64)).max(32).default([]),
     weight: z.number().finite().min(0).max(100).default(1),
+    passThreshold: z.number().finite().min(0).max(1).default(0.5),
     timeoutMs: z.number().int().min(100).max(120000).default(60000),
   })
   .strict()
@@ -113,7 +114,12 @@ export interface EvalInput {
   output: unknown;
   reference?: unknown;
   trajectory: ToolCallRecord[];
-  metrics: { durationMs: number; tokens: number; costEstimate?: number };
+  metrics: {
+    durationMs: number;
+    tokens: number;
+    costEstimate?: number;
+    usageConfirmed?: boolean;
+  };
 }
 export const EvalScore = z
   .object({

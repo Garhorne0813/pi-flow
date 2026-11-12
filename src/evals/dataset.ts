@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import { EvalCase } from "./types.js";
+import { Fault } from "../domain/model.js";
+import { compileEvalSchema } from "./graders/schema.js";
 export function canonical(value: unknown): string {
   if (value === null || typeof value !== "object")
     return JSON.stringify(value) ?? "undefined";
@@ -33,5 +35,14 @@ export const CaseList = z
 export function freezeDataset(input: unknown) {
   const cases = CaseList.parse(input);
   if (!cases.length) throw new Error("EMPTY_SUITE");
+  for (const item of cases)
+    for (const grader of item.graders)
+      if (grader.type === "json_schema") {
+        try {
+          compileEvalSchema(grader.schema);
+        } catch {
+          throw new Fault(400, "EVAL_INVALID_GRADER_SCHEMA");
+        }
+      }
   return { cases: structuredClone(cases), specDigest: digest(cases) };
 }

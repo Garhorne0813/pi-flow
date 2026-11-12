@@ -1,0 +1,127 @@
+{
+  "provider": "deepseek",
+  "model": "deepseek-flash",
+  "reasoningEffort": "high",
+  "status": "passed",
+  "checks": {
+    "authenticatedModel": true,
+    "cancellation": true,
+    "readonlyRejected": true,
+    "idempotency": true,
+    "frozenReasoningAndSecretBoundary": true,
+    "realAgentAndJudge": true,
+    "confirmedSeparateUsage": true,
+    "comparison": true,
+    "sseAndToolTrace": true,
+    "crossUserIsolation": true,
+    "budgetBeforeRemoteCall": true,
+    "liveAgentRevocation": true,
+    "noProductionSessionsOrRuns": true
+  },
+  "scope": "real model and Judge; PostgreSQL, HTTP/SSE, dedicated Eval Worker; fixed mock tools, no real Sandbox",
+  "startedAt": "2026-11-11T10:37:12.337Z",
+  "jobState": "COMPLETED",
+  "cases": [
+    {
+      "caseId": "judge",
+      "state": "PASSED",
+      "output": "Agent 评测必须在隔离的工作区中进行，因为一旦让被测 Agent 直接接触生产环境，它就可能在运行中写入、覆盖或删除真实业务文件，造成文件污染；也可能读到环境里配置的密钥、令牌等凭据，造成凭据泄露。",
+      "scores": [
+        {
+          "pass": true,
+          "score": 1,
+          "reason": "回答用一句中文清楚说明了隔离生产工作区的两个理由：一是防止被测 Agent 写入、覆盖或删除真实业务文件造成文件污染，二是防止其读到密钥、令牌等生产凭据造成凭据泄露。两项风险均明确覆盖，符合满分标准。",
+          "status": "PASSED",
+          "graderId": "quality",
+          "metadata": {
+            "attempts": 1,
+            "evidence": [
+              "它就可能在运行中写入、覆盖或删除真实业务文件，造成文件污染",
+              "也可能读到环境里配置的密钥、令牌等凭据，造成凭据泄露"
+            ],
+            "judgeVersion": "bcfba67a911b4eb215861530b29a752b0fdae203737e405b529a7a04509d5627"
+          },
+          "graderVersion": "fc3946451b8f1d021aded85f45bb2b82eab04473dd446a8014a24d3b49443abb"
+        }
+      ],
+      "trace": []
+    },
+    {
+      "caseId": "exact",
+      "state": "PASSED",
+      "output": "42",
+      "scores": [
+        {
+          "pass": true,
+          "score": 1,
+          "status": "PASSED",
+          "graderId": "exact",
+          "graderVersion": "1"
+        }
+      ],
+      "trace": []
+    },
+    {
+      "caseId": "mock-read",
+      "state": "PASSED",
+      "output": "eval-marker-05aaf25da8294640",
+      "scores": [
+        {
+          "pass": true,
+          "score": 1,
+          "status": "PASSED",
+          "graderId": "output",
+          "graderVersion": "1"
+        },
+        {
+          "pass": true,
+          "score": 1,
+          "status": "PASSED",
+          "graderId": "read",
+          "graderVersion": "1"
+        },
+        {
+          "pass": true,
+          "score": 1,
+          "status": "PASSED",
+          "graderId": "order",
+          "graderVersion": "1"
+        },
+        {
+          "pass": true,
+          "score": 1,
+          "status": "PASSED",
+          "graderId": "no-shell",
+          "graderVersion": "1"
+        }
+      ],
+      "trace": [
+        {
+          "name": "read",
+          "callId": "call_00_ET_o3xWsKEjdELgHnRZJfP26179",
+          "sequence": 1,
+          "status": "COMPLETED"
+        }
+      ]
+    }
+  ],
+  "target": {
+    "requests": 4,
+    "tokens": 1308,
+    "costEstimateUsd": 0.00048,
+    "estimated": false,
+    "unknownRequests": 0,
+    "durationP50Ms": 820,
+    "durationP95Ms": 1957
+  },
+  "judge": {
+    "requests": 1,
+    "tokens": 485,
+    "costEstimateUsd": 0.00026,
+    "estimated": false,
+    "unknownRequests": 0,
+    "durationP50Ms": 1653,
+    "durationP95Ms": 1653
+  },
+  "finishedAt": "2026-11-11T10:37:25.589Z"
+}

@@ -23,6 +23,7 @@ CREATE TABLE IF NOT EXISTS personal_eval_jobs (
  FOREIGN KEY(user_id,suite_id,suite_version) REFERENCES personal_eval_suite_versions(user_id,suite_id,version)
 );
 CREATE INDEX IF NOT EXISTS personal_eval_jobs_history ON personal_eval_jobs(user_id,created_at DESC,job_id);
+CREATE INDEX IF NOT EXISTS personal_eval_jobs_agent_history ON personal_eval_jobs(user_id,agent_id,created_at DESC,job_id);
 CREATE TABLE IF NOT EXISTS personal_eval_case_runs (
  user_id text NOT NULL, case_run_id uuid NOT NULL, job_id uuid NOT NULL, case_id text NOT NULL, repeat_index integer NOT NULL CHECK(repeat_index>=0),
  state text NOT NULL CHECK(state IN ('QUEUED','RUNNING','GRADING','PASSED','FAILED_ASSERTION','EXECUTION_ERROR','GRADING_ERROR','CANCELLED')),

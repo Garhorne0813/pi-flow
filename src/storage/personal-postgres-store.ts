@@ -378,7 +378,10 @@ export class PersonalPostgresStore implements Store {
       EXISTS(SELECT 1 FROM pg_index WHERE indexrelid=to_regclass('personal_tool_failures') AND indrelid=to_regclass('personal_run_events') AND indisvalid AND indisready) AS tool_failures,
       EXISTS(SELECT 1 FROM pg_index WHERE indexrelid=to_regclass('personal_eval_case_runs_claim') AND indrelid=to_regclass('personal_eval_case_runs') AND indisvalid AND indisready) AS eval_claim,
       EXISTS(SELECT 1 FROM pg_index WHERE indexrelid=to_regclass('personal_eval_case_runs_expired') AND indrelid=to_regclass('personal_eval_case_runs') AND indisvalid AND indisready) AS eval_expired,
-      EXISTS(SELECT 1 FROM pg_index WHERE indexrelid=to_regclass('personal_eval_jobs_history') AND indrelid=to_regclass('personal_eval_jobs') AND indisvalid AND indisready) AS eval_history`);
+      EXISTS(SELECT 1 FROM pg_index WHERE indexrelid=to_regclass('personal_eval_jobs_history') AND indrelid=to_regclass('personal_eval_jobs') AND indisvalid AND indisready) AS eval_history,
+      EXISTS(SELECT 1 FROM pg_index WHERE indexrelid=to_regclass('personal_eval_jobs_agent_history') AND indrelid=to_regclass('personal_eval_jobs') AND indisvalid AND indisready) AS eval_agent_history,
+      EXISTS(SELECT 1 FROM pg_index WHERE indexrelid=to_regclass('personal_eval_case_runs_job') AND indrelid=to_regclass('personal_eval_case_runs') AND indisvalid AND indisready) AS eval_job_cases,
+      EXISTS(SELECT 1 FROM pg_index WHERE indexrelid=to_regclass('personal_eval_user_running') AND indrelid=to_regclass('personal_eval_case_runs') AND indisvalid AND indisready) AS eval_user_running`);
     if (Object.values(indexes.rows[0]).some((v) => v !== true))
       throw new Error("SCHEMA_INDEXES_INCOMPLETE");
     const triggers = await this.healthPool
