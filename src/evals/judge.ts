@@ -54,13 +54,13 @@ export class JudgeGateway {
       return error("EVAL_JUDGE_INPUT_LIMIT");
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
-        await this.store.access.authorize(job);
+        await this.store.access.authorize(job, undefined, true);
         const result = await new EvalExecutor(this.runtime).execute({
           config: snapshot.config,
           case: { ...run.case, inputs: prompt },
           mocks: {},
           signal,
-          authorize: () => this.store.access.authorize(job),
+          authorize: () => this.store.access.authorize(job, undefined, true),
           gateway: await this.store.access.gateway(snapshot),
           temperature: 0,
           budget: {

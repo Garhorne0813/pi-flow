@@ -200,6 +200,7 @@ test(
           .waitFor();
         assert.equal(created.agentId, "assistant-tail");
         assert.equal(created.suiteVersion, 1);
+        assert.equal(created.limits.maxModelCalls, 100);
         await page.locator("#baseline").fill(oldId);
         await page.locator("#job-next").click();
         await page.waitForFunction(
@@ -346,5 +347,170 @@ test(
         assert.ok(requests > stopped);
       },
     );
+  },
+);
+
+for (const resource of ["suites", "jobs"])
+  test(
+    "Studio discards previous-account " +
+      resource +
+      " responses after reconnect",
+    { skip: !browserPath },
+    async () => {
+      const entered = deferred(),
+        release = deferred();
+      try {
+        await studio(
+          async (url, request) => {
+            const account =
+              request.headers().authorization === "Bearer A" ? "A" : "B";
+            if (
+              url.pathname === "/api/v1/evals/" + resource &&
+              account === "A"
+            ) {
+              entered.resolve();
+              await release.promise;
+            }
+            if (url.pathname === "/api/v1/evals/suites")
+              return {
+                body: [
+                  {
+                    id: account === "A" ? suiteId : newId,
+                    name: account + "-private-suite",
+                  },
+                ],
+              };
+            if (url.pathname === "/api/v1/evals/jobs")
+              return {
+                body: [
+                  {
+                    ...job(account === "A" ? oldId : newId),
+                    request: { agentId: account + "-private-agent" },
+                  },
+                ],
+              };
+            return undefined;
+          },
+          async (page) => {
+            await page.locator("#token").fill("A");
+            await page.locator("#connect").click();
+            await entered.promise;
+            await page.locator("#token").fill("B");
+            await page.locator("#connect").click();
+            await page
+              .locator("#status")
+              .filter({ hasText: "已连接" })
+              .waitFor();
+            const response = page.waitForResponse(
+              (r) =>
+                r.request().headers().authorization === "Bearer A" &&
+                new URL(r.url()).pathname === "/api/v1/evals/" + resource,
+            );
+            release.resolve();
+            await response;
+            await page.evaluate(
+              () =>
+                new Promise<void>((r) =>
+                  requestAnimationFrame(() => requestAnimationFrame(() => r())),
+                ),
+            );
+            assert.match(
+              await page.locator("#suite").innerText(),
+              /B-private-suite/,
+            );
+            assert.doesNotMatch(
+              await page.locator("#suite").innerText(),
+              /A-private/,
+            );
+            assert.match(
+              await page.locator("#job").innerText(),
+              /B-private-agent/,
+            );
+            assert.doesNotMatch(
+              await page.locator("#job").innerText(),
+              /A-private/,
+            );
+            assert.match(await page.locator("#status").innerText(), /已连接/);
+          },
+        );
+      } finally {
+        release.resolve();
+      }
+    },
+  );
+
+test(
+  "Studio coalesces double-start and reuses its idempotency key after an ambiguous failure",
+  { skip: !browserPath },
+  async () => {
+    const entered = deferred(),
+      release = deferred();
+    const requests: { key: string; body: any }[] = [];
+    try {
+      await studio(
+        async (url, request) => {
+          if (
+            url.pathname !== "/api/v1/evals/jobs" ||
+            request.method() !== "POST"
+          )
+            return undefined;
+          requests.push({
+            key: request.headers()["idempotency-key"]!,
+            body: request.postDataJSON(),
+          });
+          if (requests.length === 1) {
+            entered.resolve();
+            await release.promise;
+            return { status: 503, body: { error: { code: "TEST_503" } } };
+          }
+          return undefined;
+        },
+        async (page) => {
+          await connect(page);
+          await page.locator("#suite").selectOption(suiteId);
+          await page
+            .locator("#version option")
+            .first()
+            .waitFor({ state: "attached" });
+          await page.locator("#model-calls").fill("0");
+          await page.locator("#start").click();
+          await page
+            .locator("#status")
+            .filter({ hasText: "1 至 100" })
+            .waitFor();
+          assert.equal(requests.length, 0);
+          await page.locator("#model-calls").fill("31");
+          await page.locator("#start").evaluate((el) => {
+            (el as HTMLButtonElement).click();
+            (el as HTMLButtonElement).click();
+          });
+          await entered.promise;
+          assert.equal(requests.length, 1);
+          assert.equal(await page.locator("#start").isDisabled(), true);
+          release.resolve();
+          await page
+            .locator("#status")
+            .filter({ hasText: "TEST_503" })
+            .waitFor();
+          await page.locator("#start").click();
+          await page
+            .locator("#status")
+            .filter({ hasText: "评测已排队" })
+            .waitFor();
+          assert.equal(requests.length, 2);
+          assert.equal(requests[0]!.key, requests[1]!.key);
+          assert.equal(requests[1]!.body.limits.maxModelCalls, 31);
+          await page.locator("#start").click();
+          await page.waitForFunction(
+            () =>
+              !(document.getElementById("start") as HTMLButtonElement).disabled,
+          );
+          assert.equal(requests.length, 3);
+          assert.notEqual(requests[2]!.key, requests[1]!.key);
+        },
+      );
+    } finally {
+      release.resolve();
+    }
   },
 );

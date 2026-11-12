@@ -113,7 +113,6 @@ export class EvalJobStore extends PostgresEvalStore {
           await this.access.authorize(job);
           return job;
         }
-        const snapshot = await this.access.snapshot(a, request.agentId);
         const version = (
           await c.query(
             "SELECT v.data FROM personal_eval_suite_versions v JOIN personal_eval_suites s USING(user_id,suite_id) WHERE v.user_id=$1 AND v.suite_id=$2 AND v.version=$3 AND NOT s.deleted",
@@ -133,12 +132,15 @@ export class EvalJobStore extends PostgresEvalStore {
           cases.length * request.repeat > caseCap
         )
           throw new Fault(400, "EVAL_CASE_LIMIT");
-        if (
-          cases.some((item) =>
-            item.graders.some((g: { type: string }) => g.type === "llm_judge"),
-          ) &&
-          (!snapshot.judge || request.limits.maxJudgeCalls < 1)
-        )
+        const needsJudge = cases.some((item) =>
+          item.graders.some((g: { type: string }) => g.type === "llm_judge"),
+        );
+        const snapshot = await this.access.snapshot(
+          a,
+          request.agentId,
+          needsJudge,
+        );
+        if (needsJudge && (!snapshot.judge || request.limits.maxJudgeCalls < 1))
           throw new Fault(400, "EVAL_JUDGE_NOT_CONFIGURED");
         const jobId = randomUUID(),
           now = new Date().toISOString();
@@ -265,6 +267,25 @@ export class EvalJobStore extends PostgresEvalStore {
       await this.pool.query(
         "SELECT data||jsonb_build_object('state',state,'cancelRequested',cancel_requested) AS data FROM personal_eval_jobs WHERE user_id=$1 ORDER BY created_at DESC,job_id LIMIT $2 OFFSET $3",
         [user, p.limit, p.offset],
+      )
+    ).rows.map((r) => r.data as EvalJob);
+  }
+  async visibleJobs(a: Actor, p: Page) {
+    const scope = await this.access.scope(a);
+    if (!scope.agentIds.length || (!scope.demo && !scope.models.length)) return [];
+    const approved = (path: string) =>
+      `(($6 AND data #>> '{snapshot,${path}gatewayRef}' IS NULL) OR $5::jsonb @> jsonb_build_array(jsonb_build_object('provider',data #>> '{snapshot,${path}config,model,provider}','modelId',data #>> '{snapshot,${path}config,model,modelId}')))`;
+    return (
+      await this.pool.query(
+        `SELECT data||jsonb_build_object('state',state,'cancelRequested',cancel_requested) AS data FROM personal_eval_jobs WHERE user_id=$1 AND agent_id=ANY($4::text[]) AND ${approved("")} AND (data #> '{snapshot,judge}' IS NULL OR data #> '{snapshot,judge}'='null'::jsonb OR ${approved("judge,")}) ORDER BY created_at DESC,job_id LIMIT $2 OFFSET $3`,
+        [
+          a.userId,
+          p.limit,
+          p.offset,
+          scope.agentIds,
+          JSON.stringify(scope.models),
+          scope.demo,
+        ],
       )
     ).rows.map((r) => r.data as EvalJob);
   }
@@ -535,7 +556,7 @@ export class EvalJobStore extends PostgresEvalStore {
         const row = await this.fenced(c, run);
         if (row.cancel_requested) throw new Fault(409, "EVAL_CANCELLED");
         const job = row.job;
-        await this.access.authorize(job);
+        await this.access.authorize(job, undefined, true);
         if (
           Date.now() >
           Date.parse(job.startedAt!) +

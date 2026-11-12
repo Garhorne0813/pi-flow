@@ -47,7 +47,7 @@ export class EvalWorker {
       if (checking) return;
       checking = true;
       void this.store.access
-        .authorize(job)
+        .authorize(job, undefined, true)
         .then(() => this.store.heartbeat(run))
         .catch((e) => revoked.abort(e))
         .finally(() => {
@@ -65,7 +65,7 @@ export class EvalWorker {
         signal,
         authorize: async (tool) => {
           signal.throwIfAborted();
-          await this.store.access.authorize(job, tool);
+          await this.store.access.authorize(job, tool, true);
           await this.store.heartbeat(run);
         },
         gateway: await this.store.access.gateway(job.snapshot),

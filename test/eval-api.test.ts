@@ -56,7 +56,7 @@ test(
           expected ? [expected] : [],
         );
       }
-      f.jobs.access.authorize = async () => {
+      f.jobs.access.scope = async () => {
         throw Error("storage unavailable");
       };
       assert.equal(

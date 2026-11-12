@@ -14,6 +14,124 @@ import { EvalExecutor } from "../src/evals/executor.js";
 import { jobsFixture } from "./eval-job-fixture.js";
 
 test(
+  "native-only jobs ignore broken or configured global Judge settings and reserve no Judge cost",
+  { skip: !databaseUrl },
+  async () => {
+    const f = await jobsFixture();
+    const saved = Object.fromEntries(
+      ["EVAL_JUDGE_ENABLED", "EVAL_JUDGE_MODEL", "USAGE_POLICY_JSON"].map(
+        (k) => [k, process.env[k]],
+      ),
+    );
+    try {
+      process.env.EVAL_JUDGE_ENABLED = "true";
+      process.env.EVAL_JUDGE_MODEL = "missing/model";
+      process.env.USAGE_POLICY_JSON = JSON.stringify({
+        userDailyCostMicros: 1,
+      });
+      const native = await f.jobs.create(
+        f.actor,
+        f.request,
+        "native-without-judge",
+      );
+      assert.equal(native.snapshot.judge, undefined);
+      await new EvalWorker(
+        f.jobs,
+        new EvalExecutor(new EvalDemoRuntime()),
+      ).tick();
+      assert.equal(
+        (await f.jobs.job(f.actor.userId, native.jobId)).state,
+        "COMPLETED",
+      );
+      await f.registry.tx((s) => {
+        s.modelCatalog = [
+          {
+            provider: "demo",
+            modelId: "judge",
+            gatewayRef: "judge-ref",
+            baseUrl: "https://example.com",
+            secretRef: "test",
+            default: false,
+          },
+        ];
+      });
+      process.env.EVAL_JUDGE_MODEL = "demo/judge";
+      const second = await f.jobs.create(
+        f.actor,
+        f.request,
+        "native-with-valid-judge",
+      );
+      assert.equal(second.snapshot.judge, undefined);
+      assert.equal(
+        (
+          await f.pool.query(
+            "SELECT sum((data->>'costMicros')::int)::int AS cost FROM personal_usage_requests",
+          )
+        ).rows[0].cost,
+        0,
+      );
+      const suite = await f.service.createSuite(f.actor, {
+        name: "judge",
+        cases: [
+          {
+            caseId: "j",
+            inputs: "hi",
+            graders: [{ id: "j", type: "llm_judge", rubric: "quality" }],
+          },
+        ],
+      });
+      await f.jobs.publish(f.actor.userId, suite.id, 1);
+      process.env.EVAL_JUDGE_MODEL = "missing/model";
+      await assert.rejects(
+        f.jobs.create(
+          f.actor,
+          { ...f.request, suiteId: suite.id, limits: { maxJudgeCalls: 1 } },
+          "needs-judge",
+        ),
+        /EVAL_JUDGE_MODEL_NOT_APPROVED/,
+      );
+    } finally {
+      for (const [k, v] of Object.entries(saved)) {
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
+      }
+      await f.close();
+    }
+  },
+);
+
+test(
+  "explicit target request limits allow the 31st call and reject calls past the chosen cap",
+  { skip: !databaseUrl },
+  async () => {
+    const f = await jobsFixture();
+    try {
+      await f.jobs.create(
+        f.actor,
+        { ...f.request, limits: { maxTokens: 10000, maxModelCalls: 31 } },
+        "calls-31",
+      );
+      const claim = (await f.jobs.claim("worker"))!;
+      for (let i = 0; i < 31; i++) {
+        const ticket = await f.jobs.reserve(claim.run, "target", 1);
+        await f.jobs.settle(
+          f.actor.userId,
+          ticket.id,
+          { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2 },
+          1,
+        );
+      }
+      await assert.rejects(
+        f.jobs.reserve(claim.run, "target", 1),
+        /EVAL_REQUEST_LIMIT/,
+      );
+    } finally {
+      await f.close();
+    }
+  },
+);
+
+test(
   "idempotent POST returns the same live cancellation projection as GET",
   { skip: !databaseUrl },
   async () => {
@@ -387,6 +505,69 @@ test(
       if (previous === undefined) delete process.env.USAGE_POLICY_JSON;
       else process.env.USAGE_POLICY_JSON = previous;
       await backing.close();
+      await f.close();
+    }
+  },
+);
+
+test(
+  "target and Judge gateway rotations reject new model budget tickets before charging",
+  { skip: !databaseUrl },
+  async () => {
+    const f = await jobsFixture();
+    try {
+      await f.registry.tx((s) => {
+        s.modelCatalog = [
+          {
+            provider: "demo",
+            modelId: "demo",
+            gatewayRef: "G1",
+            baseUrl: "https://example.com",
+            secretRef: "placeholder",
+            default: false,
+          },
+        ];
+      });
+      const j = await f.jobs.create(f.actor, f.request, "gateway-live");
+      const claim = (await f.jobs.claim("worker"))!;
+      await f.jobs.reserve(claim.run, "target", 1);
+      await f.registry.tx((s) => {
+        s.modelCatalog![0]!.gatewayRef = "G2";
+      });
+      await assert.rejects(
+        f.jobs.reserve(claim.run, "target", 1),
+        /EVAL_GATEWAY_REVOKED/,
+      );
+      const current = await f.jobs.job(f.actor.userId, j.jobId);
+      current.snapshot.judge = {
+        config: {
+          ...current.snapshot.config,
+          model: { provider: "demo", modelId: "judge" },
+        },
+        gatewayRef: "J1",
+        version: "frozen",
+      };
+      await f.pool.query(
+        "UPDATE personal_eval_jobs SET data=$3 WHERE user_id=$1 AND job_id=$2",
+        [f.actor.userId, j.jobId, JSON.stringify(current)],
+      );
+      await f.registry.tx((s) => {
+        s.modelCatalog![0]!.gatewayRef = "G1";
+        s.modelCatalog!.push({
+          provider: "demo",
+          modelId: "judge",
+          gatewayRef: "J2",
+          baseUrl: "https://example.com",
+          secretRef: "placeholder",
+          default: false,
+        });
+      });
+      await assert.rejects(
+        f.jobs.reserve(claim.run, "target", 1),
+        /EVAL_GATEWAY_REVOKED/,
+      );
+      assert.equal((await f.jobs.usage(f.actor.userId, j.jobId)).length, 1);
+    } finally {
       await f.close();
     }
   },

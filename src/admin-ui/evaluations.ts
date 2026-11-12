@@ -5,7 +5,7 @@ export function evaluationsHTML() {
 <div id="status" role="status" aria-live="polite">请连接账户以管理个人评测。</div>
 <section aria-labelledby="connection-title"><h2 id="connection-title">连接账户</h2><label>访问 Token<input id="token" type="password" autocomplete="off"></label><button id="connect" class="primary">连接</button><small>Token 仅保存在当前页面内存中。仅展示本人数据。</small></section>
 <section id="datasets"><h2>数据集 · 草稿与不可变版本</h2><div class="grid"><label>选择数据集<select id="suite"><option value="">新建数据集</option></select></label><label>名称<input id="name" maxlength="100" value="我的评测集"></label></div><label>描述<input id="description" maxlength="2000"></label><label>用例 JSON 数组<textarea id="cases" spellcheck="false">[{"caseId":"hello","inputs":"Hello","graders":[{"id":"answer","type":"contains","value":"Hello"}],"mocks":{}}]</textarea></label><small>单轮文本；最多 100 个用例，250KB。可配置 graders、reference、mocks、passThreshold、tags、timeoutMs。</small><div class="row"><button id="save" class="primary">保存草稿</button><button id="publish">发布版本</button><button id="new">新建数据集</button><button id="delete" class="danger">删除数据集</button><span id="revision"></span></div><label>已发布版本<select id="version"></select></label><div class="row"><button id="version-prev">上一页版本</button><button id="version-next">下一页版本</button><button id="show-version">查看冻结用例</button></div><pre id="version-detail" hidden></pre><div class="row"><button id="suite-prev">上一页数据集</button><button id="suite-next">下一页数据集</button></div></section>
-<section id="run"><h2>运行评测</h2><div class="grid"><label>目标 Agent<select id="agent"></select></label><label>执行 Profile<select id="profile"><option value="mocked">Mock 工具隔离</option></select></label><label>重复次数<input id="repeat" type="number" min="1" max="3" value="1"></label><label>Token 总上限<input id="tokens" type="number" min="100" max="1000000" value="20000"></label><label>成本上限（USD 估计）<input id="cost" type="number" min="0.001" max="10" step="0.001" value="1"></label><label>最长时间（秒）<input id="duration" type="number" min="1" max="900" value="900"></label><label>Judge 请求上限<input id="judge-calls" type="number" min="0" max="100" value="0"></label></div><p>允许：用例定义的 read / ls / grep / find Mock，且须符合 Agent 权限和实时工具策略。拒绝：生产文件、MCP、Bash、联网、写入、子 Agent、用户 Token。Judge 使用平台批准的模型配置。</p><div class="row"><button id="agent-prev">上一页 Agent</button><button id="agent-next">下一页 Agent</button></div><button id="start" class="primary">启动评测</button></section>
+<section id="run"><h2>运行评测</h2><div class="grid"><label>目标 Agent<select id="agent"></select></label><label>执行 Profile<select id="profile"><option value="mocked">Mock 工具隔离</option></select></label><label>重复次数<input id="repeat" type="number" min="1" max="3" value="1"></label><label>Token 总上限<input id="tokens" type="number" min="100" max="1000000" value="20000"></label><label>成本上限（USD 估计）<input id="cost" type="number" min="0.001" max="10" step="0.001" value="1"></label><label>最长时间（秒）<input id="duration" type="number" min="1" max="900" value="900"></label><label>目标模型请求上限<input id="model-calls" type="number" min="1" max="100" step="1" value="100"></label><label>Judge 请求上限<input id="judge-calls" type="number" min="0" max="100" value="0"></label></div><p>允许：用例定义的 read / ls / grep / find Mock，且须符合 Agent 权限和实时工具策略。拒绝：生产文件、MCP、Bash、联网、写入、子 Agent、用户 Token。Judge 使用平台批准的模型配置。</p><div class="row"><button id="agent-prev">上一页 Agent</button><button id="agent-next">下一页 Agent</button></div><button id="start" class="primary">启动评测</button></section>
 <section id="jobs"><h2>作业与逐用例报告</h2><div class="row"><button id="refresh">刷新作业</button><button id="cancel" class="danger">取消所选作业</button></div><label>选择作业<select id="job"></select></label><div id="metrics" class="grid" aria-live="polite"></div><details><summary>完整报告与用量</summary><pre id="report">暂无报告</pre></details><h3>用例详情</h3><label>选择用例<select id="case-run"></select></label><pre id="case-detail">输入、参考答案、最终回答、真实工具轨迹、评分及错误将在此显示。</pre><button id="case-prev">上一页用例</button><button id="case-next">下一页用例</button><div class="row"><button id="job-prev">上一页作业</button><button id="job-next">下一页作业</button></div></section>
 <section id="compare"><h2>基线对比</h2><div class="grid"><label>Baseline<input id="baseline" list="baseline-options" placeholder="选择或输入 Job ID"><datalist id="baseline-options"></datalist></label><label>Candidate<input id="candidate" list="candidate-options" placeholder="选择或输入 Job ID"><datalist id="candidate-options"></datalist></label></div><button id="compare-button" class="primary">比较与回归 Gate</button><pre id="comparison">选择相同 Suite 版本的作业进行配对比较。</pre></section>
 </main><footer>Pi-Flow 原生评测 · Mock 隔离 · 估计用量不等于供应商账单</footer><script type="module">
@@ -14,16 +14,18 @@ let token = '', draft = null, suiteOffset = 0, jobOffset = 0, caseOffset = 0;
 let agentOffset = 0, versionOffset = 0, caseRows = [], monitor = false, accountGeneration = 0, pollingFailed = false;
 const status = text => { $('status').textContent = text; };
 const show = (id, data) => { $(id).textContent = JSON.stringify(data, null, 2); };
+function staleAccount() { const error = new Error('账户已切换'); error.staleAccount = true; return error; }
+function handleError(error) { if (!error.staleAccount) status(error.message); }
 async function api(path, body, method = body === undefined ? 'GET' : 'POST', headers = {}) {
   if (!token) throw Error('请先连接账户');
-  const r = await fetch('/api/v1' + path, { method, headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json', ...headers }, body: body === undefined ? undefined : JSON.stringify(body) });
-  if (!r.ok) {
-    const data = await r.json().catch(() => ({}));
-    const error = new Error(data.error?.code || String(r.status));
-    error.status = r.status;
-    throw error;
-  }
-  return r.status === 204 ? undefined : r.json();
+  const generation = accountGeneration, credential = token;
+  try {
+    const r = await fetch('/api/v1' + path, { method, headers: { Authorization: 'Bearer ' + credential, 'Content-Type': 'application/json', ...headers }, body: body === undefined ? undefined : JSON.stringify(body) });
+    const data = r.status === 204 ? undefined : await r.json();
+    if (generation !== accountGeneration) throw staleAccount();
+    if (!r.ok) { const error = new Error(data.error?.code || String(r.status)); error.status = r.status; throw error; }
+    return data;
+  } catch (error) { if (generation !== accountGeneration) throw staleAccount(); throw error; }
 }
 function options(id, rows, label, empty) {
   const select = $(id), old = select.value;
@@ -35,8 +37,8 @@ function options(id, rows, label, empty) {
   }
   if ([...select.options].some(o => o.value === old)) select.value = old;
 }
-function action(id, fn) { $(id).addEventListener('click', () => Promise.resolve().then(fn).catch(e => status(e.message))); }
-async function suites() { options('suite', await api('/evals/suites?limit=50&offset=' + suiteOffset), s => s.name, '新建数据集'); }
+function action(id, fn) { $(id).addEventListener('click', () => Promise.resolve().then(fn).catch(handleError)); }
+async function suites() { const offset = suiteOffset, generation = accountGeneration; const rows = await api('/evals/suites?limit=50&offset=' + offset); if (generation !== accountGeneration || offset !== suiteOffset) return; options('suite', rows, s => s.name, '新建数据集'); }
 async function agents() {
   const offset = agentOffset, generation = accountGeneration;
   const data = await api('/agents?limit=50&offset=' + offset);
@@ -75,7 +77,9 @@ async function loadSuite() {
   } finally { if (generation === suiteLoad) for (const control of controls) $(control).disabled = false; }
 }
 async function jobs() {
-  const rows = await api('/evals/jobs?limit=50&offset=' + jobOffset);
+  const offset = jobOffset, generation = accountGeneration;
+  const rows = await api('/evals/jobs?limit=50&offset=' + offset);
+  if (generation !== accountGeneration || offset !== jobOffset) return;
   const label = j => j.state + ' · ' + j.request.agentId + ' · ' + j.jobId;
   options('job', rows, label);
   // Inputs keep a selection across pages and also accept a known historical Job ID.
@@ -117,15 +121,17 @@ async function loadDetails(generation, key) {
   } catch (error) { if (generation === detailGeneration && key === currentDetailKey()) throw error; }
 }
 function caseDetail() { const r = caseRows.find(r => r.caseRunId === $('case-run').value); if (r) show('case-detail', r); }
+let startPendingGeneration, startAttempt;
 action('connect', async () => {
-  monitor = false; ++accountGeneration; ++suiteLoad; ++detailGeneration; draft = null;
-  token = $('token').value; $('token').value = '';
+  monitor = false; const generation = ++accountGeneration; ++suiteLoad; ++detailGeneration; draft = null;
+  token = $('token').value; $('token').value = ''; startPendingGeneration = undefined; startAttempt = undefined; $('start').disabled = false;
+  for (const id of ['agent','job','baseline-options','candidate-options']) options(id, [], () => '');
   suiteOffset = jobOffset = caseOffset = agentOffset = versionOffset = 0;
   $('baseline').value = $('candidate').value = ''; $('comparison').textContent = '选择相同 Suite 版本的作业进行配对比较。';
   options('suite', [], () => '', '新建数据集'); clearDetails(); await loadSuite();
-  await agents(); await suites(); await jobs(); await details(); monitor = true; status('已连接 · 仅本人数据');
+  await agents(); if (generation !== accountGeneration) return; await suites(); if (generation !== accountGeneration) return; await jobs(); if (generation !== accountGeneration) return; await details(); if (generation !== accountGeneration) return; monitor = true; status('已连接 · 仅本人数据');
 });
-$('suite').addEventListener('change', () => loadSuite().catch(e => status(e.message)));
+$('suite').addEventListener('change', () => loadSuite().catch(handleError));
 action('new', async () => { $('suite').value = ''; await loadSuite(); });
 action('save', async () => {
   const body = { name: $('name').value, description: $('description').value, cases: JSON.parse($('cases').value) };
@@ -143,12 +149,25 @@ action('show-version', async () => {
   show('version-detail', data); $('version-detail').hidden = false;
 });
 action('start', async () => {
+  const generation = accountGeneration;
+  if (startPendingGeneration === generation) return;
   if (!draft || !$('version').value) throw Error('请先选择已发布版本');
-  const j = await api('/evals/jobs', { suiteId: draft.id, suiteVersion: Number($('version').value), agentId: $('agent').value, repeat: Number($('repeat').value), executionProfile: 'mocked', limits: { maxTokens: Number($('tokens').value), maxDurationSeconds: Number($('duration').value), maxCostEstimateUsd: Number($('cost').value), maxJudgeCalls: Number($('judge-calls').value) } }, 'POST', { 'Idempotency-Key': crypto.randomUUID() });
-  jobOffset = 0; await jobs(); $('job').value = j.jobId; caseOffset = 0; await details(); status('评测已排队：' + j.jobId);
+  const maxModelCalls = Number($('model-calls').value);
+  if (!Number.isInteger(maxModelCalls) || maxModelCalls < 1 || maxModelCalls > 100) throw Error('目标模型请求上限须为 1 至 100 的整数');
+  const body = { suiteId: draft.id, suiteVersion: Number($('version').value), agentId: $('agent').value, repeat: Number($('repeat').value), executionProfile: 'mocked', limits: { maxTokens: Number($('tokens').value), maxModelCalls, maxDurationSeconds: Number($('duration').value), maxCostEstimateUsd: Number($('cost').value), maxJudgeCalls: Number($('judge-calls').value) } };
+  const request = JSON.stringify(body);
+  if (!startAttempt || startAttempt.generation !== generation || startAttempt.request !== request) startAttempt = { generation, request, key: crypto.randomUUID() };
+  startPendingGeneration = generation; $('start').disabled = true;
+  try {
+    const j = await api('/evals/jobs', body, 'POST', { 'Idempotency-Key': startAttempt.key });
+    if (generation !== accountGeneration) return;
+    jobOffset = 0; await jobs(); if (generation !== accountGeneration) return;
+    $('job').value = j.jobId; caseOffset = 0; await details(); if (generation !== accountGeneration) return;
+    startAttempt = undefined; status('评测已排队：' + j.jobId);
+  } finally { if (startPendingGeneration === generation) { startPendingGeneration = undefined; $('start').disabled = false; } }
 });
 action('refresh', async () => { await jobs(); await details(); monitor = true; pollingFailed = false; status('作业已刷新'); });
-$('job').addEventListener('change', () => { caseOffset = 0; details().catch(e => status(e.message)); });
+$('job').addEventListener('change', () => { caseOffset = 0; details().catch(handleError); });
 $('case-run').addEventListener('change', caseDetail);
 action('cancel', async () => { if (!$('job').value) throw Error('请选择作业'); await api('/evals/jobs/' + $('job').value + '/cancel', {}); await jobs(); await details(); status('取消请求已持久化'); });
 action('compare-button', async () => {
@@ -163,7 +182,9 @@ for (const [id, kind, direction] of [['suite-prev', 'suite', -1], ['suite-next',
   else { versionOffset = Math.max(0, versionOffset + 100 * direction); await versions(); }
 });
 setInterval(() => {
-  if (monitor && document.visibilityState === 'visible') details().then(() => { if (pollingFailed) { pollingFailed = false; status('自动刷新已恢复'); } }).catch(e => {
+  const generation = accountGeneration;
+  if (monitor && document.visibilityState === 'visible') details().then(() => { if (generation !== accountGeneration) return; if (pollingFailed) { pollingFailed = false; status('自动刷新已恢复'); } }).catch(e => {
+    if (generation !== accountGeneration || e.staleAccount) return;
     if (e.status === 401 || e.status === 403) { monitor = false; status(e.message); }
     else { pollingFailed = true; status('刷新暂时失败，将自动重试：' + e.message); }
   });

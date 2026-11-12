@@ -58,6 +58,30 @@ function row(
     result: { score },
   };
 }
+test("ungraded or cancelled baselines cannot produce passing gates or improvements", () => {
+  const after = [row("case", 1, 1)];
+  for (const state of [
+    "CANCELLED",
+    "EXECUTION_ERROR",
+    "GRADING_ERROR",
+    "PASSED",
+  ] as const) {
+    const result = compare(
+      { ...job, state: state === "CANCELLED" ? "CANCELLED" : "COMPLETED" },
+      job,
+      [row("case", 1, null, state)],
+      after,
+    );
+    assert.equal(result.gate, null);
+    assert.equal(result.comparable, false);
+    assert.ok(result.warnings.includes("BASELINE_NOT_GRADED"));
+    assert.equal(result.pairs[0]!.improvement, false);
+  }
+  assert.equal(
+    compare(job, job, [row("case", 1, 0, "FAILED_ASSERTION")], after).gate,
+    true,
+  );
+});
 test("case weights affect Suite quality and gates while raw denominators remain explicit", () => {
   const rows = [
     row("heavy", 9, 1),

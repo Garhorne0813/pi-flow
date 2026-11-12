@@ -240,6 +240,10 @@ export function compare(
         a?.state !== "PASSED",
       improvement:
         (a ?? b)!.case.weight > 0 &&
+        b !== undefined &&
+        ["PASSED", "FAILED_ASSERTION"].includes(b.state) &&
+        typeof b.result?.score === "number" &&
+        Number.isFinite(b.result.score) &&
         a?.state === "PASSED" &&
         b?.state !== "PASSED",
     };
@@ -251,6 +255,18 @@ export function compare(
   )
     warnings.push("CASE_SET_DIFFERS");
   if (!pairs.some((p) => p.weight > 0)) warnings.push("NO_WEIGHTED_CASES");
+  if (
+    baseline.state === "CANCELLED" ||
+    baseline.state === "FAILED" ||
+    before.some(
+      (r) =>
+        r.case.weight > 0 &&
+        (!["PASSED", "FAILED_ASSERTION"].includes(r.state) ||
+          typeof r.result?.score !== "number" ||
+          !Number.isFinite(r.result.score)),
+    )
+  )
+    warnings.push("BASELINE_NOT_GRADED");
   const comparable = warnings.length === 0;
   const candidateErrors = after.some(
     (r) =>
