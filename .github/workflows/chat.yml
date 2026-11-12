@@ -7,7 +7,8 @@ permissions:
   contents: read
 jobs:
   web:
-    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -27,11 +28,11 @@ jobs:
         run: |
           node scripts/check-chat-dependencies.mjs
           node scripts/chat-ui-notices.mjs --check
-      - name: Install backend and browser for chat smoke tests
+      - name: Install backend and prepare browser for chat smoke tests
         run: |
           npm ci
           npm run build
-          npx playwright-core install --with-deps chromium
+          node scripts/prepare-ci-browser.mjs
       - name: Browser chat and interaction acceptance
         run: |
           HARNESS_MODE=demo SANDBOX_PROVIDER=demo DEV_TOKEN=chat-browser-test-token HOST=127.0.0.1 PORT=3000 LOG_LEVEL=silent CONFIG_DIR=/nonexistent/pi-flow node dist/main.js > /tmp/chat-api.log 2>&1 &

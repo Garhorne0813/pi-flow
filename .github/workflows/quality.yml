@@ -12,7 +12,7 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
   quality:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     services:
       postgres:
@@ -34,12 +34,16 @@ jobs:
         with:
           node-version: 24
           cache: npm
-      - run: sudo apt-get update && sudo apt-get install -y openssl python3 bash
+      - name: Verify preinstalled runtime tools
+        run: |
+          openssl version
+          python3 --version
+          bash --version
       - run: npm ci
       - run: npm ci --prefix web
       - run: npm run build --prefix web
-      - name: Install browser for mandatory console acceptance
-        run: npx playwright-core install --with-deps chromium
+      - name: Prepare browser for mandatory console acceptance
+        run: node scripts/prepare-ci-browser.mjs
       - name: TypeScript check
         run: npm run check
       - name: Check JavaScript syntax
