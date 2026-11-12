@@ -1,3 +1,5 @@
+import { registerEvalRoutes } from "./evals.js";
+import type { EvalService } from "../evals/service.js";
 import Fastify from "fastify";
 import multipart from "@fastify/multipart";
 import { timingSafeEqual, createHash } from "node:crypto";
@@ -37,6 +39,7 @@ export function buildAPI(
   mcp?: MCPManager,
   skillPackages?: SkillPackages,
   collections?: { token: string; resolve: CollectionResolver },
+  evals?: EvalService,
 ) {
   if (collections && collections.token.length < 32)
     throw new Error("Collection API token must have at least 32 characters");
@@ -128,6 +131,7 @@ export function buildAPI(
       actors.set(req, await principal(service.registry, authenticated));
     } else actors.set(req, authenticated);
   });
+  if (evals) registerEvalRoutes(app, actor, evals);
   app.addHook("onResponse", async (req, reply) => {
     const a = actors.get(req);
     if (
