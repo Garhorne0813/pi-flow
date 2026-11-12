@@ -1,3 +1,4 @@
+import { JudgeGateway } from "./evals/judge.js";
 import { PersonalPostgresStore } from "./storage/personal-postgres-store.js";
 import { PostgresRegistry } from "./storage/registry.js";
 import { personalStore } from "./storage/personal.js";
@@ -22,7 +23,11 @@ const registry = new PostgresRegistry(store.pool),
 const demo = process.env.HARNESS_MODE === "demo",
   evals = createEvals(service, store, demo);
 const runtime = demo ? new EvalDemoRuntime() : await PiRuntime.create();
-const worker = new EvalWorker(evals.jobs!, new EvalExecutor(runtime));
+const worker = new EvalWorker(
+  evals.jobs!,
+  new EvalExecutor(runtime),
+  new JudgeGateway(evals.jobs!, runtime).grade,
+);
 process.once("SIGTERM", () => worker.stop());
 process.once("SIGINT", () => worker.stop());
 try {

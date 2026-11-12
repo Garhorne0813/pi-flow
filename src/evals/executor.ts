@@ -17,6 +17,7 @@ export class EvalExecutor {
     authorize: (tool?: string) => Promise<void>;
     gateway?: RuntimeContext["gateway"];
     budget: EvalModelCallbacks;
+    temperature?: number;
   }) {
     await input.authorize();
     const tools = new EvalToolGateway(input.mocks, input.config.tools, (name) =>
@@ -57,6 +58,7 @@ export class EvalExecutor {
       prompt: input.case.inputs,
       signal: input.signal,
       gateway: input.gateway,
+      temperature: input.temperature,
       ...input.budget,
       call: async (name, args, callId) => {
         input.signal.throwIfAborted();
