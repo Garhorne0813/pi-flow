@@ -1,12 +1,13 @@
 import { Ajv } from "ajv";
-import { canonical } from "../dataset.js";
+import { canonical, digest } from "../dataset.js";
 import {
   GraderConfig,
   EvalScore,
   type EvalInput,
   type ToolCallRecord,
 } from "../types.js";
-const version = "1";
+export const NATIVE_GRADER_VERSION = "2";
+const version = NATIVE_GRADER_VERSION;
 const schemaValidator = () =>
   new Ajv({ strict: true, allErrors: false, validateFormats: false });
 const json = (v: unknown) => (typeof v === "string" ? JSON.parse(v) : v);
@@ -14,16 +15,48 @@ const same = (a: unknown, b: unknown) => canonical(a) === canonical(b);
 function noRemoteRefs(v: unknown, depth = 0): void {
   if (depth > 30) throw new Error("SCHEMA_DEPTH_LIMIT");
   if (!v || typeof v !== "object") return;
-  for (const [k, value] of Object.entries(v)) {
-    if (k === "pattern" || k === "patternProperties" || k === "format")
-      throw new Error("SCHEMA_REGEX_DENIED");
+  const schema = v as Record<string, unknown>;
+  for (const k of ["pattern", "patternProperties", "format"])
+    if (Object.hasOwn(schema, k)) throw new Error("SCHEMA_REGEX_DENIED");
+  for (const k of ["$ref", "$dynamicRef"]) {
+    const value = schema[k];
     if (
-      (k === "$ref" || k === "$dynamicRef") &&
+      Object.hasOwn(schema, k) &&
       (typeof value !== "string" || !value.startsWith("#"))
     )
       throw new Error("REMOTE_REF_DENIED");
-    noRemoteRefs(value, depth + 1);
   }
+  // Only visit schema positions. Property names and const/enum/default values
+  // are user data even when they contain words such as "pattern" or "$ref".
+  for (const k of [
+    "properties",
+    "definitions",
+    "$defs",
+    "dependentSchemas",
+    "dependencies",
+  ]) {
+    const value = schema[k];
+    if (value && typeof value === "object" && !Array.isArray(value))
+      for (const child of Object.values(value))
+        if (!Array.isArray(child)) noRemoteRefs(child, depth + 1);
+  }
+  for (const k of [
+    "additionalProperties",
+    "additionalItems",
+    "contains",
+    "propertyNames",
+    "not",
+    "if",
+    "then",
+    "else",
+    "items",
+  ])
+    if (Array.isArray(schema[k]))
+      for (const child of schema[k]) noRemoteRefs(child, depth + 1);
+    else noRemoteRefs(schema[k], depth + 1);
+  for (const k of ["allOf", "anyOf", "oneOf", "prefixItems"])
+    if (Array.isArray(schema[k]))
+      for (const child of schema[k]) noRemoteRefs(child, depth + 1);
 }
 function ignore(v: unknown, fields: string[]): unknown {
   if (!v || typeof v !== "object" || Array.isArray(v)) return v;
@@ -36,7 +69,10 @@ const matches = (
   expected: { name: string; args?: Record<string, unknown> },
 ) =>
   actual.name === expected.name &&
-  (expected.args === undefined || same(actual.args, expected.args));
+  (expected.args === undefined ||
+    (actual.argsDigest !== undefined
+      ? actual.argsDigest === digest(expected.args)
+      : same(actual.args, expected.args)));
 export async function grade(
   input: EvalInput,
   raw: unknown,

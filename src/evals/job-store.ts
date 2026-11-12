@@ -563,7 +563,7 @@ export class EvalJobStore extends PostgresEvalStore {
           .filter(
             (r) =>
               (r as UsageRecord & { caseRunId?: string }).caseRunId ===
-              run.caseRunId,
+                run.caseRunId && r.id.startsWith(prefix),
           )
           .reduce((n, r) => n + r.tokens, 0);
         const maxOutput = Math.min(
@@ -602,6 +602,22 @@ export class EvalJobStore extends PostgresEvalStore {
         };
         hold.tokens -= record.tokens;
         hold.costMicros = (hold.costMicros ?? 0) - cost;
+        // Holds can wait across daily/monthly boundaries. Recheck the ledger
+        // with the reduced hold so same-period transfers are counted once and
+        // requests made in a new period compete with normal Run usage there.
+        const periodRecords = (
+          await c.query(
+            "SELECT data FROM personal_usage_requests WHERE user_id=$1 AND at >= $2 AND id<>$3",
+            [run.userId, record.at.slice(0, 7), hold.id],
+          )
+        ).rows.map((r) => r.data as UsageRecord);
+        checkUsageCaps(
+          [...periodRecords, hold],
+          policyFromEnv(),
+          run.userId,
+          record.tokens,
+          record.costMicros,
+        );
         await this.saveUsage(c, run.userId, hold);
         await this.saveUsage(c, run.userId, record);
         return { id: record.id, maxOutputTokens: maxOutput };

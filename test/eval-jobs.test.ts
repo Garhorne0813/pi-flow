@@ -14,6 +14,154 @@ import { EvalExecutor } from "../src/evals/executor.js";
 import { jobsFixture } from "./eval-job-fixture.js";
 
 test(
+  "Eval reservations recheck shared period caps when a hold predates today or this month",
+  { skip: !databaseUrl },
+  async () => {
+    const previous = process.env.USAGE_POLICY_JSON;
+    process.env.USAGE_POLICY_JSON = JSON.stringify({
+      userDailyTokens: 5000,
+      userMonthlyTokens: 10000,
+    });
+    const f = await jobsFixture();
+    try {
+      const job = await f.jobs.create(
+        f.actor,
+        { ...f.request, limits: { maxTokens: 5000 } },
+        "old-hold",
+      );
+      const claim = (await f.jobs.claim("worker"))!;
+      for (const [at, policy] of [
+        [
+          new Date(Date.now() - 86400000).toISOString(),
+          { userDailyTokens: 5000, userMonthlyTokens: 10000 },
+        ],
+        [
+          "2000-01-01T00:00:00.000Z",
+          { userDailyTokens: 10000, userMonthlyTokens: 5000 },
+        ],
+      ] as const) {
+        process.env.USAGE_POLICY_JSON = JSON.stringify(policy);
+        await f.pool.query(
+          "UPDATE personal_usage_requests SET at=$2,data=jsonb_set(data,'{at}',to_jsonb($2::text)) WHERE user_id=$1 AND id=$3",
+          [f.actor.userId, at, "eval-hold:" + job.jobId],
+        );
+        const other = await f.jobs.create(
+          f.actor,
+          { ...f.request, limits: { maxTokens: 5000 } },
+          at,
+        );
+        await assert.rejects(
+          f.jobs.reserve(claim.run, "target", 10),
+          /MODEL_BUDGET_EXCEEDED/,
+        );
+        assert.equal((await f.jobs.usage(f.actor.userId, job.jobId)).length, 0);
+        await f.jobs.cancel(f.actor.userId, other.jobId);
+      }
+      // A same-day transfer consumes the already charged hold exactly once.
+      const at = new Date().toISOString();
+      await f.pool.query(
+        "UPDATE personal_usage_requests SET at=$2,data=jsonb_set(data,'{at}',to_jsonb($2::text)) WHERE user_id=$1 AND id=$3",
+        [f.actor.userId, at, "eval-hold:" + job.jobId],
+      );
+      await f.jobs.reserve(claim.run, "target", 10);
+    } finally {
+      if (previous === undefined) delete process.env.USAGE_POLICY_JSON;
+      else process.env.USAGE_POLICY_JSON = previous;
+      await f.close();
+    }
+  },
+);
+
+test(
+  "a worker rejects unavailable frozen grader versions before calling a model",
+  { skip: !databaseUrl },
+  async () => {
+    const f = await jobsFixture();
+    try {
+      const job = await f.jobs.create(f.actor, f.request, "old-version");
+      job.snapshot.graderVersion = "1";
+      await f.pool.query(
+        "UPDATE personal_eval_jobs SET data=$3 WHERE user_id=$1 AND job_id=$2",
+        [f.actor.userId, job.jobId, JSON.stringify(job)],
+      );
+      let calls = 0;
+      await new EvalWorker(
+        f.jobs,
+        new EvalExecutor({
+          async execute() {
+            calls++;
+          },
+        }),
+      ).tick();
+      const rows = await f.jobs.caseRuns(f.actor.userId, job.jobId, {
+        offset: 0,
+        limit: 100,
+      });
+      assert.equal(calls, 0);
+      assert.equal(rows[0]!.state, "EXECUTION_ERROR");
+      assert.equal(
+        rows[0]!.result!.errorCode,
+        "EVAL_GRADER_VERSION_UNAVAILABLE",
+      );
+      assert.equal((await f.jobs.usage(f.actor.userId, job.jobId)).length, 0);
+    } finally {
+      await f.close();
+    }
+  },
+);
+
+test(
+  "Judge case allowance excludes target usage but the job hold remains shared",
+  { skip: !databaseUrl },
+  async () => {
+    const f = await jobsFixture();
+    try {
+      const job = await f.jobs.create(
+        f.actor,
+        { ...f.request, limits: { maxTokens: 5000, maxJudgeCalls: 2 } },
+        "separate-roles",
+      );
+      job.snapshot.config.maxTokens = 100;
+      job.snapshot.judge = {
+        config: { ...job.snapshot.config },
+        gatewayRef: null,
+        version: "test",
+      };
+      await f.pool.query(
+        "UPDATE personal_eval_jobs SET data=$3 WHERE user_id=$1 AND job_id=$2",
+        [f.actor.userId, job.jobId, JSON.stringify(job)],
+      );
+      const claim = (await f.jobs.claim("worker"))!;
+      const target = await f.jobs.reserve(claim.run, "target", 10);
+      await f.jobs.settle(
+        f.actor.userId,
+        target.id,
+        { input: 10, output: 80, cacheRead: 0, cacheWrite: 0, totalTokens: 90 },
+        1,
+      );
+      const judge = await f.jobs.reserve(claim.run, "judge", 10);
+      assert.equal(judge.maxOutputTokens, 90);
+      await f.jobs.settle(
+        f.actor.userId,
+        judge.id,
+        { input: 10, output: 80, cacheRead: 0, cacheWrite: 0, totalTokens: 90 },
+        1,
+      );
+      await assert.rejects(
+        f.jobs.reserve(claim.run, "target", 10),
+        /MODEL_BUDGET_EXCEEDED/,
+      );
+      await assert.rejects(
+        f.jobs.reserve(claim.run, "judge", 10),
+        /MODEL_BUDGET_EXCEEDED/,
+      );
+    } finally {
+      await f.close();
+    }
+  },
+);
+
+test(
   "eval jobs atomically freeze/idempotently reserve, two workers claim once, fence stale writes and recover without replay",
   { skip: !databaseUrl },
   async () => {

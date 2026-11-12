@@ -54,6 +54,18 @@ test(
       assert.equal(summary.target.unknownRequests, 1);
       assert.equal(compare(finished, finished, rows, rows).gate, true);
       assert.equal(
+        compare(
+          finished,
+          {
+            ...finished,
+            snapshot: { ...finished.snapshot, graderVersion: "1" },
+          },
+          rows,
+          rows,
+        ).gate,
+        null,
+      );
+      assert.equal(
         compare(finished, { ...finished, suiteDigest: "different" }, rows, rows)
           .gate,
         null,
@@ -135,6 +147,27 @@ test(
         "connect",
       );
       assert.equal(await page.locator("#suite img").count(), 0);
+      const savedSuite = await page.locator("#suite").inputValue();
+      await page.locator("#new").click();
+      await page.locator("#revision").filter({ hasText: "新草稿" }).waitFor();
+      assert.equal(await page.locator("#version option").count(), 0);
+      await page.locator("#suite").selectOption(savedSuite);
+      await page
+        .locator("#version option")
+        .first()
+        .waitFor({ state: "attached" });
+      // Changing list pages can replace the selection without firing change.
+      await page.route("**/api/v1/evals/suites?limit=50&offset=50", (route) =>
+        route.fulfill({ json: [] }),
+      );
+      await page.locator("#suite-next").click();
+      await page.locator("#revision").filter({ hasText: "新草稿" }).waitFor();
+      assert.equal(await page.locator("#version option").count(), 0);
+      await page.locator("#publish").click();
+      await page
+        .locator("#status")
+        .filter({ hasText: "请先保存草稿" })
+        .waitFor();
       assert.deepEqual(errors, []);
     } finally {
       await browser.close();

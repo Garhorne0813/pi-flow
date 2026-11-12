@@ -5,7 +5,7 @@ import type { Runtime } from "../execution/runtime.js";
 import type { CaseRun, EvalJob } from "./jobs.js";
 import type { EvalScore, GraderConfig, EvalInput } from "./types.js";
 import { EvalExecutor, EvalExecutionError } from "./executor.js";
-import { grade, aggregate } from "./graders/registry.js";
+import { grade, aggregate, NATIVE_GRADER_VERSION } from "./graders/registry.js";
 import type { EvalJobStore } from "./job-store.js";
 export type Judge = (
   run: CaseRun,
@@ -55,6 +55,8 @@ export class EvalWorker {
         });
     }, 1000);
     const pipeline = async () => {
+      if (job.snapshot.graderVersion !== NATIVE_GRADER_VERSION)
+        throw new Fault(409, "EVAL_GRADER_VERSION_UNAVAILABLE");
       const result = await this.executor.execute({
         config: job.snapshot.config,
         onTool: (type, data) => this.store.toolEvent(run, type, data),

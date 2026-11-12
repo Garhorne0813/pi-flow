@@ -8,6 +8,7 @@ import {
   type EvalInput,
 } from "../src/evals/types.js";
 import { digest, freezeDataset } from "../src/evals/dataset.js";
+import { EvalToolGateway } from "../src/evals/tool-gateway.js";
 const input: EvalInput = {
   caseId: "c",
   input: "hello",
@@ -19,6 +20,88 @@ const run = (config: unknown, changes: Partial<EvalInput> = {}) =>
   grade({ ...input, ...changes }, config, {
     signal: new AbortController().signal,
   });
+test("tool assertions compare original argument digests while traces stay redacted", async () => {
+  const tools = new EvalToolGateway(
+    { read: "fixture" },
+    ["read"],
+    async () => {},
+  );
+  const args = { path: "a".repeat(1100), token: "fixture-secret" };
+  await tools.call("read", args, "read-1");
+  await assert.rejects(tools.call("bash", { command: "env" }, "denied"));
+  const trajectory = tools.trace.calls;
+  assert.equal(trajectory[0]!.args!.token, "[REDACTED]");
+  assert.equal(JSON.stringify(trajectory).includes("fixture-secret"), false);
+  assert.equal(
+    (
+      await run(
+        { id: "g", type: "tool_called", name: "read", args },
+        { trajectory },
+      )
+    ).pass,
+    true,
+  );
+  assert.equal(
+    (
+      await run(
+        {
+          id: "g",
+          type: "tool_called",
+          name: "read",
+          args: { ...args, token: "wrong" },
+        },
+        { trajectory },
+      )
+    ).pass,
+    false,
+  );
+  // A redacted display value must never satisfy an assertion for a different raw value.
+  assert.equal(
+    (
+      await run(
+        {
+          id: "g",
+          type: "tool_called",
+          name: "read",
+          args: trajectory[0]!.args,
+        },
+        { trajectory },
+      )
+    ).pass,
+    false,
+  );
+  assert.equal(
+    (
+      await run(
+        {
+          id: "g",
+          type: "tool_not_called",
+          name: "bash",
+          args: { command: "env" },
+        },
+        { trajectory },
+      )
+    ).pass,
+    false,
+  );
+  for (const mode of ["strict", "unordered", "subset", "superset"]) {
+    assert.equal(
+      (
+        await run(
+          {
+            id: "g",
+            type: "trajectory",
+            mode,
+            calls: [{ name: "read", args }],
+          },
+          { trajectory: trajectory.slice(0, 1) },
+        )
+      ).pass,
+      true,
+      mode,
+    );
+  }
+});
 test("eval exact and JSON retain types and missing fields, normalize object order", async () => {
   assert.equal(
     (await run({ id: "g", type: "exact", expected: "hello" })).status,
@@ -109,6 +192,43 @@ test("eval contains is explicitly case sensitive; schemas reject remote refs", a
     ).status,
     "ERROR",
   );
+});
+test("schema restrictions apply to keywords, not property names or literal JSON data", async () => {
+  const schema = {
+    type: "object",
+    properties: {
+      format: { type: "string" },
+      pattern: { type: "string" },
+      literal: { const: { pattern: "data", $ref: "https://example.com/data" } },
+    },
+    required: ["format", "pattern", "literal"],
+  };
+  assert.equal(
+    (
+      await run(
+        { id: "g", type: "json_schema", schema },
+        {
+          output: JSON.stringify({
+            format: "json",
+            pattern: "plain",
+            literal: { pattern: "data", $ref: "https://example.com/data" },
+          }),
+        },
+      )
+    ).status,
+    "PASSED",
+  );
+  for (const nested of [
+    { properties: { value: { type: "string", pattern: "(a+)+$" } } },
+    { definitions: { x: { $ref: "https://example.com/schema" } } },
+    { items: [{ type: "string", format: "email" }] },
+    { allOf: [{ properties: { x: { patternProperties: {} } } }] },
+  ]) {
+    assert.equal(
+      (await run({ id: "g", type: "json_schema", schema: nested })).status,
+      "ERROR",
+    );
+  }
 });
 const trajectory: EvalInput["trajectory"] = [
   { sequence: 2, callId: "b", name: "ls", status: "COMPLETED" },

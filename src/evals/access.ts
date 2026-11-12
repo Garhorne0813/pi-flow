@@ -4,6 +4,7 @@ import { agentAllowed, Fault, type Actor } from "../domain/model.js";
 import type { PersonalService } from "../domain/personal-service.js";
 import { policyFromEnv } from "../domain/usage.js";
 import { digest } from "./dataset.js";
+import { NATIVE_GRADER_VERSION } from "./graders/registry.js";
 import type { EvalJob, EvalSnapshot } from "./jobs.js";
 import { openToken } from "../security/token-vault.js";
 export class EvalAccess {
@@ -71,7 +72,7 @@ export class EvalAccess {
           bundle: agent.config.skillBundle,
           skills: agent.config.skills,
         }),
-        graderVersion: "1",
+        graderVersion: NATIVE_GRADER_VERSION,
         profile: "mocked",
         prices,
       };
