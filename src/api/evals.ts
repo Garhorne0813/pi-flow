@@ -1,3 +1,4 @@
+import { registerEvalJobRoutes } from "./eval-jobs.js";
 import { z } from "zod";
 import type { FastifyInstance } from "fastify";
 import type { Actor } from "../domain/model.js";
@@ -8,6 +9,7 @@ export function registerEvalRoutes(
   actor: (req: object) => Actor,
   service: EvalService,
 ) {
+  registerEvalJobRoutes(app, actor, service);
   const root = "/api/v1/evals";
   app.get(root + "/suites", async (req) => {
     const a = actor(req);
