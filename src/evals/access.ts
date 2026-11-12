@@ -77,6 +77,8 @@ export class EvalAccess {
         );
         if (!selected?.gatewayRef)
           throw new Fault(503, "EVAL_JUDGE_MODEL_NOT_APPROVED");
+        if (!prices[selected.provider + "/" + selected.modelId])
+          throw new Fault(503, "MODEL_PRICE_REQUIRED");
         const config = AgentConfig.parse({
           name: "eval-judge",
           systemPrompt: JUDGE_TEMPLATE,

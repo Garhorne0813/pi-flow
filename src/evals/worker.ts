@@ -7,6 +7,46 @@ import type { EvalScore, GraderConfig, EvalInput } from "./types.js";
 import { EvalExecutor, EvalExecutionError } from "./executor.js";
 import { grade, aggregate, NATIVE_GRADER_VERSION } from "./graders/registry.js";
 import type { EvalJobStore } from "./job-store.js";
+import { telemetry } from "../observability/telemetry.js";
+function transientDatabaseError(error: unknown) {
+  let current = error;
+  for (
+    let depth = 0;
+    depth < 3 && current && typeof current === "object";
+    depth++
+  ) {
+    const e = current as { code?: unknown; message?: unknown; cause?: unknown };
+    if (
+      typeof e.code === "string" &&
+      (/^08[A-Z0-9]{3}$/.test(e.code) ||
+        [
+          "40001",
+          "40P01",
+          "53300",
+          "57P01",
+          "57P02",
+          "57P03",
+          "57014",
+          "ECONNRESET",
+          "ECONNREFUSED",
+          "EPIPE",
+          "ETIMEDOUT",
+          "ENETUNREACH",
+          "EHOSTUNREACH",
+        ].includes(e.code))
+    )
+      return true;
+    if (
+      typeof e.message === "string" &&
+      /^(Connection terminated unexpectedly|Connection terminated due to connection timeout|timeout exceeded when trying to connect)$/.test(
+        e.message,
+      )
+    )
+      return true;
+    current = e.cause;
+  }
+  return false;
+}
 export type Judge = (
   run: CaseRun,
   job: EvalJob,
@@ -158,11 +198,30 @@ export class EvalWorker {
     return true;
   }
   async start() {
+    let backoff = 250;
     while (!this.stopping.signal.aborted) {
-      if (!(await this.tick()))
-        await delay(250, undefined, { signal: this.stopping.signal }).catch(
-          () => {},
+      let pause = 250;
+      try {
+        const worked = await this.tick();
+        backoff = 250;
+        if (worked) continue;
+      } catch (error) {
+        if (this.stopping.signal.aborted) break;
+        if (!transientDatabaseError(error)) throw error;
+        telemetry.count("eval_database_retries_total");
+        telemetry.error(
+          "eval_poll",
+          new Fault(503, "EVAL_DATABASE_TRANSIENT"),
+          { workerId: this.owner },
         );
+        pause = backoff;
+        backoff = Math.min(5000, backoff * 2);
+      }
+      await delay(pause, undefined, { signal: this.stopping.signal }).catch(
+        (error) => {
+          if (!this.stopping.signal.aborted) throw error;
+        },
+      );
     }
   }
   stop() {

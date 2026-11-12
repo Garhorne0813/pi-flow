@@ -7,6 +7,47 @@ import { Fault } from "../src/domain/model.js";
 if (process.env.REQUIRE_POSTGRES_TESTS === "true" && !databaseUrl)
   throw new Error("TEST_DATABASE_URL required");
 test(
+  "PostgreSQL publication preflights schemas before inserting immutable rows",
+  { skip: !databaseUrl },
+  async () => {
+    const { jobsFixture } = await import("./eval-job-fixture.js");
+    const f = await jobsFixture();
+    try {
+      const suite = await f.service.createSuite(f.actor, {
+        name: "bad",
+        cases: [
+          {
+            caseId: "c",
+            inputs: "hi",
+            graders: [
+              { id: "g", type: "json_schema", schema: { pattern: ".*" } },
+            ],
+          },
+        ],
+      });
+      await assert.rejects(
+        f.jobs.publish(f.actor.userId, suite.id, 1),
+        /EVAL_INVALID_GRADER_SCHEMA/,
+      );
+      assert.equal(
+        (await f.jobs.getSuite(f.actor.userId, suite.id)).draftRevision,
+        1,
+      );
+      assert.equal(
+        (
+          await f.pool.query(
+            "SELECT count(*)::int AS n FROM personal_eval_suite_versions WHERE suite_id=$1",
+            [suite.id],
+          )
+        ).rows[0].n,
+        0,
+      );
+    } finally {
+      await f.close();
+    }
+  },
+);
+test(
   "eval PostgreSQL migration rollback, dataset conflicts, immutable versions and composite user FKs",
   { skip: !databaseUrl },
   async () => {

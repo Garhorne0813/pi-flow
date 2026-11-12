@@ -20,6 +20,59 @@ const run = (config: unknown, changes: Partial<EvalInput> = {}) =>
   grade({ ...input, ...changes }, config, {
     signal: new AbortController().signal,
   });
+test("json_match expected strings stay JSON values rather than serialized JSON text", async () => {
+  for (const expected of [
+    "42",
+    "hello",
+    "null",
+    "true",
+    '{"a":1}',
+    "",
+    '"quoted"',
+  ]) {
+    const grader = { id: "g", type: "json_match", expected };
+    assert.equal(
+      (await run(grader, { output: JSON.stringify(expected) })).status,
+      "PASSED",
+      expected,
+    );
+    assert.equal(
+      (await run(grader, { output: '{"a":1}' })).status,
+      "FAILED",
+      expected,
+    );
+  }
+});
+test("positive tool assertions count completed calls while negative checks include denied/failed attempts", async () => {
+  for (const status of ["DENIED", "FAILED", "COMPLETED"] as const) {
+    const trajectory = [
+      { sequence: 1, callId: "one", name: "read", args: { path: "x" }, status },
+    ];
+    assert.equal(
+      (
+        await run(
+          { id: "g", type: "tool_called", name: "read", args: { path: "x" } },
+          { trajectory },
+        )
+      ).pass,
+      status === "COMPLETED",
+    );
+    assert.equal(
+      (
+        await run(
+          {
+            id: "g",
+            type: "tool_not_called",
+            name: "read",
+            args: { path: "x" },
+          },
+          { trajectory },
+        )
+      ).pass,
+      false,
+    );
+  }
+});
 test("tool assertions compare original argument digests while traces stay redacted", async () => {
   const tools = new EvalToolGateway(
     { read: "fixture" },

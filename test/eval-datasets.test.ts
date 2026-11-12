@@ -14,6 +14,41 @@ const draft = {
     },
   ],
 };
+test("publication rejects unsafe/uncompilable schemas without advancing the draft", async () => {
+  const store = new MemoryEvalStore(),
+    service = new EvalService(store, async () => {});
+  for (const schema of [
+    { type: "string", pattern: ".*" },
+    { $ref: "https://example.com/schema" },
+    { type: "unsupported" },
+  ]) {
+    const suite = await service.createSuite(actor, {
+      name: "invalid",
+      cases: [
+        {
+          caseId: "c",
+          inputs: "hi",
+          graders: [{ id: "g", type: "json_schema", schema }],
+        },
+      ],
+    });
+    await assert.rejects(
+      store.publish(actor.userId, suite.id, 1),
+      (e) =>
+        e instanceof Fault &&
+        e.code === "EVAL_INVALID_GRADER_SCHEMA" &&
+        e.status === 400,
+    );
+    assert.equal(
+      (await store.getSuite(actor.userId, suite.id)).draftRevision,
+      1,
+    );
+    assert.deepEqual(
+      await store.versions(actor.userId, suite.id, { offset: 0, limit: 100 }),
+      [],
+    );
+  }
+});
 test("eval datasets freeze historical versions, reject stale revisions and preserve history after deletion", async () => {
   const store = new MemoryEvalStore(),
     service = new EvalService(store, async () => {});

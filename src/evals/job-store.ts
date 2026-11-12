@@ -9,7 +9,7 @@ import {
 import { checkUsageCaps } from "../domain/usage-budget.js";
 import { personalConnection } from "../execution/personal-context.js";
 import { PostgresEvalStore } from "./postgres-store.js";
-import { digest } from "./dataset.js";
+import { digest, freezeDataset } from "./dataset.js";
 import {
   JobRequest,
   type EvalJob,
@@ -132,6 +132,9 @@ export class EvalJobStore extends PostgresEvalStore {
           cases.length * request.repeat > caseCap
         )
           throw new Fault(400, "EVAL_CASE_LIMIT");
+        // Published versions from older deployments must pass the same local
+        // schema preflight before snapshots, holds or model execution.
+        freezeDataset(cases);
         const needsJudge = cases.some((item) =>
           item.graders.some((g: { type: string }) => g.type === "llm_judge"),
         );
@@ -171,10 +174,28 @@ export class EvalJobStore extends PostgresEvalStore {
             snapshot.config.model.modelId,
           price = snapshot.prices[model];
         if (!price) throw new Fault(503, "MODEL_PRICE_REQUIRED");
-        const cost =
-          price.input === 0 && price.output === 0 && !snapshot.judge
-            ? 0
-            : Math.ceil(request.limits.maxCostEstimateUsd * 1000000);
+        const selectedPrices = [
+          price,
+          ...(snapshot.judge
+            ? [
+                snapshot.prices[
+                  snapshot.judge.config.model.provider +
+                    "/" +
+                    snapshot.judge.config.model.modelId
+                ]!,
+              ]
+            : []),
+        ];
+        const free = selectedPrices.every(
+          (p) =>
+            p &&
+            [p.input, p.output, p.cacheRead, p.cacheWrite].every(
+              (value) => value === 0,
+            ),
+        );
+        const cost = free
+          ? 0
+          : Math.ceil(request.limits.maxCostEstimateUsd * 1000000);
         const records = (
           await c.query(
             "SELECT data FROM personal_usage_requests WHERE user_id=$1 AND at >= $2",
@@ -272,7 +293,8 @@ export class EvalJobStore extends PostgresEvalStore {
   }
   async visibleJobs(a: Actor, p: Page) {
     const scope = await this.access.scope(a);
-    if (!scope.agentIds.length || (!scope.demo && !scope.models.length)) return [];
+    if (!scope.agentIds.length || (!scope.demo && !scope.models.length))
+      return [];
     const approved = (path: string) =>
       `(($6 AND data #>> '{snapshot,${path}gatewayRef}' IS NULL) OR $5::jsonb @> jsonb_build_array(jsonb_build_object('provider',data #>> '{snapshot,${path}config,model,provider}','modelId',data #>> '{snapshot,${path}config,model,modelId}')))`;
     return (
@@ -530,7 +552,7 @@ export class EvalJobStore extends PostgresEvalStore {
         await this.userLock(c, r.user_id);
         const row = (
           await c.query(
-            "UPDATE personal_eval_case_runs SET state='EXECUTION_ERROR',result=COALESCE(result,'{}'::jsonb)||'{\"errorCode\":\"LEASE_LOST\"}'::jsonb,lease_owner=NULL,lease_generation=NULL,lease_expires_at=NULL WHERE user_id=$1 AND case_run_id=$2 AND lease_expires_at<=now() RETURNING job_id",
+            "UPDATE personal_eval_case_runs SET state=CASE WHEN state='GRADING' THEN 'GRADING_ERROR' ELSE 'EXECUTION_ERROR' END,result=COALESCE(result,'{}'::jsonb)||'{\"errorCode\":\"LEASE_LOST\"}'::jsonb,lease_owner=NULL,lease_generation=NULL,lease_expires_at=NULL WHERE user_id=$1 AND case_run_id=$2 AND lease_expires_at<=now() RETURNING job_id,state",
             [r.user_id, r.case_run_id],
           )
         ).rows[0];
@@ -542,6 +564,7 @@ export class EvalJobStore extends PostgresEvalStore {
           await this.event(c, r.user_id, row.job_id, "eval.case.failed", {
             caseRunId: r.case_run_id,
             errorCode: "LEASE_LOST",
+            state: row.state,
           });
           await this.finishJob(c, r.user_id, row.job_id);
         }
@@ -606,7 +629,12 @@ export class EvalJobStore extends PostgresEvalStore {
             cacheWrite: 0,
             totalTokens: input + maxOutput,
           },
-          cost = micros(estimate, price);
+          // Input may be billed as uncached input, cache reads or cache writes.
+          // Reserve the worst input price without counting tokens repeatedly.
+          cost = Math.ceil(
+            input * Math.max(price.input, price.cacheRead, price.cacheWrite) +
+              maxOutput * price.output,
+          );
         if (cost > (hold.costMicros ?? 0))
           throw new Fault(429, "MODEL_COST_BUDGET_EXCEEDED");
         const record: UsageRecord & { caseRunId: string } = {

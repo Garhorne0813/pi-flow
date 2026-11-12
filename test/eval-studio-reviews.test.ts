@@ -514,3 +514,108 @@ test(
     }
   },
 );
+
+for (const method of ["PATCH", "POST"])
+  test(
+    "Studio ignores a delayed " + method + " save after switching Suites",
+    { skip: !browserPath },
+    async () => {
+      const entered = deferred(),
+        release = deferred();
+      let published: { id: string; revision: number } | undefined;
+      try {
+        await studio(
+          async (url, request) => {
+            const path = url.pathname;
+            if (path === "/api/v1/evals/suites" && request.method() === "GET")
+              return {
+                body: [
+                  { id: suiteId, name: "A" },
+                  { id: newId, name: "B" },
+                ],
+              };
+            if (path === "/api/v1/evals/suites/" + newId)
+              return {
+                body: {
+                  id: newId,
+                  name: "B-current",
+                  description: "B",
+                  draftRevision: 4,
+                  cases: [{ caseId: "B-only", inputs: "B", graders: [] }],
+                },
+              };
+            if (
+              request.method() === method &&
+              (path === "/api/v1/evals/suites" ||
+                path === "/api/v1/evals/suites/" + suiteId)
+            ) {
+              entered.resolve();
+              await release.promise;
+              return {
+                body: {
+                  ...request.postDataJSON(),
+                  id: suiteId,
+                  name: "A-saved",
+                  draftRevision: 2,
+                },
+              };
+            }
+            if (path.endsWith("/versions") && request.method() === "POST") {
+              published = {
+                id: path.split("/").at(-2)!,
+                revision: request.postDataJSON().revision,
+              };
+              return { body: version(2) };
+            }
+            return undefined;
+          },
+          async (page) => {
+            await connect(page);
+            if (method === "PATCH") {
+              await page.locator("#suite").selectOption(suiteId);
+              await page
+                .locator("#revision")
+                .filter({ hasText: "revision 1" })
+                .waitFor();
+            }
+            await page.locator("#name").fill("A-edited");
+            await page.locator("#save").click();
+            await entered.promise;
+            await page.locator("#suite").selectOption(newId);
+            await page
+              .locator("#revision")
+              .filter({ hasText: "revision 4" })
+              .waitFor();
+            const response = page.waitForResponse(
+              (r) =>
+                r.request().method() === method &&
+                new URL(r.url()).pathname.startsWith("/api/v1/evals/suites"),
+            );
+            release.resolve();
+            await response;
+            await page.evaluate(
+              () =>
+                new Promise<void>((r) =>
+                  requestAnimationFrame(() => requestAnimationFrame(() => r())),
+                ),
+            );
+            assert.equal(await page.locator("#suite").inputValue(), newId);
+            assert.equal(await page.locator("#name").inputValue(), "B-current");
+            assert.match(await page.locator("#cases").inputValue(), /B-only/);
+            assert.doesNotMatch(
+              await page.locator("#status").innerText(),
+              /草稿已保存/,
+            );
+            await page.locator("#publish").click();
+            await page
+              .locator("#status")
+              .filter({ hasText: "不可变版本已发布" })
+              .waitFor();
+            assert.deepEqual(published, { id: newId, revision: 4 });
+          },
+        );
+      } finally {
+        release.resolve();
+      }
+    },
+  );

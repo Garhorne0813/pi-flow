@@ -1,4 +1,4 @@
-import { Ajv } from "ajv";
+import { compileEvalSchema } from "./schema.js";
 import { canonical, digest } from "../dataset.js";
 import {
   GraderConfig,
@@ -6,58 +6,10 @@ import {
   type EvalInput,
   type ToolCallRecord,
 } from "../types.js";
-export const NATIVE_GRADER_VERSION = "3";
+export const NATIVE_GRADER_VERSION = "4";
 const version = NATIVE_GRADER_VERSION;
-const schemaValidator = () =>
-  new Ajv({ strict: true, allErrors: false, validateFormats: false });
 const json = (v: unknown) => (typeof v === "string" ? JSON.parse(v) : v);
 const same = (a: unknown, b: unknown) => canonical(a) === canonical(b);
-function noRemoteRefs(v: unknown, depth = 0): void {
-  if (depth > 30) throw new Error("SCHEMA_DEPTH_LIMIT");
-  if (!v || typeof v !== "object") return;
-  const schema = v as Record<string, unknown>;
-  for (const k of ["pattern", "patternProperties", "format"])
-    if (Object.hasOwn(schema, k)) throw new Error("SCHEMA_REGEX_DENIED");
-  for (const k of ["$ref", "$dynamicRef"]) {
-    const value = schema[k];
-    if (
-      Object.hasOwn(schema, k) &&
-      (typeof value !== "string" || !value.startsWith("#"))
-    )
-      throw new Error("REMOTE_REF_DENIED");
-  }
-  // Only visit schema positions. Property names and const/enum/default values
-  // are user data even when they contain words such as "pattern" or "$ref".
-  for (const k of [
-    "properties",
-    "definitions",
-    "$defs",
-    "dependentSchemas",
-    "dependencies",
-  ]) {
-    const value = schema[k];
-    if (value && typeof value === "object" && !Array.isArray(value))
-      for (const child of Object.values(value))
-        if (!Array.isArray(child)) noRemoteRefs(child, depth + 1);
-  }
-  for (const k of [
-    "additionalProperties",
-    "additionalItems",
-    "contains",
-    "propertyNames",
-    "not",
-    "if",
-    "then",
-    "else",
-    "items",
-  ])
-    if (Array.isArray(schema[k]))
-      for (const child of schema[k]) noRemoteRefs(child, depth + 1);
-    else noRemoteRefs(schema[k], depth + 1);
-  for (const k of ["allOf", "anyOf", "oneOf", "prefixItems"])
-    if (Array.isArray(schema[k]))
-      for (const child of schema[k]) noRemoteRefs(child, depth + 1);
-}
 function ignore(v: unknown, fields: string[]): unknown {
   if (!v || typeof v !== "object" || Array.isArray(v)) return v;
   return Object.fromEntries(
@@ -100,7 +52,7 @@ export async function grade(
         break;
       }
       case "json_match": {
-        const expected = json(c.expected);
+        const expected = c.expected;
         let output: unknown;
         try {
           output = json(input.output);
@@ -115,8 +67,7 @@ export async function grade(
         break;
       }
       case "json_schema": {
-        noRemoteRefs(c.schema);
-        const validate = schemaValidator().compile(c.schema);
+        const validate = compileEvalSchema(c.schema);
         let output: unknown;
         try {
           output = json(input.output);
@@ -129,7 +80,11 @@ export async function grade(
       }
       case "tool_called":
       case "tool_not_called": {
-        const count = calls.filter((call) => matches(call, c)).length;
+        const count = calls.filter(
+          (call) =>
+            matches(call, c) &&
+            (c.type === "tool_not_called" || call.status === "COMPLETED"),
+        ).length;
         pass =
           c.type === "tool_not_called"
             ? count === 0

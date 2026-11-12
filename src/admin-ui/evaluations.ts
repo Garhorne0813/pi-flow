@@ -134,10 +134,21 @@ action('connect', async () => {
 $('suite').addEventListener('change', () => loadSuite().catch(handleError));
 action('new', async () => { $('suite').value = ''; await loadSuite(); });
 action('save', async () => {
+  const generation = suiteLoad, selected = $('suite').value, account = accountGeneration;
+  const original = draft;
   const body = { name: $('name').value, description: $('description').value, cases: JSON.parse($('cases').value) };
-  if (draft) body.revision = draft.draftRevision;
-  draft = await api('/evals/suites' + (draft ? '/' + draft.id : ''), body, draft ? 'PATCH' : 'POST');
-  await suites(); $('suite').value = draft.id; await loadSuite(); status('草稿已保存');
+  if (original) body.revision = original.draftRevision;
+  let saved;
+  try { saved = await api('/evals/suites' + (original ? '/' + original.id : ''), body, original ? 'PATCH' : 'POST'); }
+  catch (error) { if (generation !== suiteLoad || selected !== $('suite').value || account !== accountGeneration) return; throw error; }
+  if (generation !== suiteLoad || selected !== $('suite').value || account !== accountGeneration) return;
+  await suites();
+  if (generation !== suiteLoad || account !== accountGeneration) return;
+  // A newly created UUID may fall outside the current bounded Suite page.
+  if (![...$('suite').options].some(o => o.value === saved.id)) { const option = document.createElement('option'); option.value = saved.id; option.textContent = saved.name; $('suite').append(option); }
+  $('suite').value = saved.id;
+  await loadSuite();
+  if (account === accountGeneration && $('suite').value === saved.id) status('草稿已保存');
 });
 action('publish', async () => { if (!draft) throw Error('请先保存草稿'); await api('/evals/suites/' + draft.id + '/versions', { revision: draft.draftRevision }); await loadSuite(); status('不可变版本已发布'); });
 action('delete', async () => { if (!draft) throw Error('请先选择数据集'); await api('/evals/suites/' + draft.id, undefined, 'DELETE'); draft = null; await suites(); await loadSuite(); status('数据集已删除；历史版本与报告保留'); });
