@@ -130,6 +130,7 @@ export type Workspace = {
   deleting?: boolean;
 };
 export type Session = {
+  creationDigest?: string;
   id: string;
   workspaceId: string;
   userId?: string;

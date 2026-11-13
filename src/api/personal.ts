@@ -238,6 +238,7 @@ export function personalRoutes(
         actor(req),
         z
           .object({
+            id: z.string().uuid().optional(),
             agentId: z.string().min(1),
             cwd: z.string().optional(),
             title: z.string().max(200).optional(),

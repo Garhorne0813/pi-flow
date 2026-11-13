@@ -293,3 +293,44 @@ test(
     }
   },
 );
+
+test("client-selected session IDs deduplicate committed creation retries", async () => {
+  const { app, service, actor, store } = await setup();
+  const id = "0a4982dc-9b94-4c44-8a86-79053c47d112";
+  const payload = { id, agentId: "assistant", title: "first message" };
+  try {
+    // Treat the first committed response as lost, then repeat via the API.
+    const first = await app.inject({
+      method: "POST",
+      url: "/api/v1/sessions",
+      payload,
+    });
+    assert.equal(first.statusCode, 201);
+    const second = await app.inject({
+      method: "POST",
+      url: "/api/v1/sessions",
+      payload,
+    });
+    assert.equal(second.statusCode, 201);
+    assert.equal(second.json().id, id);
+    const recreated = new PersonalService(store, service.registry, ["gateway"]);
+    const [a, b] = await Promise.all([
+      recreated.createPersonalSession(actor, payload),
+      recreated.createPersonalSession(actor, payload),
+    ]);
+    assert.equal(a.id, b.id);
+    const conflict = await app.inject({
+      method: "POST",
+      url: "/api/v1/sessions",
+      payload: { ...payload, title: "different" },
+    });
+    assert.equal(conflict.statusCode, 409);
+    const list = await app.inject({ url: "/api/v1/sessions" });
+    assert.equal(
+      list.json().items.filter((s: { id: string }) => s.id === id).length,
+      1,
+    );
+  } finally {
+    await app.close();
+  }
+});

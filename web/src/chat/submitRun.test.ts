@@ -53,3 +53,17 @@ it("isolates pending keys and inflight responses across identity boundaries", as
   await submitRun("shared-session", "same message");
   expect(api.mock.calls[2][3]).toBe(newKey);
 });
+it("retries creation with the same client ID after a lost response", async () => {
+  const { createSession, resetSendScope } = await import("./submitRun");
+  resetSendScope();
+  api.mockRejectedValueOnce(new Error("response lost"));
+  const input = { agentId: "one", title: "hello" };
+  await expect(createSession(input, "hello")).rejects.toThrow("response lost");
+  const id = api.mock.calls[0][1].id;
+  api.mockResolvedValueOnce({ id });
+  await createSession(input, "hello");
+  expect(api.mock.calls[1][1].id).toBe(id);
+  api.mockResolvedValueOnce({ id: "next" });
+  await createSession(input, "hello");
+  expect(api.mock.calls[2][1].id).not.toBe(id);
+});

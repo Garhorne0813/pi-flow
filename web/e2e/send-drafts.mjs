@@ -81,6 +81,20 @@ try {
     () => document.querySelector("textarea").value === "new-session followup",
   );
   assert.equal(await input.inputValue(), "new-session followup");
+
+  for (const target of ["/workspace", "/settings"]) {
+    await page.getByRole("button", { name: "新建对话", exact: true }).click();
+    await input.fill("first message");
+    heldCreate = undefined;
+    await page.getByLabel("开始对话 →", { exact: true }).click();
+    const destination = target === "/workspace" ? "工作区文件" : "个人设置";
+    await page.getByRole("link", { name: destination, exact: true }).click();
+    await page.waitForURL("**" + target);
+    const completed = page.waitForResponse((r) => r.url().endsWith("/C/runs"));
+    await heldCreate.fulfill({ json: { id: "C", agentId: "one" } });
+    await completed;
+    assert.equal(new URL(page.url()).pathname, target);
+  }
   console.log(
     "PASS: delayed sends preserve newer drafts, A does not block B, and session creation transfers the latest draft",
   );

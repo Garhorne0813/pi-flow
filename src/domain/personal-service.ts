@@ -1,5 +1,5 @@
 import { openToken } from "../security/token-vault.js";
-import { HarnessService } from "./service.js";
+import { HarnessService, digest } from "./service.js";
 import {
   AgentConfig,
   Fault,
@@ -104,15 +104,29 @@ export class PersonalService extends HarnessService {
   }
   async createPersonalSession(
     a: Actor,
-    input: { agentId: string; cwd?: string; title?: string },
+    input: { id?: string; agentId: string; cwd?: string; title?: string },
   ) {
     const cwd = workspacePath(input.cwd);
     const w = await this.ensureWorkspace(a);
-    return this.sessionWrite(a, undefined, (s) => {
+    return this.sessionWrite(a, input.id, (s) => {
       const av = s.managedAgents?.[input.agentId];
       if (!av || !agentAllowed(av, a)) throw new Fault(404, "AGENT_NOT_FOUND");
+      const creationDigest = digest({
+        agentId: input.agentId,
+        cwd,
+        title: input.title,
+      });
+      const existing = input.id ? s.sessions[input.id] : undefined;
+      if (existing) {
+        if (existing.userId !== a.userId || existing.deletedAt)
+          throw new Fault(404, "SESSION_NOT_FOUND");
+        if (existing.creationDigest !== creationDigest)
+          throw new Fault(409, "SESSION_CREATE_CONFLICT");
+        return existing;
+      }
       const ses = {
-        id: id(),
+        creationDigest,
+        id: input.id ?? id(),
         userId: a.userId,
         workspaceId: w.id,
         agentId: av.id,

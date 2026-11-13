@@ -40,7 +40,12 @@ import {
 import { api, ApiError } from "./api/client";
 import { observeOidcSession } from "./api/oidcSession";
 import { allPages } from "./admin/shared";
-import { submitRun, resetSendScope, sendScope } from "./chat/submitRun";
+import {
+  submitRun,
+  createSession,
+  resetSendScope,
+  sendScope,
+} from "./chat/submitRun";
 import { auth, login, logout, setLocalToken } from "./api/auth";
 import { useChatSession } from "./chat/useChatSession";
 import type { Item } from "./chat/model";
@@ -322,6 +327,8 @@ function App() {
     }
   };
   const draftKey = "pi-flow-draft:" + me?.userId + ":" + sid;
+  const currentRouteKey = useRef(location.key);
+  currentRouteKey.current = location.key;
   const currentDraftKey = useRef(draftKey);
   currentDraftKey.current = draftKey;
   const saveDraft = (v: string) => {
@@ -336,19 +343,23 @@ function App() {
   }
   async function submit() {
     if (!me || !draft.trim() || chat.busy || creating.current) return;
+    const routeKey = location.key;
     const text = draft,
       sourceKey = draftKey,
       context = sendScope();
     if (!sid) {
       creating.current = true;
       await act(async () => {
-        const s = await api<Session>("/sessions", {
-          agentId: agent,
-          title: text.slice(0, 80),
-        });
+        const s = await createSession<Session>(
+          { agentId: agent, title: text.slice(0, 80) },
+          text,
+        );
         if (context !== sendScope()) return;
         const targetKey = "pi-flow-draft:" + me.userId + ":" + s.id;
-        if (currentDraftKey.current === sourceKey) {
+        if (
+          currentDraftKey.current === sourceKey &&
+          currentRouteKey.current === routeKey
+        ) {
           const latest = sessionStorage.getItem(sourceKey) ?? text;
           sessionStorage.setItem(targetKey, latest);
           sessionStorage.removeItem(sourceKey);
