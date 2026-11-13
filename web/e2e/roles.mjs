@@ -14,7 +14,8 @@ try {
   for (const admin of [false, true]) {
     const page = await browser.newPage();
     let adminCalls = 0,
-      revision = 0;
+      revision = 0,
+      defaultsRevision = 0;
     const writes = [];
     let conflict = false;
     const defaults = {
@@ -67,13 +68,17 @@ try {
         });
       }
       if (path.endsWith("/configuration/defaults")) {
-        writes.push(route.request().postDataJSON());
-        return json({ ...defaults });
+        const body = route.request().postDataJSON();
+        writes.push(body);
+        const { expectedRevision, ...values } = body;
+        Object.assign(defaults, values);
+        defaultsRevision++;
+        return json({ agentDefaults: defaults, defaultsRevision });
       }
       if (path.endsWith("/configuration"))
         return json({
           agentDefaults: defaults,
-          defaultsRevision: 0,
+          defaultsRevision,
           deployment: { editable: false },
         });
       return route.fulfill({

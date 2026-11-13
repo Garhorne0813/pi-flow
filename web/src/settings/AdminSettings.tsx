@@ -149,7 +149,7 @@ function GlobalForm({
     setFailed(false);
     setMessage("");
     try {
-      await api("/admin/config/global", {
+      const saved = await api<Global>("/admin/config/global", {
         revision: base.revision,
         modelCatalog: models,
         policy: {
@@ -169,9 +169,17 @@ function GlobalForm({
             }
           : {}),
       });
-      setSecrets({});
-      await reload();
-      setMessage("全局配置已保存");
+      reset(saved);
+      cache.setQueryData(["admin", "global"], saved);
+      try {
+        await reload();
+        setMessage("全局配置已保存");
+      } catch {
+        setFailed(true);
+        setMessage(
+          "全局配置已保存；重新读取失败，请单独重新加载。无需重复保存。",
+        );
+      }
     } catch (e) {
       setFailed(true);
       setMessage(errorText(e));
@@ -293,10 +301,15 @@ function GlobalForm({
           disabled={saving}
           onClick={() => {
             if (confirm("重新加载会丢弃此表单未保存的修改，是否继续？"))
-              void reload().catch((e) => {
-                setFailed(true);
-                setMessage(errorText(e));
-              });
+              void reload()
+                .then(() => {
+                  setFailed(false);
+                  setMessage("配置已重新加载");
+                })
+                .catch((e) => {
+                  setFailed(true);
+                  setMessage(errorText(e));
+                });
           }}
         >
           重新加载全局配置
@@ -347,13 +360,25 @@ function DefaultsForm({
     setMessage("");
     setFailed(false);
     try {
-      await api(
+      const saved = await api<
+        Pick<Configuration, "agentDefaults" | "defaultsRevision">
+      >(
         "/admin/configuration/defaults",
         { ...defaults, expectedRevision: base.defaultsRevision },
         "PUT",
       );
-      await reload();
-      setMessage("Agent 默认配置已保存");
+      const fresh = { ...base, ...saved };
+      reset(fresh);
+      cache.setQueryData(["admin", "configuration"], fresh);
+      try {
+        await reload();
+        setMessage("Agent 默认配置已保存");
+      } catch {
+        setFailed(true);
+        setMessage(
+          "Agent 默认配置已保存；重新读取失败，请单独重新加载。无需重复保存。",
+        );
+      }
     } catch (e) {
       setFailed(true);
       setMessage(errorText(e));
@@ -454,10 +479,15 @@ function DefaultsForm({
             disabled={saving}
             onClick={() => {
               if (confirm("重新加载会丢弃未保存的 Agent 默认配置，是否继续？"))
-                void reload().catch((e) => {
-                  setFailed(true);
-                  setMessage(errorText(e));
-                });
+                void reload()
+                  .then(() => {
+                    setFailed(false);
+                    setMessage("配置已重新加载");
+                  })
+                  .catch((e) => {
+                    setFailed(true);
+                    setMessage(errorText(e));
+                  });
             }}
           >
             重新加载 Agent 默认配置

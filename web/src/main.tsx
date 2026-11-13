@@ -321,35 +321,49 @@ function App() {
       setError(e instanceof Error ? e.message : "请求失败");
     }
   };
+  const draftKey = "pi-flow-draft:" + me?.userId + ":" + sid;
+  const currentDraftKey = useRef(draftKey);
+  currentDraftKey.current = draftKey;
   const saveDraft = (v: string) => {
     setDraft(v);
-    sessionStorage.setItem("pi-flow-draft:" + me?.userId + ":" + sid, v);
+    sessionStorage.setItem(draftKey, v);
   };
+  function clearSentDraft(key: string, text: string) {
+    if (sessionStorage.getItem(key) !== text) return;
+    sessionStorage.removeItem(key);
+    if (currentDraftKey.current === key)
+      setDraft((current) => (current === text ? "" : current));
+  }
   async function submit() {
     if (!me || !draft.trim() || chat.busy || creating.current) return;
+    const text = draft,
+      sourceKey = draftKey,
+      context = sendScope();
     if (!sid) {
-      const context = sendScope();
       creating.current = true;
       await act(async () => {
         const s = await api<Session>("/sessions", {
           agentId: agent,
-          title: draft.slice(0, 80),
+          title: text.slice(0, 80),
         });
         if (context !== sendScope()) return;
-        sessionStorage.setItem(
-          "pi-flow-draft:" + me?.userId + ":" + s.id,
-          draft,
-        );
-        navigate("/chat/" + s.id);
-        await submitRun(s.id, draft);
+        const targetKey = "pi-flow-draft:" + me.userId + ":" + s.id;
+        if (currentDraftKey.current === sourceKey) {
+          const latest = sessionStorage.getItem(sourceKey) ?? text;
+          sessionStorage.setItem(targetKey, latest);
+          sessionStorage.removeItem(sourceKey);
+          navigate("/chat/" + s.id);
+        } else sessionStorage.setItem(targetKey, text);
+        await submitRun(s.id, text);
         if (context !== sendScope()) return;
-        sessionStorage.removeItem("pi-flow-draft:" + me?.userId + ":" + s.id);
-        setDraft("");
+        clearSentDraft(targetKey, text);
       });
       if (context === sendScope()) creating.current = false;
       return;
     }
-    if (await chat.send(draft)) saveDraft("");
+    if (await chat.send(text)) {
+      if (context === sendScope()) clearSentDraft(sourceKey, text);
+    }
   }
   const errors = [
     chat.error,

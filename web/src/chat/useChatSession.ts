@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { token } from "../api/auth";
 import { api, ApiError, request } from "../api/client";
 import { submitRun, sendScope } from "./submitRun";
 import { streamError } from "./streamError";
@@ -48,7 +49,7 @@ export function useChatSession(sid: string | undefined) {
     [cursor, setCursor] = useState<string | null>(null);
   const state = useRef(empty),
     generation = useRef(0),
-    locked = useRef<ReturnType<typeof sendScope> | null>(null),
+    locks = useRef(new Map<string, { auth: ReturnType<typeof sendScope> }>()),
     scope = useRef<SyncScope | null>(null);
   function update(fn: (p: Projection) => Projection) {
     state.current = fn(state.current);
@@ -100,7 +101,7 @@ export function useChatSession(sid: string | undefined) {
     state.current = empty;
     setProjection(empty);
     setRun(null);
-    setBusy(false);
+    setBusy(!!sid && locks.current.get(sid)?.auth === sendScope());
     setError("");
     setCursor(null);
     scope.current = null;
@@ -116,6 +117,8 @@ export function useChatSession(sid: string | undefined) {
     async function sync() {
       let retryDelay = 2500;
       while (isCurrent(context)) {
+        let streamToken: string | undefined;
+        const authScope = sendScope();
         try {
           if (!context.historyInitialized) await history(context);
           if (!isCurrent(context)) return;
@@ -137,9 +140,16 @@ export function useChatSession(sid: string | undefined) {
             continue;
           }
           const r = active.activeRun;
+          streamToken = await token();
+          if (!isCurrent(context)) return;
           const res = await request(
             `/runs/${r.id}/events?after=${state.current.cursors[r.id] || 0}`,
-            { signal: controller.signal },
+            {
+              signal: controller.signal,
+              headers: streamToken
+                ? { Authorization: `Bearer ${streamToken}` }
+                : {},
+            },
           );
           for await (const frame of parseSSE(res.body!, controller.signal)) {
             if (!isCurrent(context)) return;
@@ -168,6 +178,18 @@ export function useChatSession(sid: string | undefined) {
           retryDelay = 2500;
         } catch (e) {
           if (!isCurrent(context)) return;
+          if (e instanceof ApiError && e.status === 401 && streamToken) {
+            const currentToken = await token().catch(() => undefined);
+            if (!isCurrent(context)) return;
+            if (
+              authScope === sendScope() &&
+              currentToken &&
+              currentToken !== streamToken
+            ) {
+              setError("");
+              continue;
+            }
+          }
           setError(e instanceof Error ? e.message : "连接失败");
           if (e instanceof ApiError && [401, 403, 404].includes(e.status))
             return;
@@ -184,19 +206,21 @@ export function useChatSession(sid: string | undefined) {
   }, [sid]);
   async function mutate(fn: () => Promise<void>) {
     const context = sendScope();
-    if (locked.current === context) return;
-    locked.current = context;
+    if (!sid || locks.current.get(sid)?.auth === context) return;
+    const lock = { auth: context };
+    locks.current.set(sid, lock);
     setBusy(true);
     setError("");
     try {
       await fn();
     } catch (e) {
-      if (context === sendScope())
+      if (context === sendScope() && sid === currentSid.current)
         setError(e instanceof Error ? e.message : "请求失败");
     } finally {
-      if (locked.current === context) {
-        locked.current = null;
-        setBusy(false);
+      if (locks.current.get(sid) === lock) {
+        locks.current.delete(sid);
+        if (context === sendScope() && sid === currentSid.current)
+          setBusy(false);
       }
     }
   }
@@ -208,7 +232,9 @@ export function useChatSession(sid: string | undefined) {
       const id = sid;
       const operation = async () => {
         const r = await submitRun<Run>(id, text);
-        if (context !== sendScope() || id !== currentSid.current) return;
+        if (context !== sendScope()) return;
+        sent = true;
+        if (id !== currentSid.current) return;
         setRun(r);
         update((p) => ({
           ...p,
