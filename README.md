@@ -215,3 +215,7 @@ OIDC 浏览器登录态采用内存存储，不将访问令牌写入 localStorag
 整页刷新或关闭页面后需要重新登录；身份提供方已有会话时，重新登录通常可复用其会话。
 聊天历史仍保存在服务端，重新登录后可打开原会话；未发送草稿按用户和会话保存在当前标签页的 sessionStorage。
 模拟认证测试用于验证 UI 隔离与事件处理，不证明真实 OIDC 刷新恢复、撤权或远程登出已验收。
+
+## Agent 评测
+
+原生 Pi-Eval 提供私有数据集、不可变版本、独立 Worker、Mock 工具隔离、Judge、报告与 Studio。默认关闭；部署、预算、API 与验收见 [docs/evaluations.md](docs/evaluations.md)。

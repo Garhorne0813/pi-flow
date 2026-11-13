@@ -272,7 +272,9 @@ test(
             "INSERT INTO personal_sessions(user_id,session_id,workspace_id,data) VALUES($1,$2,$3,$4)",
             [user, v.id, v.workspaceId, JSON.stringify(v)],
           );
-        const { saveRun } = await import("../src/storage/personal-run-store.js");
+        const { saveRun } = await import(
+          "../src/storage/personal-run-store.js"
+        );
         const c = await backing.pool.connect();
         try {
           for (const r of Object.values(runs)) await saveRun(c, user, r);
@@ -354,10 +356,12 @@ test(
         await readFile("migrations/014_personal_control_paths.sql", "utf8"),
       );
       await backing.pool.query(
-        await readFile(
+        (await readFile(
           "migrations/015_personal_legacy_tasks_stats.sql",
           "utf8",
-        ),
+        )) +
+          "\n" +
+          (await readFile("migrations/016_personal_evaluations.sql", "utf8")),
       );
       await backing.ready();
       const store = personalStore(backing, registry),
@@ -972,10 +976,12 @@ test(
         "\n" +
         (await readFile("migrations/014_personal_control_paths.sql", "utf8")) +
         "\n" +
-        (await readFile(
+        ((await readFile(
           "migrations/015_personal_legacy_tasks_stats.sql",
           "utf8",
-        ));
+        )) +
+          "\n" +
+          (await readFile("migrations/016_personal_evaluations.sql", "utf8")));
       const c = await f.a.pool.connect();
       try {
         await c.query("BEGIN");
@@ -1013,7 +1019,7 @@ test(
             )
           ).rows[0].version,
         ),
-        13,
+        14,
       );
       for (const index of [
         "personal_runs_running",
@@ -1851,10 +1857,12 @@ test(
         await readFile("migrations/014_personal_control_paths.sql", "utf8"),
       );
       await f.a.pool.query(
-        await readFile(
+        (await readFile(
           "migrations/015_personal_legacy_tasks_stats.sql",
           "utf8",
-        ),
+        )) +
+          "\n" +
+          (await readFile("migrations/016_personal_evaluations.sql", "utf8")),
       );
       await f.a.ready();
       await f.a.pool.query(migration);
@@ -1871,10 +1879,12 @@ test(
         await readFile("migrations/014_personal_control_paths.sql", "utf8"),
       );
       await f.a.pool.query(
-        await readFile(
+        (await readFile(
           "migrations/015_personal_legacy_tasks_stats.sql",
           "utf8",
-        ),
+        )) +
+          "\n" +
+          (await readFile("migrations/016_personal_evaluations.sql", "utf8")),
       );
       const records = await f.sb.readMetadata(
         f.actor.userId,
@@ -2090,10 +2100,15 @@ test(
             "utf8",
           )) +
           "\n" +
-          (await readFile(
+          ((await readFile(
             "migrations/015_personal_legacy_tasks_stats.sql",
             "utf8",
-          )),
+          )) +
+            "\n" +
+            (await readFile(
+              "migrations/016_personal_evaluations.sql",
+              "utf8",
+            ))),
         c = await f.a.pool.connect();
       try {
         await c.query("BEGIN");
@@ -2424,7 +2439,9 @@ test(
       for (let i = 0; i < 10; i++) await Promise.all(idle.map((w) => w.tick()));
       const reads = [...m1.stop(), ...m2.stop()];
       assert.equal(claims, 0);
-      const { runWorkQuery } = await import("../src/storage/personal-work-queries.js");
+      const { runWorkQuery } = await import(
+        "../src/storage/personal-work-queries.js"
+      );
       assert.equal(reads.filter((r) => r.sql === runWorkQuery).length, 20);
       assert.equal(
         reads.filter((r) => r.sql === "BEGIN").length,
@@ -2837,10 +2854,12 @@ test(
         await readFile("migrations/014_personal_control_paths.sql", "utf8"),
       );
       await f.a.pool.query(
-        await readFile(
+        (await readFile(
           "migrations/015_personal_legacy_tasks_stats.sql",
           "utf8",
-        ),
+        )) +
+          "\n" +
+          (await readFile("migrations/016_personal_evaluations.sql", "utf8")),
       );
       await f.a.ready();
       assert.deepEqual(
@@ -3449,10 +3468,13 @@ test(
         return Object.fromEntries(runs.map((r) => [r.id, s.runs[r.id]]));
       });
       await f.a.pool.query("UPDATE personal_schema SET version=12 WHERE id=1");
-      const migration = await readFile(
-          "migrations/015_personal_legacy_tasks_stats.sql",
-          "utf8",
-        ),
+      const migration =
+          (await readFile(
+            "migrations/015_personal_legacy_tasks_stats.sql",
+            "utf8",
+          )) +
+          "\n" +
+          (await readFile("migrations/016_personal_evaluations.sql", "utf8")),
         c = await f.a.pool.connect();
       try {
         await c.query("BEGIN");
@@ -3521,10 +3543,13 @@ test(
           ],
         );
       await f.a.pool.query("UPDATE personal_schema SET version=12 WHERE id=1");
-      const migration = await readFile(
-        "migrations/015_personal_legacy_tasks_stats.sql",
-        "utf8",
-      );
+      const migration =
+        (await readFile(
+          "migrations/015_personal_legacy_tasks_stats.sql",
+          "utf8",
+        )) +
+        "\n" +
+        (await readFile("migrations/016_personal_evaluations.sql", "utf8"));
       await assert.rejects(
         f.a.pool.query(migration),
         /Legacy personal Run cycle detected/,
@@ -4018,6 +4043,39 @@ test(
     } finally {
       release?.();
       await Promise.allSettled([active, waiting].filter(Boolean));
+      await f.close();
+    }
+  },
+);
+
+test(
+  "personal PostgreSQL session creation deduplicates retries across clients",
+  { skip: !url },
+  async () => {
+    const f = await reviewDatabase();
+    try {
+      const request = { id: id(), agentId: "a", title: "first message" };
+      const original = await f.service.createPersonalSession(f.actor, request);
+      // The caller loses the committed response; independent clients retry concurrently.
+      const retries = await Promise.all(
+        Array.from({ length: 6 }, (_, i) =>
+          (i % 2 ? f.other : f.service).createPersonalSession(f.actor, request),
+        ),
+      );
+      assert.ok(retries.every((s) => s.id === original.id));
+      const persisted = await f.a.pool.query(
+        "SELECT count(*)::int AS n FROM personal_sessions WHERE user_id=$1 AND session_id=$2",
+        [f.actor.userId, request.id],
+      );
+      assert.equal(persisted.rows[0].n, 1);
+      await assert.rejects(
+        f.other.createPersonalSession(f.actor, {
+          ...request,
+          title: "different",
+        }),
+        (e) => e instanceof Error && "status" in e && e.status === 409,
+      );
+    } finally {
       await f.close();
     }
   },

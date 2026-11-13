@@ -1,3 +1,4 @@
+import { createEvals } from "../evals/factory.js";
 import { ScheduleService } from "../schedules/service.js";
 import { PersonalPostgresStore } from "../storage/personal-postgres-store.js";
 import { MemoryRegistry, PostgresRegistry } from "../storage/registry.js";
@@ -234,7 +235,12 @@ export async function bootstrap(role: "api" | "worker" = "api") {
       : undefined,
   );
   if (demo) await registry.tx(seedDemo);
+  const evals =
+    process.env.EVALS_ENABLED === "true"
+      ? createEvals(service, backing, demo)
+      : undefined;
   return {
+    evals,
     store,
     service,
     sandbox,

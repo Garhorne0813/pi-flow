@@ -45,7 +45,7 @@ import { resourceTransitions } from "../domain/usage.js";
 import { readCapacity, writeCapacity } from "./personal-capacity-store.js";
 import type { CapacityScope, CapacityState } from "../sandbox/policy.js";
 import { type WorkerHealth } from "../observability/health.js";
-const SCHEMA_VERSION = 13;
+const SCHEMA_VERSION = 14;
 function candidateLimit(limit: number) {
   if (!Number.isInteger(limit) || limit < 1 || limit > 100)
     throw new Error("Invalid candidate limit");
@@ -350,7 +350,7 @@ export class PersonalPostgresStore implements Store {
     if (result.rows[0]?.version !== SCHEMA_VERSION)
       throw new Error("SCHEMA_MISMATCH");
     const tables = await this.healthPool.query(
-      "SELECT to_regclass('personal_agents') AS agents, to_regclass('personal_user_state') AS tenants, to_regclass('personal_sandbox_capacity') AS capacity, to_regclass('personal_sandbox_leases') AS leases, to_regclass('personal_worker_health') AS workers, to_regclass('personal_runs') AS runs, to_regclass('personal_sessions') AS sessions, to_regclass('personal_run_events') AS events, to_regclass('personal_event_sequences') AS sequences, to_regclass('personal_scheduled_tasks') AS schedules, to_regclass('personal_schedule_fires') AS fires, to_regclass('personal_audit') AS audit, to_regclass('personal_usage_requests') AS usage, to_regclass('personal_resource_transitions') AS resources, to_regclass('personal_workspace_runtime') AS runtime, to_regclass('personal_maintenance') AS maintenance, to_regclass('personal_run_event_counters') AS event_counters, to_regclass('personal_run_work') AS work",
+      "SELECT to_regclass('personal_agents') AS agents, to_regclass('personal_user_state') AS tenants, to_regclass('personal_sandbox_capacity') AS capacity, to_regclass('personal_sandbox_leases') AS leases, to_regclass('personal_worker_health') AS workers, to_regclass('personal_runs') AS runs, to_regclass('personal_sessions') AS sessions, to_regclass('personal_run_events') AS events, to_regclass('personal_event_sequences') AS sequences, to_regclass('personal_scheduled_tasks') AS schedules, to_regclass('personal_schedule_fires') AS fires, to_regclass('personal_audit') AS audit, to_regclass('personal_usage_requests') AS usage, to_regclass('personal_resource_transitions') AS resources, to_regclass('personal_workspace_runtime') AS runtime, to_regclass('personal_maintenance') AS maintenance, to_regclass('personal_run_event_counters') AS event_counters, to_regclass('personal_run_work') AS work, to_regclass('personal_eval_suites') AS eval_suites, to_regclass('personal_eval_suite_versions') AS eval_versions, to_regclass('personal_eval_cases') AS eval_cases, to_regclass('personal_eval_jobs') AS eval_jobs, to_regclass('personal_eval_case_runs') AS eval_runs, to_regclass('personal_eval_scores') AS eval_scores, to_regclass('personal_eval_events') AS eval_events, to_regclass('personal_eval_event_counters') AS eval_counters, to_regclass('personal_eval_sandbox_leases') AS eval_leases",
     );
     if (Object.values(tables.rows[0]).some((v) => v === null))
       throw new Error("SCHEMA_INCOMPLETE");
@@ -376,7 +376,13 @@ export class PersonalPostgresStore implements Store {
       EXISTS(SELECT 1 FROM pg_index WHERE indexrelid=to_regclass('personal_run_work_dispatchable') AND indrelid=to_regclass('personal_run_work') AND indisvalid AND indisready) AS dispatchable,
       EXISTS(SELECT 1 FROM pg_index WHERE indexrelid=to_regclass('personal_audit_page') AND indrelid=to_regclass('personal_audit') AND indisvalid AND indisready) AS audit_page,
       EXISTS(SELECT 1 FROM pg_index WHERE indexrelid=to_regclass('personal_runs_task_identity') AND indrelid=to_regclass('personal_runs') AND indisvalid AND indisready) AS task_identity,
-      EXISTS(SELECT 1 FROM pg_index WHERE indexrelid=to_regclass('personal_tool_failures') AND indrelid=to_regclass('personal_run_events') AND indisvalid AND indisready) AS tool_failures`);
+      EXISTS(SELECT 1 FROM pg_index WHERE indexrelid=to_regclass('personal_tool_failures') AND indrelid=to_regclass('personal_run_events') AND indisvalid AND indisready) AS tool_failures,
+      EXISTS(SELECT 1 FROM pg_index WHERE indexrelid=to_regclass('personal_eval_case_runs_claim') AND indrelid=to_regclass('personal_eval_case_runs') AND indisvalid AND indisready) AS eval_claim,
+      EXISTS(SELECT 1 FROM pg_index WHERE indexrelid=to_regclass('personal_eval_case_runs_expired') AND indrelid=to_regclass('personal_eval_case_runs') AND indisvalid AND indisready) AS eval_expired,
+      EXISTS(SELECT 1 FROM pg_index WHERE indexrelid=to_regclass('personal_eval_jobs_history') AND indrelid=to_regclass('personal_eval_jobs') AND indisvalid AND indisready) AS eval_history,
+      EXISTS(SELECT 1 FROM pg_index WHERE indexrelid=to_regclass('personal_eval_jobs_agent_history') AND indrelid=to_regclass('personal_eval_jobs') AND indisvalid AND indisready) AS eval_agent_history,
+      EXISTS(SELECT 1 FROM pg_index WHERE indexrelid=to_regclass('personal_eval_case_runs_job') AND indrelid=to_regclass('personal_eval_case_runs') AND indisvalid AND indisready) AS eval_job_cases,
+      EXISTS(SELECT 1 FROM pg_index WHERE indexrelid=to_regclass('personal_eval_user_running') AND indrelid=to_regclass('personal_eval_case_runs') AND indisvalid AND indisready) AS eval_user_running`);
     if (Object.values(indexes.rows[0]).some((v) => v !== true))
       throw new Error("SCHEMA_INDEXES_INCOMPLETE");
     const triggers = await this.healthPool

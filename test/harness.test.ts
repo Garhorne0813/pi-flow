@@ -674,12 +674,17 @@ test("SSE expires its connection identity and renewed credentials replay missed 
   await f.store.tx("one", (s) => {
     s.runs[r.id]!.state = "RUNNING";
   });
-  const expiresAt = Date.now() + 150;
+  // Start the short-lived credential when it is first authenticated, rather
+  // than spending its lifetime constructing the application under CI load.
+  let expiresAt: number | undefined;
   const app = buildAPI(
     f.service,
     async (header) => ({
       ...alice,
-      expiresAt: header === "Bearer renewed" ? Date.now() + 60000 : expiresAt,
+      expiresAt:
+        header === "Bearer renewed"
+          ? Date.now() + 60000
+          : (expiresAt ??= Date.now() + 150),
     }),
     f.sandbox,
   );

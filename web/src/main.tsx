@@ -368,6 +368,7 @@ function App() {
         await submitRun(s.id, text);
         if (context !== sendScope()) return;
         clearSentDraft(targetKey, text);
+        clearSentDraft(sourceKey, text);
       });
       if (context === sendScope()) creating.current = false;
       return;

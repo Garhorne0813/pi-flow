@@ -1,5 +1,7 @@
 import { publicWebPath, webRoutes } from "./web.js";
 import { registerChatRoutes } from "./chat-timeline.js";
+import { registerEvalRoutes } from "./evals.js";
+import type { EvalService } from "../evals/service.js";
 import Fastify from "fastify";
 import multipart from "@fastify/multipart";
 import { timingSafeEqual, createHash } from "node:crypto";
@@ -39,6 +41,7 @@ export function buildAPI(
   mcp?: MCPManager,
   skillPackages?: SkillPackages,
   collections?: { token: string; resolve: CollectionResolver },
+  evals?: EvalService,
 ) {
   if (collections && collections.token.length < 32)
     throw new Error("Collection API token must have at least 32 characters");
@@ -114,7 +117,9 @@ export function buildAPI(
     // Only static UI resources are public; API authentication and route-level admin authorization remain enforced.
     if (
       req.method === "GET" &&
-      (["/admin/agents/ui", "/admin/ui"].includes(req.url.split("?")[0]!) ||
+      (["/admin/agents/ui", "/admin/ui", "/evals/ui"].includes(
+        req.url.split("?")[0]!,
+      ) ||
         publicWebPath(req.url.split("?")[0]!))
     )
       return;
@@ -131,6 +136,7 @@ export function buildAPI(
       actors.set(req, await principal(service.registry, authenticated));
     } else actors.set(req, authenticated);
   });
+  if (evals) registerEvalRoutes(app, actor, evals);
   app.addHook("onResponse", async (req, reply) => {
     const a = actors.get(req);
     if (

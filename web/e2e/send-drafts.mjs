@@ -87,6 +87,7 @@ try {
     await input.fill("first message");
     heldCreate = undefined;
     await page.getByLabel("开始对话 →", { exact: true }).click();
+    if (target === "/settings") await input.fill("edited draft");
     const destination = target === "/workspace" ? "工作区文件" : "个人设置";
     await page.getByRole("link", { name: destination, exact: true }).click();
     await page.waitForURL("**" + target);
@@ -94,6 +95,16 @@ try {
     await heldCreate.fulfill({ json: { id: "C", agentId: "one" } });
     await completed;
     assert.equal(new URL(page.url()).pathname, target);
+    await page.waitForFunction(
+      () =>
+        sessionStorage.getItem("pi-flow-draft:user:undefined") !==
+        "first message",
+    );
+    await page.getByRole("button", { name: "新建对话", exact: true }).click();
+    assert.equal(
+      await input.inputValue(),
+      target === "/settings" ? "edited draft" : "",
+    );
   }
   console.log(
     "PASS: delayed sends preserve newer drafts, A does not block B, and session creation transfers the latest draft",
