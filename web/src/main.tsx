@@ -285,7 +285,14 @@ function App() {
     enabled: ready && !!me,
     refetchInterval: 5000,
   });
-  const selected = sessions.data?.items.find((s) => s.id === sid);
+  const listedSession = sessions.data?.items.find((s) => s.id === sid);
+  const sessionDetail = useQuery({
+    queryKey: ["session", authGeneration, sid],
+    queryFn: () => api<Session>(`/sessions/${sid}`),
+    enabled: ready && !!me && !!sid && sessions.isSuccess && !listedSession,
+  });
+  const selected =
+    listedSession || (sessionDetail.error ? undefined : sessionDetail.data);
   useEffect(() => {
     if (!me?.admin) cache.removeQueries({ queryKey: ["admin"] });
   }, [me?.admin, cache]);
@@ -324,7 +331,10 @@ function App() {
     try {
       await fn();
       if (context !== sendScope()) return;
-      await cache.invalidateQueries({ queryKey: ["sessions"] });
+      await Promise.all([
+        cache.invalidateQueries({ queryKey: ["sessions"] }),
+        cache.invalidateQueries({ queryKey: ["session"] }),
+      ]);
     } catch (e) {
       if (context !== sendScope()) return;
       setError(e instanceof Error ? e.message : "请求失败");
@@ -387,6 +397,7 @@ function App() {
     identity.error?.message,
     agents.error?.message,
     sessions.error?.message,
+    sessionDetail.error?.message,
   ]
     .filter(Boolean)
     .join(" · ");
@@ -598,7 +609,13 @@ function App() {
                   ? "个人设置"
                   : location.pathname === "/workspace"
                     ? "工作区"
-                    : selected?.title || "新对话"}
+                    : selected
+                      ? selected.title || "未命名对话"
+                      : sid
+                        ? sessionDetail.error
+                          ? "会话不可用"
+                          : "正在加载会话…"
+                        : "新对话"}
             </strong>
           </div>
           <div className="header-actions">
@@ -832,10 +849,26 @@ function App() {
                     <select
                       className={inputCss.select}
                       aria-label="选择 Agent"
-                      value={selected?.agentId || agent}
+                      value={sid ? selected?.agentId || "" : agent}
                       disabled={!!sid}
                       onChange={(e) => setAgent(e.target.value)}
                     >
+                      {sid && !selected?.agentId && (
+                        <option value="">
+                          {sessionDetail.error
+                            ? "无法确认会话 Agent"
+                            : "正在加载会话 Agent…"}
+                        </option>
+                      )}
+                      {sid &&
+                        selected?.agentId &&
+                        !agents.data?.items.some(
+                          (a) => (a.key || a.id) === selected.agentId,
+                        ) && (
+                          <option value={selected.agentId}>
+                            {selected.agentId}（当前不可选）
+                          </option>
+                        )}
                       {agents.data?.items.map((a) => (
                         <option key={a.key || a.id} value={a.key || a.id}>
                           {a.config.name}

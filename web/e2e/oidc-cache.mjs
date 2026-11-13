@@ -51,7 +51,9 @@ try {
     if (path.endsWith("/sessions")) {
       if (who === "B") bSessionRequests++;
       return json({
-        items: [{ id: who, title: who + " private conversation" }],
+        items: [
+          { id: who, title: who + " private conversation", agentId: "two" },
+        ],
       });
     }
     if (path.endsWith("/active-task")) return json({ activeRun: null });

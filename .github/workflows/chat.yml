@@ -41,6 +41,7 @@ jobs:
           node web/e2e/chat-flow.mjs
           node web/e2e/interaction.mjs
           node web/e2e/roles.mjs
+          node web/e2e/session-metadata.mjs
           node web/e2e/presentation.mjs
       - name: Upload interface previews
         uses: actions/upload-artifact@v4
