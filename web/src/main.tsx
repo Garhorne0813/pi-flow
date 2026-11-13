@@ -289,19 +289,23 @@ function App() {
   useEffect(() => {
     if (!me?.admin) cache.removeQueries({ queryKey: ["admin"] });
   }, [me?.admin, cache]);
+  const priorPreference = useRef(preferences.defaultAgent);
   useEffect(() => {
-    if (agents.data?.items.length) {
-      const preferred = agents.data.items.find(
+    const preferenceChanged =
+      priorPreference.current !== preferences.defaultAgent;
+    priorPreference.current = preferences.defaultAgent;
+    if (!agents.data) return;
+    const items = agents.data.items;
+    setAgent((current) => {
+      if (!preferenceChanged && items.some((a) => (a.key || a.id) === current))
+        return current;
+      const preferred = items.find(
         (a) => (a.key || a.id) === preferences.defaultAgent,
       );
-      setAgent(
-        preferred?.key ||
-          preferred?.id ||
-          agents.data.items[0].key ||
-          agents.data.items[0].id ||
-          "",
+      return (
+        preferred?.key || preferred?.id || items[0]?.key || items[0]?.id || ""
       );
-    }
+    });
   }, [agents.data, preferences.defaultAgent]);
   useEffect(() => {
     setDraft(

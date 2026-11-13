@@ -32,6 +32,33 @@ try {
     105,
   );
   assert.deepEqual(offsets, [0, 100]);
+  async function refresh() {
+    const result = page.waitForResponse((r) =>
+      r.url().includes("/api/v1/agents?offset=100"),
+    );
+    await page.evaluate(async () => {
+      const url = performance
+        .getEntriesByType("resource")
+        .find((e) => e.name.includes("/@tanstack_react-query.js")).name;
+      const { focusManager } = await import(url);
+      focusManager.setFocused(false);
+      focusManager.setFocused(true);
+    });
+    await result;
+  }
+  agents[0].config.name = "Renamed first Agent";
+  await refresh();
+  await page
+    .getByRole("option", { name: "Renamed first Agent", exact: true })
+    .waitFor({ state: "attached" });
+  assert.equal(await page.getByLabel("选择 Agent").inputValue(), "agent-104");
+  agents.pop();
+  await refresh();
+  await page.waitForFunction(
+    () =>
+      document.querySelector('select[aria-label="选择 Agent"]').value ===
+      "agent-0",
+  );
   console.log("PASS: all 105 agents available via paginated loading");
 } finally {
   await browser.close();

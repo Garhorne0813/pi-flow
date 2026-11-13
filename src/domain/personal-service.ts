@@ -109,8 +109,6 @@ export class PersonalService extends HarnessService {
     const cwd = workspacePath(input.cwd);
     const w = await this.ensureWorkspace(a);
     return this.sessionWrite(a, input.id, (s) => {
-      const av = s.managedAgents?.[input.agentId];
-      if (!av || !agentAllowed(av, a)) throw new Fault(404, "AGENT_NOT_FOUND");
       const creationDigest = digest({
         agentId: input.agentId,
         cwd,
@@ -124,6 +122,8 @@ export class PersonalService extends HarnessService {
           throw new Fault(409, "SESSION_CREATE_CONFLICT");
         return existing;
       }
+      const av = s.managedAgents?.[input.agentId];
+      if (!av || !agentAllowed(av, a)) throw new Fault(404, "AGENT_NOT_FOUND");
       const ses = {
         creationDigest,
         id: input.id ?? id(),

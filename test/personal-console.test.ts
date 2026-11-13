@@ -325,6 +325,30 @@ test("client-selected session IDs deduplicate committed creation retries", async
       payload: { ...payload, title: "different" },
     });
     assert.equal(conflict.statusCode, 409);
+    for (const change of ["disabled", "acl", "removed"]) {
+      await service.registry.tx((s) => {
+        const agent = s.managedAgents!.assistant;
+        if (change === "disabled") agent!.enabled = false;
+        if (change === "acl") {
+          agent!.enabled = true;
+          agent!.allowedUsers = ["someone-else"];
+        }
+        if (change === "removed") delete s.managedAgents!.assistant;
+      });
+      const replay = await app.inject({
+        method: "POST",
+        url: "/api/v1/sessions",
+        payload,
+      });
+      assert.equal(replay.statusCode, 201, change);
+      assert.equal(replay.json().id, id);
+      const fresh = await app.inject({
+        method: "POST",
+        url: "/api/v1/sessions",
+        payload: { ...payload, id: crypto.randomUUID() },
+      });
+      assert.equal(fresh.statusCode, 404, change);
+    }
     const list = await app.inject({ url: "/api/v1/sessions" });
     assert.equal(
       list.json().items.filter((s: { id: string }) => s.id === id).length,

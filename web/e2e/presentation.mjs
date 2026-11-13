@@ -121,7 +121,7 @@ try {
     .locator("option")
     .first()
     .waitFor({ state: "attached" });
-  await page.getByRole("link", { name: "Agent 管理", exact: true }).waitFor();
+  await page.getByRole("link", { name: "管理中心", exact: true }).waitFor();
   await page.screenshot({ path: output + "dsh-empty-desktop.png" });
   assert.equal(
     await page.evaluate(() => getComputedStyle(document.body).backgroundColor),
