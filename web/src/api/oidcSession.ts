@@ -1,10 +1,14 @@
 import type { User, UserManager } from "oidc-client-ts";
 // OIDC events and async restoration share one boundary, including late results.
 export function observeOidcSession(
-  manager: Pick<UserManager, "events" | "getUser" | "signinRedirectCallback">,
+  manager: Pick<
+    UserManager,
+    "events" | "getUser" | "signinRedirectCallback" | "settings"
+  >,
   callback: boolean,
   handlers: {
     onUser: (user: User) => void;
+    onRefresh: (user: User) => void;
     onEnd: () => void;
     onError: (error: unknown) => void;
     onCallback: (user: User) => void;
@@ -12,11 +16,13 @@ export function observeOidcSession(
 ) {
   let disposed = false,
     version = 0,
-    activeToken: string | undefined;
+    activeToken: string | undefined,
+    activeIdentity: string | undefined;
   const end = () => {
     if (disposed) return;
     version++;
     activeToken = undefined;
+    activeIdentity = undefined;
     handlers.onEnd();
   };
   const loaded = (user: User) => {
@@ -27,7 +33,15 @@ export function observeOidcSession(
     }
     version++;
     activeToken = user.access_token;
-    handlers.onUser(user);
+    const issuer = user.profile?.iss || manager.settings?.authority;
+    const subject = user.profile?.sub;
+    // Missing identity claims cannot establish that it is the same user.
+    const identity =
+      issuer && subject ? JSON.stringify([issuer, subject]) : undefined;
+    const sameIdentity = identity !== undefined && identity === activeIdentity;
+    activeIdentity = identity;
+    if (sameIdentity) handlers.onRefresh(user);
+    else handlers.onUser(user);
   };
   manager.events.addUserLoaded(loaded);
   manager.events.addUserUnloaded(end);

@@ -2,7 +2,12 @@ import { expect, it, vi } from "vitest";
 import { QueryClient } from "@tanstack/react-query";
 import type { User, UserManager } from "oidc-client-ts";
 import { observeOidcSession } from "./oidcSession";
-const user = (name: string) => ({ access_token: name, expired: false }) as User;
+const user = (name: string) =>
+  ({
+    access_token: name,
+    expired: false,
+    profile: { iss: "https://id.example", sub: name },
+  }) as User;
 function setup(callback = false) {
   const events = {
     loaded: new Set<(u: User) => void>(),
@@ -26,7 +31,7 @@ function setup(callback = false) {
     signinRedirectCallback: () => pending,
   } as unknown as Pick<
     UserManager,
-    "events" | "getUser" | "signinRedirectCallback"
+    "events" | "getUser" | "signinRedirectCallback" | "settings"
   >;
   const cache = new QueryClient();
   cache.setQueryData(["identity"], { userId: "old" });
@@ -42,6 +47,7 @@ function setup(callback = false) {
       cache.clear();
       end();
     },
+    onRefresh: vi.fn(),
     onError: vi.fn(),
     onCallback: vi.fn(),
   };
@@ -99,4 +105,39 @@ it("handles userLoaded during callback once and ignores results after disposal",
   await Promise.resolve();
   expect(disposed.activate).not.toHaveBeenCalled();
   expect(disposed.events.loaded.size).toBe(0);
+});
+
+it("refreshes the same issuer/subject without clearing cached user state", async () => {
+  const s = setup();
+  s.resolve(user("a"));
+  await Promise.resolve();
+  s.cache.setQueryData(["sessions", 0], { items: ["private"] });
+  s.events.loaded.forEach((fn) =>
+    fn({ ...user("a"), access_token: "rotated" } as User),
+  );
+  expect(s.activate).toHaveBeenCalledOnce();
+  expect(s.handlers.onRefresh).toHaveBeenCalledOnce();
+  expect(s.cache.getQueryData(["sessions", 0])).toEqual({ items: ["private"] });
+  s.events.loaded.forEach((fn) =>
+    fn({
+      ...user("a"),
+      profile: { ...user("a").profile, iss: "https://other.example" },
+    } as User),
+  );
+  expect(s.activate).toHaveBeenCalledTimes(2);
+  s.events.unloaded.forEach((fn) => fn());
+  s.events.loaded.forEach((fn) => fn(user("a")));
+  expect(s.activate).toHaveBeenCalledTimes(3);
+  s.dispose();
+});
+it("does not treat missing identity claims as a same-user refresh", async () => {
+  const s = setup();
+  s.resolve({ access_token: "one", expired: false } as User);
+  await Promise.resolve();
+  s.events.loaded.forEach((fn) =>
+    fn({ access_token: "two", expired: false } as User),
+  );
+  expect(s.activate).toHaveBeenCalledTimes(2);
+  expect(s.handlers.onRefresh).not.toHaveBeenCalled();
+  s.dispose();
 });

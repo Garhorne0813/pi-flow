@@ -11,15 +11,15 @@ try {
     route.fulfill({
       contentType: "application/javascript",
       body: `
- let current='A'; const loaded=new Set(),unloaded=new Set(),expired=new Set();
- const user=()=>({access_token:current,expired:false});
+ let current='A', tokenVersion=0; const loaded=new Set(),unloaded=new Set(),expired=new Set();
+ const user=()=>({access_token:current+":"+tokenVersion,expired:false,profile:{iss:"https://id.example",sub:current}});
  export const auth={getUser:async()=>user(),signinRedirectCallback:async()=>user(),events:{
  addUserLoaded:f=>loaded.add(f),removeUserLoaded:f=>loaded.delete(f),
  addUserUnloaded:f=>unloaded.add(f),removeUserUnloaded:f=>unloaded.delete(f),
  addAccessTokenExpired:f=>expired.add(f),removeAccessTokenExpired:f=>expired.delete(f)}};
  export const token=async()=>current; export const login=async()=>{};
  export const logout=async()=>{unloaded.forEach(f=>f());}; export const setLocalToken=()=>{};
- window.oidcTest={change:name=>{current=name;loaded.forEach(f=>f(user()));},expire:()=>expired.forEach(f=>f())};
+ window.oidcTest={refresh:()=>{tokenVersion++;loaded.forEach(f=>f(user()));},change:name=>{current=name;loaded.forEach(f=>f(user()));},expire:()=>expired.forEach(f=>f())};
  `,
     }),
   );
@@ -41,19 +41,49 @@ try {
         });
       return json({ userId: who, admin: true });
     }
-    if (path.endsWith("/agents")) return json({ items: [] });
+    if (path.endsWith("/agents"))
+      return json({
+        items: [
+          { id: "one", config: { name: "First" } },
+          { id: "two", config: { name: "Second" } },
+        ],
+      });
     if (path.endsWith("/sessions")) {
       if (who === "B") bSessionRequests++;
       return json({
         items: [{ id: who, title: who + " private conversation" }],
       });
     }
-    return json({ items: [] });
+    if (path.endsWith("/active-task")) return json({ activeRun: null });
+    return json({ items: [], nextCursor: null });
   });
   await page.goto("http://localhost:5173/chat");
   await page
     .getByRole("link", { name: "A private conversation", exact: true })
     .waitFor();
+  await page.getByLabel("选择 Agent", { exact: true }).selectOption("two");
+  await page
+    .getByRole("link", { name: "A private conversation", exact: true })
+    .click();
+  await page.getByLabel("发送消息", { exact: true }).fill("unsent draft");
+  await page.getByLabel("搜索当前页对话", { exact: true }).fill("private");
+  const sessionUrl = page.url();
+  const refreshed = page.waitForResponse((r) => r.url().endsWith("/api/v1/me"));
+  await page.evaluate(() => window.oidcTest.refresh());
+  await refreshed;
+  assert.equal(
+    await page.getByLabel("发送消息", { exact: true }).inputValue(),
+    "unsent draft",
+  );
+  assert.equal(
+    await page.getByLabel("选择 Agent", { exact: true }).inputValue(),
+    "two",
+  );
+  assert.equal(
+    await page.getByLabel("搜索当前页对话", { exact: true }).inputValue(),
+    "private",
+  );
+  assert.equal(page.url(), sessionUrl);
   await page.evaluate(() => window.oidcTest.change("B"));
   await page.waitForFunction(
     () => !document.body.textContent.includes("A private conversation"),
@@ -91,7 +121,7 @@ try {
     0,
   );
   console.log(
-    "PASS: mocked OIDC restoration, A-to-B switch before identity response, expiry, re-login, logout and identity 401",
+    "PASS: mocked OIDC restoration, same-user refresh preserves draft/agent/session/search, A-to-B switch before identity response, expiry, re-login, logout and identity 401",
   );
 } finally {
   await browser.close();

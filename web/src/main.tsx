@@ -196,6 +196,10 @@ function App() {
         setSessionSearch("");
         setReady(true);
       },
+      onRefresh: () => {
+        // Recheck permissions without resetting drafts or the current chat scope.
+        void cache.invalidateQueries({ queryKey: ["identity"] });
+      },
       onEnd: () => {
         setReady(false);
         cache.clear();
