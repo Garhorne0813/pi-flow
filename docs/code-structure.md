@@ -1,3 +1,5 @@
+> 管理前端已迁移至 `web/src/admin/`；旧 `/admin/ui` 和 `/admin/agents/ui` 仅跳转到 `/admin/agents`。构建和当前功能见 [管理中心](admin-console.zh-CN.md)。
+
 # 代码结构与模块边界
 
 [README](../README.zh-CN.md) · [Architecture](architecture.md) · [架构](architecture.zh-CN.md)
@@ -71,9 +73,7 @@ src/
 ├── schedules/                 # 调度执行、历史与定时服务
 ├── security/                  # 策略、令牌保管与路径保护
 ├── tools/                     # Web 工具适配
-└── admin-ui/
-    ├── page.ts                # 管理控制台 HTML 外壳
-    └── …                      # 控制台脚本与样式
+web/src/admin/                 # React Agent/Skill/MCP/委派管理中心
 migrations/                    # 按序执行的数据库迁移
 scripts/                       # 冒烟、基准、验收与供应链校验
 test/                          # API、业务、存储、Sandbox 与浏览器回归
@@ -85,7 +85,7 @@ test/                          # API、业务、存储、Sandbox 与浏览器回
 - 领域权限与跨资源业务规则放在 `domain/`，持久化查询和事务实现放在 `storage/`。运行时和任务调度放在 `execution/`；预算规则与账本放在 `domain/usage.ts`，日志、指标与告警放在 `observability/`。
 - Sandbox 的编排、Provider、租约、远程脚本和挂载策略统一放在 `sandbox/`；MCP 协议适配放在 `mcp/`。路由通过 Manager 使用这些能力。
 - Skill ZIP 包的本地校验与发布准备放在 `skills/`，挂载到远程执行环境的策略放在 `sandbox/skill-mounts.ts`。
-- 控制台 HTML、脚本和样式统一放在 `admin-ui/`；该目录通过 API 提供同源页面，无独立前端构建。
+- 管理中心位于 `web/src/admin/`，与聊天共享登录态。Fastify 通过 `api/web.ts` 提供构建后的静态资源；旧管理台 URL 仅跳转。
 - 新路由模块导出同步 `register…Routes` 函数，在 `api/server.ts` 的 `buildAPI` 中装配；通过 `Pick<RouteContext, …>` 列出依赖。所有路由直接注册到同一个 Fastify 实例，继承统一认证、错误处理、请求审计及 multipart 支持。
 - 启动配置与依赖装配放在 `app/bootstrap.ts`。`main.ts`、`worker-main.ts`、`migrate.ts` 保持稳定，现有 npm、Docker 和部署入口不变。
 - 内部模块使用具体文件路径及 `.js` 扩展名导入。移动模块时同步更新 `src/`、`test/` 和 `scripts/`（包括引用 `dist/` 的脚本），以及文档中的路径。

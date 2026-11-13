@@ -4,3 +4,7 @@ work
 dist
 .env
 attachments
+**/node_modules
+web/dist
+web/.env
+web/.env.*

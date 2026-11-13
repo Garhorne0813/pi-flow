@@ -4047,3 +4047,36 @@ test(
     }
   },
 );
+
+test(
+  "personal PostgreSQL session creation deduplicates retries across clients",
+  { skip: !url },
+  async () => {
+    const f = await reviewDatabase();
+    try {
+      const request = { id: id(), agentId: "a", title: "first message" };
+      const original = await f.service.createPersonalSession(f.actor, request);
+      // The caller loses the committed response; independent clients retry concurrently.
+      const retries = await Promise.all(
+        Array.from({ length: 6 }, (_, i) =>
+          (i % 2 ? f.other : f.service).createPersonalSession(f.actor, request),
+        ),
+      );
+      assert.ok(retries.every((s) => s.id === original.id));
+      const persisted = await f.a.pool.query(
+        "SELECT count(*)::int AS n FROM personal_sessions WHERE user_id=$1 AND session_id=$2",
+        [f.actor.userId, request.id],
+      );
+      assert.equal(persisted.rows[0].n, 1);
+      await assert.rejects(
+        f.other.createPersonalSession(f.actor, {
+          ...request,
+          title: "different",
+        }),
+        (e) => e instanceof Error && "status" in e && e.status === 409,
+      );
+    } finally {
+      await f.close();
+    }
+  },
+);

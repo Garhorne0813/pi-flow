@@ -654,7 +654,7 @@ test("SSE polls are read-only, replay ordered pages via Last-Event-ID, and reche
       ids,
       Array.from({ length: 155 }, (_, i) => i + 2),
     );
-    assert.match(response.body, /ACCESS_REVOKED_OR_UNAVAILABLE/);
+    assert.match(response.body, /ACCESS_REVOKED/);
     assert.doesNotMatch(response.body, /event: run.queued/);
     assert.ok(writes <= 1, "only request completion audit may write");
   } finally {

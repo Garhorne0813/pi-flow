@@ -1,0 +1,51 @@
+name: chat-web
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  web:
+    timeout-minutes: 15
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+        working-directory: web
+      - run: npm test
+        working-directory: web
+      - run: npm run build
+        working-directory: web
+      - run: npm audit --audit-level=high
+        working-directory: web
+      - name: Reject foreign protocol dependencies
+        run: |
+          node scripts/check-chat-dependencies.mjs
+          node scripts/chat-ui-notices.mjs --check
+      - name: Install backend and prepare browser for chat smoke tests
+        run: |
+          npm ci
+          npm run build
+          node scripts/prepare-ci-browser.mjs
+      - name: Browser chat and interaction acceptance
+        run: |
+          HARNESS_MODE=demo SANDBOX_PROVIDER=demo DEV_TOKEN=chat-browser-test-token HOST=127.0.0.1 PORT=3000 LOG_LEVEL=silent CONFIG_DIR=/nonexistent/pi-flow node dist/main.js > /tmp/chat-api.log 2>&1 &
+          (cd web && CHAT_DEV_TOKEN=chat-browser-test-token npm run dev > /tmp/chat-web.log 2>&1) &
+          node --input-type=module -e 'for(let n=0;n<100;n++){try{if((await fetch("http://127.0.0.1:5173/chat")).ok)process.exit(0);}catch{}await new Promise(r=>setTimeout(r,200));}process.exit(1)'
+          node web/e2e/chat-flow.mjs
+          node web/e2e/interaction.mjs
+          node web/e2e/roles.mjs
+          node web/e2e/session-metadata.mjs
+          node web/e2e/presentation.mjs
+      - name: Upload interface previews
+        uses: actions/upload-artifact@v4
+        with:
+          name: chat-ui-previews
+          path: work/previews/dsh-*.png
+          retention-days: 14

@@ -1,0 +1,102 @@
+{
+  "repository": "https://github.com/deepseek-ai/deepseek-harness",
+  "commit": "e8f7b93a344964de3dca1ace9e72b6e4d6de87cb",
+  "files": [
+    {
+      "file": "design-platform.css",
+      "source": "packages/client/ui-theme/src/styles/design-platform.css",
+      "upstreamSha256": "3234f318769ea5065013793d58d98b235948486789d69ea16e850bd3713babcc",
+      "modifications": "None; exact upstream copy"
+    },
+    {
+      "file": "base.css",
+      "source": "packages/client/ui-theme/src/styles/base.css",
+      "upstreamSha256": "803926ce39f5ea48b652021d06b6ca65c4acc7be2c5c4e19bd904ab1dabf0b67",
+      "modifications": "None; exact upstream copy"
+    },
+    {
+      "file": "gradient-shadow-text.css",
+      "source": "packages/client/ui-theme/src/styles/gradient-shadow-text.css",
+      "upstreamSha256": "b6e1e8387edbfa60ec03bb29aad7c01245c0adbd22229d5a6f2916caa7e7b427",
+      "modifications": "None; exact upstream copy"
+    },
+    {
+      "file": "scrollbar.css",
+      "source": "packages/client/ui-theme/src/styles/scrollbar.css",
+      "upstreamSha256": "d83797aa96625e8ec77412bfc5649469cd5834d3cb0f7f6a1f3db8a59e1f4530",
+      "modifications": "None; exact upstream copy"
+    },
+    {
+      "file": "UserMessageBubble.tsx",
+      "source": "packages/client/ui-primitives/src/UserMessageBubble.tsx",
+      "upstreamSha256": "55ef371e38a0f8f9d1b254898dc3a1dec89167e2cf5475ab7254aa8b7a694692",
+      "modifications": "None; exact upstream copy"
+    },
+    {
+      "file": "UserMessageBubble.module.css",
+      "source": "packages/client/ui-primitives/src/UserMessageBubble.module.css",
+      "upstreamSha256": "c86a4623c0d64ade58cbe063129732c93f730d1cf2b892357c1e3dc6ef44871e",
+      "modifications": "None; exact upstream copy"
+    },
+    {
+      "file": "Button.tsx",
+      "source": "packages/client/ui-primitives/src/Button.tsx",
+      "upstreamSha256": "b7fa58fb0b88be96d93144be9f2a25b3487d9ef49afe991d1f6073c8a814f46f",
+      "modifications": "None; exact upstream copy"
+    },
+    {
+      "file": "Button.module.css",
+      "source": "packages/client/ui-primitives/src/Button.module.css",
+      "upstreamSha256": "90183bb1a427e52cecbf08981e51177f12b3a97d61bb5f50446be49c1975ed3d",
+      "modifications": "None; exact upstream copy"
+    },
+    {
+      "file": "Pill.tsx",
+      "source": "packages/client/ui-primitives/src/Pill.tsx",
+      "upstreamSha256": "851727b4f745755f8553a92bc5881e54d0479ea680d1686533ba210cb943ca2f",
+      "modifications": "None; exact upstream copy"
+    },
+    {
+      "file": "Pill.module.css",
+      "source": "packages/client/ui-primitives/src/Pill.module.css",
+      "upstreamSha256": "6b53a08c2d8c783cff4282f3bb04281f8dc8774e1128cf89a84cd00d82d578e6",
+      "modifications": "None; exact upstream copy"
+    },
+    {
+      "file": "CodeCard.module.css",
+      "source": "packages/client/ui-primitives/src/CodeCard.module.css",
+      "upstreamSha256": "3178630168a17cc15a0628b0d94a1f6a7e1c3ebf41d1c89a52e23dcaac5247aa",
+      "modifications": "None; exact upstream copy"
+    },
+    {
+      "file": "MarkdownText.module.css",
+      "source": "packages/client/ui-primitives/src/markdown/MarkdownText.module.css",
+      "upstreamSha256": "b91ef0bba5fc2f1a4f2900cbafdeabb3f7f10a783308f5a411c75b459fa39153",
+      "modifications": "None; exact upstream copy"
+    },
+    {
+      "file": "HeroShell.module.css",
+      "source": "packages/client/ui-conversation/src/client/skeleton/HeroShell.module.css",
+      "upstreamSha256": "9135bc0f982858c67158f977f205c23382ccc0bfd10e15bce0aca1247002107e",
+      "modifications": "None; exact upstream copy"
+    },
+    {
+      "file": "InputBar.module.css",
+      "source": "packages/client/ui-conversation/src/client/skeleton/InputBar.module.css",
+      "upstreamSha256": "31528d1dfe9d4dc7b214f9b2bfcff82cb1b51f77dd1516f58fe4cce247ebe360",
+      "modifications": "None; exact upstream copy"
+    },
+    {
+      "file": "SidebarRoot.module.css",
+      "source": "packages/client/ui-sidebar/src/client/SidebarRoot.module.css",
+      "upstreamSha256": "e7c0a9720e72b6a3c7e3202edadc6678245f10298b588ff8995f63797ad8c25d",
+      "modifications": "None; exact upstream copy"
+    },
+    {
+      "file": "shiki.css",
+      "source": "packages/client/ui-theme/src/styles/shiki.css",
+      "upstreamSha256": "14f2b00083b035d8f92e26243a669d1b04a8d564c20d91856b20706cc79b8828",
+      "modifications": "None; exact upstream copy"
+    }
+  ]
+}

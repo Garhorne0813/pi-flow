@@ -5,6 +5,13 @@ import { params, uuid } from "./validation.js";
 import { principal } from "../storage/registry.js";
 import type { RouteContext } from "./context.js";
 
+export function streamErrorCode(error: unknown) {
+  if (error instanceof Fault && error.status === 401)
+    return "AUTHENTICATION_EXPIRED";
+  if (error instanceof Fault && [403, 404].includes(error.status))
+    return "ACCESS_REVOKED";
+  return "STREAM_UNAVAILABLE";
+}
 export function registerEventsRoutes({
   app,
   actor,
@@ -69,11 +76,7 @@ export function registerEventsRoutes({
       try {
         await service.verifyActor(a);
       } catch (error) {
-        closeStream(
-          error instanceof Fault && error.code === "USER_DISABLED"
-            ? "ACCESS_REVOKED"
-            : "ACCESS_REVOKED_OR_UNAVAILABLE",
-        );
+        closeStream(streamErrorCode(error));
       } finally {
         checkingActor = false;
       }
@@ -168,11 +171,8 @@ export function registerEventsRoutes({
             disconnected.signal,
           );
       }
-    } catch {
-      if (!closed)
-        reply.raw.write(
-          'event: stream.error\ndata: {"code":"ACCESS_REVOKED_OR_UNAVAILABLE"}\n\n',
-        );
+    } catch (error) {
+      closeStream(streamErrorCode(error));
     } finally {
       closed = true;
       subscription?.close();

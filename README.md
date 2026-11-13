@@ -48,7 +48,7 @@ HARNESS_MODE=demo DEV_TOKEN=local-demo-token-2026 npm start
 
 The API listens at `http://127.0.0.1:8080`. Demo mode seeds a Demo Agent and runs its Worker inside the API process. It uses a simulated model and in-memory files; restarting clears in-memory state.
 
-Open **http://127.0.0.1:8080/admin/ui** and enter the `DEV_TOKEN` above to inspect the management console. Conversations use the API or your own chat client.
+Open **http://127.0.0.1:8080/chat** for the unified frontend. Administrators access `/admin/agents` from its navigation. Docker includes the frontend build. For development use the controlled Vite proxy; production requires OIDC sign-in configuration.
 
 In another terminal, create your first conversation:
 
@@ -134,11 +134,11 @@ See the [API reference](docs/api.md) for workspace sharing, history and Todos, f
 
 ## Management console
 
-The Agent editor groups logical versions, separates configuration into keyboard-navigable panels, and shows a summary and diff before publication. Unsaved drafts are protected when navigating or changing connections. See the [delivery plan](docs/agent-console-roadmap.md) and [Studio isolation RFC](docs/agent-studio-rfc.md) for subsequent increments.
+The personal Agent editor edits stable configurations with review, revision checks and unsaved-draft protection. See the [delivery plan](docs/agent-console-roadmap.md) and [Studio isolation RFC](docs/agent-studio-rfc.md) for subsequent increments.
 
 Skills supports uploading a single-Skill ZIP into shared hostPath storage (Cube) or OSS (Aliyun), automatically registering an immutable version. The API needs publication access to the configured upload storage; see [deployment](docs/deployment.md#skill-zip-uploads--技能-zip-上传).
 
-After starting the API, open **http://127.0.0.1:8080/admin/ui** (`/admin/agents/ui` remains supported). Demo accepts `DEV_TOKEN`; production uses a UCS JWT with the `harness-admin` role. No separate frontend build is needed.
+After starting the API, open **http://127.0.0.1:8080/admin/agents**. Legacy URLs redirect to this React frontend. Source deployments must run `npm ci --prefix web && npm run build --prefix web`; Docker includes this step. Management shares frontend authentication and server-side admin authorization.
 
 Manage agent versions and access, skills, MCP servers, and subagent delegation. Inspect deployment capabilities and save tenant defaults for new agent drafts. Deployment credentials, volumes, endpoints, and capability grants are configured server-side.
 
@@ -206,6 +206,15 @@ Issues and pull requests are welcome. Run relevant tests plus `npm run check` an
 ## License
 
 [Apache-2.0](LICENSE). Vendored SDK provenance and licenses are documented in [vendor/README.md](vendor/README.md).
+
+无 OIDC 的本地演示：直接打开 Fastify 托管的 `/chat`，在登录页输入服务端配置的 `DEV_TOKEN`。
+令牌仅保存在当前页面内存中，刷新后需重新输入；退出会清除它。请仅在可信的本地环境或 HTTPS 下使用，
+不要把令牌放进 `VITE_*` 构建变量、URL 或公开构建产物。Vite 开发代理仍支持服务端 `CHAT_DEV_TOKEN`。
+
+OIDC 浏览器登录态采用内存存储，不将访问令牌写入 localStorage 或 sessionStorage。
+整页刷新或关闭页面后需要重新登录；身份提供方已有会话时，重新登录通常可复用其会话。
+聊天历史仍保存在服务端，重新登录后可打开原会话；未发送草稿按用户和会话保存在当前标签页的 sessionStorage。
+模拟认证测试用于验证 UI 隔离与事件处理，不证明真实 OIDC 刷新恢复、撤权或远程登出已验收。
 
 ## Agent 评测
 

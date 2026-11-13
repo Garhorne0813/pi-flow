@@ -12,7 +12,7 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
   quality:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     services:
       postgres:
@@ -34,10 +34,16 @@ jobs:
         with:
           node-version: 24
           cache: npm
-      - run: sudo apt-get update && sudo apt-get install -y openssl python3 bash
+      - name: Verify preinstalled runtime tools
+        run: |
+          openssl version
+          python3 --version
+          bash --version
       - run: npm ci
-      - name: Install browser for mandatory console acceptance
-        run: npx playwright-core install --with-deps chromium
+      - run: npm ci --prefix web
+      - run: npm run build --prefix web
+      - name: Prepare browser for mandatory console acceptance
+        run: node scripts/prepare-ci-browser.mjs
       - name: TypeScript check
         run: npm run check
       - name: Check JavaScript syntax
@@ -50,8 +56,7 @@ jobs:
       - run: npm run build
       - run: npm run smoke
       - run: npm run smoke:eval
-      - name: Compose empty-volume integration
-        run: npm run smoke:compose
+      # Real Docker image/container checks are omitted per project owner request.
       - name: Upload test reports
         uses: actions/upload-artifact@v4
         if: always()

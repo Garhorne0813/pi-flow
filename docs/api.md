@@ -1,6 +1,8 @@
+> 管理前端已迁移至 `web/src/admin/`；旧 `/admin/ui` 和 `/admin/agents/ui` 仅跳转到 `/admin/agents`。构建和当前功能见 [管理中心](admin-console.zh-CN.md)。
+
 # HTTP / SSE API
 
-Base: `/api/v1`。除健康检查端点和控制台入口 `GET /admin/ui`、仅返回静态 HTML 的 `GET /admin/agents/ui` 外，所有 API 请求必须提供 `Authorization: Bearer <UCS JWT>`；Demo 使用 `DEV_TOKEN`。Agent 管理页面在同源路径 `/admin/agents/ui`，页面通过浏览器内存中的管理员 Bearer Token 调用 `/api/v1/admin/*`，不将令牌保存到 URL 或浏览器存储。Tenant 只来自认证后的声明。所有 JSON 请求采用严格字段校验。错误形如：
+Base: `/api/v1`。API 请求必须提供 `Authorization: Bearer <UCS JWT>`；Demo 使用 `DEV_TOKEN`。健康检查、构建后的 SPA 静态资源及旧管理入口重定向不含用户数据，可公开访问。Agent 管理页面位于 `/admin/agents`，与聊天共享登录态，通过浏览器内存中的访问令牌调用 `/api/v1/admin/*`；所有管理数据和写入仍验证管理员权限。Tenant 只来自认证后的声明。所有 JSON 请求采用严格字段校验。错误形如：
 
 ```json
 {
@@ -224,7 +226,7 @@ Run 查询、任务提交（含幂等重试）、交互续跑和取消响应统�
 等待任务的权限失效包含 WORKSPACE_NOT_FOUND（成员被移除）和 READ_ONLY（降级 viewer）。有未释放 checkpoint 租约的等待 Run 仍不提前失效；新任务返回原有兼容性错误，租约释放后重试即可自动清理被撤销的旧等待任务。
 ## 管理控制台
 
-`GET /admin/ui` 重定向到 `GET /admin/agents/ui`。HTML 外壳公开；下列 API 均要求管理员身份，数据限制在认证后的 Tenant 内。
+`GET /admin/ui` 和 `GET /admin/agents/ui` 重定向至 React 前端 `/admin/agents`；下列 API 均要求管理员身份，数据限制在认证后的 Tenant 内。
 
 | 方法 / 路径 | 行为 |
 | --- | --- |

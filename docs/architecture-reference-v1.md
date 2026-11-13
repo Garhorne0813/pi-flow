@@ -1,3 +1,5 @@
+> 管理前端已迁移至 `web/src/admin/`；旧 `/admin/ui` 和 `/admin/agents/ui` 仅跳转到 `/admin/agents`。构建和当前功能见 [管理中心](admin-console.zh-CN.md)。
+
 > 历史参考：以下为简化前的目标架构，不再作为当前改造契约。当前设计见 [implementation_doc.md](implementation_doc.md)。
 
 # pi-flow 架构（简洁版）
@@ -84,7 +86,7 @@ pi-flow 是一个**面向多用户的个人 AI Agent 后端**，只交付 HTTP/S
 | `src/tools/` | Web 工具适配 |
 | `src/schedules/` | cron 解析、调度服务、触发与历史记录 |
 | `src/observability/` | 健康模型、有界健康检查、日志、追踪、指标与告警；HTTP 健康探针由 `src/api/operations.ts` 提供 |
-| `src/admin-ui/` | 管理控制台 HTML、脚本与样式 |
+| `web/src/admin/` | React 管理中心组件 |
 | `migrations/` | 顺序 SQL（`harness_*` 旧表 + `personal_*` 现表 + `platform_*`） |
 
 ---

@@ -1,3 +1,5 @@
+import { publicWebPath, webRoutes } from "./web.js";
+import { registerChatRoutes } from "./chat-timeline.js";
 import { registerEvalRoutes } from "./evals.js";
 import type { EvalService } from "../evals/service.js";
 import Fastify from "fastify";
@@ -112,10 +114,13 @@ export function buildAPI(
       authenticateCollection(req.headers.authorization);
       return;
     }
-    // Only the static shell is public; all data and mutations still require admin auth.
+    // Only static UI resources are public; API authentication and route-level admin authorization remain enforced.
     if (
       req.method === "GET" &&
-      ["/admin/agents/ui", "/admin/ui", "/evals/ui"].includes(req.url.split("?")[0]!)
+      (["/admin/agents/ui", "/admin/ui", "/evals/ui"].includes(
+        req.url.split("?")[0]!,
+      ) ||
+        publicWebPath(req.url.split("?")[0]!))
     )
       return;
     if (
@@ -166,6 +171,7 @@ export function buildAPI(
       reply.header("Cache-Control", "no-store");
       return collections.resolve(CollectionRequest.parse(req.body));
     });
+  webRoutes(app);
   registerConfigurationRoutes(context);
   registerAgentsRoutes(context);
   registerSkillsRoutes(context);
@@ -177,7 +183,9 @@ export function buildAPI(
   registerRunsRoutes(context);
   registerEventsRoutes(context);
   registerFilesRoutes(context);
-  if (service instanceof PersonalService)
+  if (service instanceof PersonalService) {
     personalRoutes(app, service, sandbox, actor);
+    registerChatRoutes(context);
+  }
   return app;
 }

@@ -48,7 +48,7 @@ HARNESS_MODE=demo DEV_TOKEN=local-demo-token-2026 npm start
 
 API 地址为 `http://127.0.0.1:8080`。Demo 自动提供一个演示智能体，并在 API 进程内运行 Worker，使用模拟模型和内存文件；重启后内存状态丢失。
 
-打开 **http://127.0.0.1:8080/admin/ui**，输入上述 `DEV_TOKEN` 查看管理控制台。它用于管理配置；对话通过 API 或自行接入的聊天客户端进行。
+打开 **http://127.0.0.1:8080/chat** 使用统一聊天前端；管理员从侧栏进入 `/admin/agents`。Docker 包含前端构建。开发时可使用 `web/` 的受控代理转发 DEV_TOKEN，生产配置 OIDC 登录，见管理中心文档。
 
 在另一终端中创建第一段对话：
 
@@ -136,7 +136,7 @@ Session 绑定稳定的逻辑 Agent。新独立任务使用当前生效版本；
 
 Agent 编辑器按逻辑 Agent 分组版本，使用支持键盘操作的配置标签页，发布前展示摘要与差异；切换 Agent 或连接时保护未保存草稿。后续增量见[交付计划](docs/agent-console-roadmap.md)和 [Studio 隔离 RFC](docs/agent-studio-rfc.md)。
 
-服务启动后访问 **http://127.0.0.1:8080/admin/ui**（兼容 `/admin/agents/ui`）。Demo 使用 `DEV_TOKEN`；生产使用具备 `harness-admin` 角色的 UCS JWT。控制台无需独立前端构建。
+服务启动后访问 **http://127.0.0.1:8080/admin/agents**。旧 `/admin/ui` 和 `/admin/agents/ui` 仅重定向至新前端。源码运行需先 `npm ci --prefix web && npm run build --prefix web`；Docker 已包含此步骤。所有管理功能沿用前端登录态和后端管理员鉴权。
 
 可管理 Agent 版本与访问范围、Skills、MCP 服务和子 Agent 委派，查看部署能力并保存新 Agent 草稿的租户默认值。部署凭证、卷、Endpoint 与权限上限仍由服务端配置。 Skills 支持上传单 Skill ZIP，自动发布到 Cube 共享 hostPath 或阿里云 OSS 并登记不可变版本；部署需为 API 配置上传存储权限。
 
@@ -204,3 +204,8 @@ Smoke 自动在 `18081` 端口启动并关闭 Demo，验证对话、SSE、幂等
 ## 许可证
 
 [Apache-2.0](LICENSE)。随工程打包的 SDK 来源与许可证见 [vendor/README.md](vendor/README.md)。
+
+### Pi-Flow Chat（独立 Web 前端）
+
+`web/` 提供普通用户对话界面；开发、OIDC PKCE 配置、历史 API、验证和部署要求见
+[Chat 实施说明](docs/chat-ui-porting.md)。此版本是 RFC 首个可评审实现，完整生产验收项见该说明。

@@ -1,3 +1,5 @@
+> 管理前端已迁移至 `web/src/admin/`；旧 `/admin/ui` 和 `/admin/agents/ui` 仅跳转到 `/admin/agents`。构建和当前功能见 [管理中心](admin-console.zh-CN.md)。
+
 # Personal Agent Platform 改造说明
 
 本说明对应当前代码，可直接运行。[implementation_doc.md](implementation_doc.md) 是当前简化设计。配置由数据库中的可编辑 Agent 管理，Run 保存最小执行快照；不再要求 Git 发布或 Agent 版本库。阿里云 E2B / OSS、多会话租约等能力仍未实现。
@@ -52,7 +54,7 @@ npm run worker
 
 `config/skills/<id>/SKILL.md` 及辅助文件按内容归档；拒绝符号链接，限制文件数和总大小；支持 `disable-model-invocation` 和 `agents/<name>.md`。`npm run skills:deliver` 将版本原子物化到 `SKILL_DELIVER_DIR`。Cube 支持通过 `SKILL_VOLUMES_JSON` 配置只读卷或受 `SKILL_HOST_ROOTS_JSON` 限制的 hostPath。Cube ZIP 上传通过 `SKILL_UPLOAD_ROOT` 原子写入 hostPath；阿里云 ZIP 上传校验后自动发布到 OSS 并登记，API 按本次选择生成独立集合，Worker 将集合一次只读挂载到 /skills，见 [阿里云接入](aliyun-sandbox.md)。目录物化本身不等于 Provider 已挂载。MCP 注册可放入 `config/mcp/servers.yaml`，格式为 `{id,endpointRef,allowedTools,enabled}` 数组；endpointRef 必须对应 Worker 的 `MCP_ENDPOINTS_JSON`。
 
-`/admin/ui` 管理控制台支持个人 Agent 的原地编辑、访问权限、禁用、Skill/MCP 登记和 ZIP 上传。保存 Agent 使用整份清单的 revision 防止并发覆盖，并保留编辑器尚未支持的配置字段；排队和审批续跑任务继续使用原快照。管理配置与 Skill/MCP 写入平台 registry，对所有个人身份一致生效。旧共享引擎保留逻辑版本和 ACL 行为，个人运行不创建或升级 AgentVersion。
+`/admin/agents` React 管理中心支持个人 Agent 的原地编辑、访问权限、禁用、Skill/MCP 登记和 ZIP 上传。保存 Agent 使用整份清单的 revision 防止并发覆盖，并保留编辑器尚未支持的配置字段；排队和审批续跑任务继续使用原快照。管理配置与 Skill/MCP 写入平台 registry，对所有个人身份一致生效。旧共享引擎保留逻辑版本和 ACL 行为，个人运行不创建或升级 AgentVersion。
 
 管理接口：
 
