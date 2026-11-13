@@ -158,6 +158,45 @@ try {
       await page.getByText("Agent 默认配置已保存", { exact: true }).waitFor();
       assert.equal(writes.at(-1).maxSteps, 42);
       assert.equal(writes.at(-1).expectedRevision, 0);
+      await page.getByLabel("最大执行步数").fill("43");
+      const globalDraft = await page
+        .getByLabel("全局禁用工具（逗号分隔）")
+        .inputValue();
+      revision++;
+      const refreshed = page.waitForResponse(
+        (r) =>
+          r.url().includes("/admin/config/global") &&
+          r.request().method() === "GET",
+      );
+      await page.evaluate(async () => {
+        const url = performance
+          .getEntriesByType("resource")
+          .find((e) => e.name.includes("/@tanstack_react-query.js")).name;
+        const { focusManager } = await import(url);
+        focusManager.setFocused(false);
+        focusManager.setFocused(true);
+      });
+      await refreshed;
+      assert.equal(await page.getByLabel("最大执行步数").inputValue(), "43");
+      assert.equal(
+        await page.getByLabel("全局禁用工具（逗号分隔）").inputValue(),
+        globalDraft,
+      );
+      const guard = page.waitForEvent("dialog");
+      const navigation = page
+        .getByRole("link", { name: "Skills 管理", exact: true })
+        .click();
+      await (await guard).dismiss();
+      await navigation;
+      assert.match(page.url(), /admin\/settings/);
+      assert.equal(await page.getByLabel("最大执行步数").inputValue(), "43");
+      const leave = page.waitForEvent("dialog");
+      const accepted = page
+        .getByRole("link", { name: "Skills 管理", exact: true })
+        .click();
+      await (await leave).accept();
+      await accepted;
+      await page.waitForURL("**/admin/skills");
     }
     await page.close();
   }

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { api, ApiError, request } from "../api/client";
-import { submitRun } from "./submitRun";
+import { submitRun, sendScope } from "./submitRun";
+import { streamError } from "./streamError";
 import { parseSSE } from "../api/sse";
 import {
   empty,
@@ -47,7 +48,7 @@ export function useChatSession(sid: string | undefined) {
     [cursor, setCursor] = useState<string | null>(null);
   const state = useRef(empty),
     generation = useRef(0),
-    locked = useRef(false),
+    locked = useRef<ReturnType<typeof sendScope> | null>(null),
     scope = useRef<SyncScope | null>(null);
   function update(fn: (p: Projection) => Projection) {
     state.current = fn(state.current);
@@ -99,6 +100,7 @@ export function useChatSession(sid: string | undefined) {
     state.current = empty;
     setProjection(empty);
     setRun(null);
+    setBusy(false);
     setError("");
     setCursor(null);
     scope.current = null;
@@ -112,6 +114,7 @@ export function useChatSession(sid: string | undefined) {
     };
     scope.current = context;
     async function sync() {
+      let retryDelay = 2500;
       while (isCurrent(context)) {
         try {
           if (!context.historyInitialized) await history(context);
@@ -129,6 +132,7 @@ export function useChatSession(sid: string | undefined) {
             await history(context);
             if (!isCurrent(context)) return;
             setError("");
+            retryDelay = 2500;
             await delay(2500, controller.signal);
             continue;
           }
@@ -139,8 +143,7 @@ export function useChatSession(sid: string | undefined) {
           );
           for await (const frame of parseSSE(res.body!, controller.signal)) {
             if (!isCurrent(context)) return;
-            if (frame.event === "stream.error")
-              throw new ApiError(401, "AUTHENTICATION_EXPIRED_OR_REVOKED");
+            if (frame.event === "stream.error") throw streamError(frame.data);
             const event = EventSchema.parse(JSON.parse(frame.data));
             if (event.runId !== r.id || event.sessionId !== sid)
               throw new Error("STREAM_IDENTITY_MISMATCH");
@@ -162,12 +165,14 @@ export function useChatSession(sid: string | undefined) {
           );
           if (!isCurrent(context)) return;
           setError("");
+          retryDelay = 2500;
         } catch (e) {
           if (!isCurrent(context)) return;
           setError(e instanceof Error ? e.message : "连接失败");
           if (e instanceof ApiError && [401, 403, 404].includes(e.status))
             return;
-          await delay(2500, controller.signal);
+          await delay(retryDelay, controller.signal);
+          retryDelay = Math.min(retryDelay * 2, 30000);
         }
       }
     }
@@ -178,27 +183,32 @@ export function useChatSession(sid: string | undefined) {
     };
   }, [sid]);
   async function mutate(fn: () => Promise<void>) {
-    if (locked.current) return;
-    locked.current = true;
+    const context = sendScope();
+    if (locked.current === context) return;
+    locked.current = context;
     setBusy(true);
     setError("");
     try {
       await fn();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "请求失败");
+      if (context === sendScope())
+        setError(e instanceof Error ? e.message : "请求失败");
     } finally {
-      locked.current = false;
-      setBusy(false);
+      if (locked.current === context) {
+        locked.current = null;
+        setBusy(false);
+      }
     }
   }
   async function send(text: string) {
     if (!sid) return false;
+    const context = sendScope();
     let sent = false;
     await mutate(async () => {
       const id = sid;
       const operation = async () => {
         const r = await submitRun<Run>(id, text);
-        if (id !== currentSid.current) return;
+        if (context !== sendScope() || id !== currentSid.current) return;
         setRun(r);
         update((p) => ({
           ...p,
@@ -221,10 +231,11 @@ export function useChatSession(sid: string | undefined) {
     });
     return sent;
   }
-  const respond = (id: string, response: string) =>
-    mutate(async () => {
+  const respond = (id: string, response: string) => {
+    const context = sendScope();
+    return mutate(async () => {
       const r = await api<Run>(`/interactions/${id}/response`, { response });
-      if (sid !== currentSid.current) return;
+      if (context !== sendScope() || sid !== currentSid.current) return;
       setRun(r);
       update((p) => ({
         ...p,
@@ -233,10 +244,17 @@ export function useChatSession(sid: string | undefined) {
         ),
       }));
     });
-  const cancel = () =>
-    mutate(async () => {
-      if (run) setRun(await api<Run>(`/runs/${run.id}/cancel`, {}));
+  };
+  const cancel = () => {
+    const context = sendScope();
+    return mutate(async () => {
+      if (run) {
+        const result = await api<Run>(`/runs/${run.id}/cancel`, {});
+        if (context === sendScope() && sid === currentSid.current)
+          setRun(result);
+      }
     });
+  };
   return {
     projection,
     run,

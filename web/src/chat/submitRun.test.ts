@@ -25,3 +25,31 @@ it("retains the first send's key after a lost response and deduplicates clicks",
   await submitRun("new-session", "hello");
   expect(api.mock.calls[2][3]).not.toBe(key);
 });
+it("isolates pending keys and inflight responses across identity boundaries", async () => {
+  const { resetSendScope } = await import("./submitRun");
+  resetSendScope();
+  let resolve!: (value: unknown) => void;
+  api.mockImplementationOnce(
+    () =>
+      new Promise((r) => {
+        resolve = r;
+      }),
+  );
+  const old = submitRun("shared-session", "same message");
+  const oldKey = api.mock.calls[0][3],
+    signal = api.mock.calls[0][4];
+  resetSendScope();
+  expect(signal.aborted).toBe(true);
+  api.mockRejectedValueOnce(new Error("new response lost"));
+  await expect(submitRun("shared-session", "same message")).rejects.toThrow(
+    "new response lost",
+  );
+  const newKey = api.mock.calls[1][3];
+  expect(newKey).not.toBe(oldKey);
+  const rejected = expect(old).rejects.toMatchObject({ name: "AbortError" });
+  resolve({ id: "old-run" });
+  await rejected;
+  api.mockResolvedValueOnce({ id: "new-run" });
+  await submitRun("shared-session", "same message");
+  expect(api.mock.calls[2][3]).toBe(newKey);
+});

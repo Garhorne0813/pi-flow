@@ -1,6 +1,7 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, ApiError } from "../api/client";
+import { useDirtyGuard } from "../admin/shared";
 import type { Identity } from "./preferences";
 interface Model {
   provider: string;
@@ -41,6 +42,9 @@ export function AdminSettings({
   return <AuthorizedSettings />;
 }
 function AuthorizedSettings() {
+  const [globalDirty, setGlobalDirty] = useState(false),
+    [defaultsDirty, setDefaultsDirty] = useState(false);
+  useDirtyGuard(globalDirty || defaultsDirty);
   const global = useQuery({
     queryKey: ["admin", "global"],
     queryFn: () => api<Global>("/admin/config/global"),
@@ -51,7 +55,10 @@ function AuthorizedSettings() {
     queryFn: () => api<Configuration>("/admin/configuration"),
     retry: false,
   });
-  if (global.error || configuration.error)
+  if (
+    (!global.data && global.error) ||
+    (!configuration.data && configuration.error)
+  )
     return (
       <section className="settings">
         <h1>无法读取全局配置</h1>
@@ -75,15 +82,12 @@ function AuthorizedSettings() {
         这些配置影响平台上的所有用户。已提交的任务继续使用各自固定的配置快照。
       </p>
       {global.data ? (
-        <GlobalForm key={`global:${global.data.revision}`} data={global.data} />
+        <GlobalForm data={global.data} onDirty={setGlobalDirty} />
       ) : (
         <p role="status">正在加载模型与策略…</p>
       )}
       {configuration.data ? (
-        <DefaultsForm
-          key={`defaults:${configuration.data.defaultsRevision}`}
-          data={configuration.data}
-        />
+        <DefaultsForm onDirty={setDefaultsDirty} data={configuration.data} />
       ) : (
         <p role="status">正在加载默认配置…</p>
       )}
@@ -96,7 +100,14 @@ const errorText = (e: unknown) =>
     : e instanceof Error
       ? e.message
       : "保存失败";
-function GlobalForm({ data }: { data: Global }) {
+function GlobalForm({
+  data,
+  onDirty,
+}: {
+  data: Global;
+  onDirty: (dirty: boolean) => void;
+}) {
+  const [base, setBase] = useState(data);
   const cache = useQueryClient(),
     [models, setModels] = useState(data.modelCatalog),
     [disabled, setDisabled] = useState(data.policy.disabledTools.join(", ")),
@@ -104,6 +115,28 @@ function GlobalForm({ data }: { data: Global }) {
     [saving, setSaving] = useState(false),
     [message, setMessage] = useState(""),
     [failed, setFailed] = useState(false);
+  const dirty =
+    JSON.stringify(models) !== JSON.stringify(base.modelCatalog) ||
+    disabled !== base.policy.disabledTools.join(", ") ||
+    Object.values(secrets).some(Boolean);
+  useEffect(() => onDirty(dirty), [dirty, onDirty]);
+  function reset(fresh: Global) {
+    setBase(fresh);
+    setModels(fresh.modelCatalog);
+    setDisabled(fresh.policy.disabledTools.join(", "));
+    setSecrets({});
+  }
+  useEffect(() => {
+    if (!dirty) reset(data);
+  }, [data]);
+  async function reload() {
+    const fresh = await cache.fetchQuery({
+      queryKey: ["admin", "global"],
+      queryFn: () => api<Global>("/admin/config/global"),
+      staleTime: 0,
+    });
+    reset(fresh);
+  }
   function change(index: number, patch: Partial<Model>) {
     setModels((current) =>
       current.map((m, i) => (i === index ? { ...m, ...patch } : m)),
@@ -117,7 +150,7 @@ function GlobalForm({ data }: { data: Global }) {
     setMessage("");
     try {
       await api("/admin/config/global", {
-        revision: data.revision,
+        revision: base.revision,
         modelCatalog: models,
         policy: {
           disabledTools: disabled
@@ -137,8 +170,8 @@ function GlobalForm({ data }: { data: Global }) {
           : {}),
       });
       setSecrets({});
+      await reload();
       setMessage("全局配置已保存");
-      await cache.invalidateQueries({ queryKey: ["admin", "global"] });
     } catch (e) {
       setFailed(true);
       setMessage(errorText(e));
@@ -150,7 +183,7 @@ function GlobalForm({ data }: { data: Global }) {
   return (
     <form className="settings-card" onSubmit={save}>
       <h2>模型与工具策略</h2>
-      <p>当前配置版本：{data.revision}。模型密钥仅可写入，保存后不会回显。</p>
+      <p>当前配置版本：{base.revision}。模型密钥仅可写入，保存后不会回显。</p>
       {models.map((model, index) => (
         <fieldset key={index} disabled={saving}>
           <legend>模型 {index + 1}</legend>
@@ -260,7 +293,10 @@ function GlobalForm({ data }: { data: Global }) {
           disabled={saving}
           onClick={() => {
             if (confirm("重新加载会丢弃此表单未保存的修改，是否继续？"))
-              void cache.resetQueries({ queryKey: ["admin", "global"] });
+              void reload().catch((e) => {
+                setFailed(true);
+                setMessage(errorText(e));
+              });
           }}
         >
           重新加载全局配置
@@ -270,12 +306,36 @@ function GlobalForm({ data }: { data: Global }) {
     </form>
   );
 }
-function DefaultsForm({ data }: { data: Configuration }) {
+function DefaultsForm({
+  data,
+  onDirty,
+}: {
+  data: Configuration;
+  onDirty: (dirty: boolean) => void;
+}) {
+  const [base, setBase] = useState(data);
   const cache = useQueryClient(),
     [defaults, setDefaults] = useState(data.agentDefaults),
     [saving, setSaving] = useState(false),
     [message, setMessage] = useState(""),
     [failed, setFailed] = useState(false);
+  const dirty = JSON.stringify(defaults) !== JSON.stringify(base.agentDefaults);
+  useEffect(() => onDirty(dirty), [dirty, onDirty]);
+  function reset(fresh: Configuration) {
+    setBase(fresh);
+    setDefaults(fresh.agentDefaults);
+  }
+  useEffect(() => {
+    if (!dirty) reset(data);
+  }, [data]);
+  async function reload() {
+    const fresh = await cache.fetchQuery({
+      queryKey: ["admin", "configuration"],
+      queryFn: () => api<Configuration>("/admin/configuration"),
+      staleTime: 0,
+    });
+    reset(fresh);
+  }
   const model = (defaults.model || {}) as {
     provider?: string;
     modelId?: string;
@@ -289,11 +349,11 @@ function DefaultsForm({ data }: { data: Configuration }) {
     try {
       await api(
         "/admin/configuration/defaults",
-        { ...defaults, expectedRevision: data.defaultsRevision },
+        { ...defaults, expectedRevision: base.defaultsRevision },
         "PUT",
       );
+      await reload();
       setMessage("Agent 默认配置已保存");
-      await cache.invalidateQueries({ queryKey: ["admin", "configuration"] });
     } catch (e) {
       setFailed(true);
       setMessage(errorText(e));
@@ -307,7 +367,7 @@ function DefaultsForm({ data }: { data: Configuration }) {
         <h2>新建 Agent 的默认配置</h2>
         <p>
           只影响后续新建 Agent，不批量修改现有 Agent。版本：
-          {data.defaultsRevision}
+          {base.defaultsRevision}
         </p>
         <fieldset disabled={saving}>
           <label>
@@ -394,8 +454,9 @@ function DefaultsForm({ data }: { data: Configuration }) {
             disabled={saving}
             onClick={() => {
               if (confirm("重新加载会丢弃未保存的 Agent 默认配置，是否继续？"))
-                void cache.resetQueries({
-                  queryKey: ["admin", "configuration"],
+                void reload().catch((e) => {
+                  setFailed(true);
+                  setMessage(errorText(e));
                 });
             }}
           >

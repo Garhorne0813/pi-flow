@@ -210,3 +210,8 @@ Issues and pull requests are welcome. Run relevant tests plus `npm run check` an
 无 OIDC 的本地演示：直接打开 Fastify 托管的 `/chat`，在登录页输入服务端配置的 `DEV_TOKEN`。
 令牌仅保存在当前页面内存中，刷新后需重新输入；退出会清除它。请仅在可信的本地环境或 HTTPS 下使用，
 不要把令牌放进 `VITE_*` 构建变量、URL 或公开构建产物。Vite 开发代理仍支持服务端 `CHAT_DEV_TOKEN`。
+
+OIDC 浏览器登录态采用内存存储，不将访问令牌写入 localStorage 或 sessionStorage。
+整页刷新或关闭页面后需要重新登录；身份提供方已有会话时，重新登录通常可复用其会话。
+聊天历史仍保存在服务端，重新登录后可打开原会话；未发送草稿按用户和会话保存在当前标签页的 sessionStorage。
+模拟认证测试用于验证 UI 隔离与事件处理，不证明真实 OIDC 刷新恢复、撤权或远程登出已验收。

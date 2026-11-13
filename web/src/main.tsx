@@ -39,7 +39,8 @@ import {
 } from "@tanstack/react-query";
 import { api, ApiError } from "./api/client";
 import { observeOidcSession } from "./api/oidcSession";
-import { submitRun } from "./chat/submitRun";
+import { allPages } from "./admin/shared";
+import { submitRun, resetSendScope, sendScope } from "./chat/submitRun";
 import { auth, login, logout, setLocalToken } from "./api/auth";
 import { useChatSession } from "./chat/useChatSession";
 import type { Item } from "./chat/model";
@@ -188,6 +189,8 @@ function App() {
     if (!auth) return;
     return observeOidcSession(auth, location.pathname === "/auth/callback", {
       onUser: () => {
+        resetSendScope();
+        creating.current = false;
         cache.clear();
         setAuthGeneration((n) => n + 1);
         setDraft("");
@@ -202,6 +205,8 @@ function App() {
       },
       onEnd: () => {
         setReady(false);
+        resetSendScope();
+        creating.current = false;
         cache.clear();
       },
       onError: (e) => setError(e instanceof Error ? e.message : "登录失败"),
@@ -240,6 +245,8 @@ function App() {
   useEffect(() => {
     if (identity.error instanceof ApiError && identity.error.status === 401) {
       setReady(false);
+      resetSendScope();
+      creating.current = false;
       cache.clear();
     }
   }, [identity.error]);
@@ -263,7 +270,7 @@ function App() {
   }
   const agents = useQuery({
     queryKey: ["agents", authGeneration],
-    queryFn: () => api<{ items: Agent[] }>("/agents"),
+    queryFn: async () => ({ items: await allPages<Agent>("/agents") }),
     enabled: ready && !!me,
   });
   const sessions = useQuery({
@@ -303,11 +310,14 @@ function App() {
       timeline.current.scrollTop = timeline.current.scrollHeight;
   }, [chat.projection, bottom]);
   const act = async (fn: () => Promise<unknown>) => {
+    const context = sendScope();
     setError("");
     try {
       await fn();
+      if (context !== sendScope()) return;
       await cache.invalidateQueries({ queryKey: ["sessions"] });
     } catch (e) {
+      if (context !== sendScope()) return;
       setError(e instanceof Error ? e.message : "请求失败");
     }
   };
@@ -318,22 +328,25 @@ function App() {
   async function submit() {
     if (!me || !draft.trim() || chat.busy || creating.current) return;
     if (!sid) {
+      const context = sendScope();
       creating.current = true;
       await act(async () => {
         const s = await api<Session>("/sessions", {
           agentId: agent,
           title: draft.slice(0, 80),
         });
+        if (context !== sendScope()) return;
         sessionStorage.setItem(
           "pi-flow-draft:" + me?.userId + ":" + s.id,
           draft,
         );
         navigate("/chat/" + s.id);
         await submitRun(s.id, draft);
+        if (context !== sendScope()) return;
         sessionStorage.removeItem("pi-flow-draft:" + me?.userId + ":" + s.id);
         setDraft("");
       });
-      creating.current = false;
+      if (context === sendScope()) creating.current = false;
       return;
     }
     if (await chat.send(draft)) saveDraft("");
@@ -353,6 +366,7 @@ function App() {
         <div className="brand">π Pi-Flow</div>
         <h1>与 Agent 一起工作</h1>
         <p>使用组织身份登录，访问个人对话与工作区。</p>
+        {auth && <p>登录凭据仅保存在内存中，刷新页面后需重新登录。</p>}
         {error && <p role="alert">{error}</p>}
         {auth ? (
           <button onClick={() => void login()}>登录</button>
@@ -362,6 +376,8 @@ function App() {
               e.preventDefault();
               setLocalToken(credential);
               setCredential("");
+              resetSendScope();
+              creating.current = false;
               cache.clear();
               setReady(true);
             }}
@@ -517,6 +533,8 @@ function App() {
               aria-label="退出登录"
               title="退出登录"
               onClick={() => {
+                resetSendScope();
+                creating.current = false;
                 cache.clear();
                 setReady(false);
                 void logout();
